@@ -275,6 +275,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "qupath-pipeline"
+version = "0.1.0"
+dependencies = [
+ "qupath-filters",
+ "qupath-slide",
+ "qupath-watershed",
+ "rayon",
+ "thiserror",
+]
+
+[[package]]
 name = "qupath-slide"
 version = "0.1.0"
 dependencies = [
