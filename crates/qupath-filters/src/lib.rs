@@ -6,21 +6,30 @@
 //! at 11.6% of cell-detection self time, the largest cost after the watershed
 //! queue.
 //!
-//! # Performance
+//! # Algorithm
 //!
-//! Measured at 1.90× ImageJ at radius 2 and 1.04× (parity) at radius 5, both
-//! threaded, on the same 512×512 workload (`docs/benchmarks/README.md`).
+//! The disc is decomposed into a union of nested rectangles (see [`plan`]), and
+//! each rectangle is filtered separably: a vertical pass folding whole source
+//! rows into a column accumulator, then a horizontal windowed maximum along
+//! that accumulator. Because the rectangle heights are nested, one accumulator
+//! grown outwards from the centre serves every rectangle, so a source row is
+//! read once per output row rather than once per kernel row.
 //!
-//! The algorithm is ImageJ's, not a better one: a lazy incremental extremum
-//! that rescans the kernel only when the column leaving it held the extremum,
-//! making the common case O(kernel height) rather than O(kernel area). The
-//! first version of this crate scanned the full kernel per pixel and was
-//! 7.6–35.6× *slower* than ImageJ; that history is kept in the benchmark notes
-//! because it is the clearest evidence in this repository that the algorithm,
+//! The consequence is that the per-pixel cost stops tracking the kernel and
+//! every inner loop becomes a slice-to-slice maximum over contiguous `f32`,
+//! which the compiler vectorises without any `unsafe`. `docs/benchmarks/README.md`
+//! records what that is worth, and the two earlier implementations it replaced
+//! — a naive area scan, then ImageJ's own incremental scheme — because the
+//! progression is the clearest evidence in this repository that the algorithm,
 //! not the language, is what decides.
 //!
-//! The margin over ImageJ therefore comes from layout and per-operation cost,
-//! and it narrows as the radius grows.
+//! # Reuse
+//!
+//! [`rank`] allocates a source copy per call, because filtering in place needs
+//! somewhere to keep the pixels it is still reading. A tile pipeline should
+//! hold a [`RankFilter`] and call [`RankFilter::apply_into`] with separate
+//! input and output tiles, which copies nothing and allocates nothing —
+//! allocation in the tile loop is a defect under §6 of the project guidelines.
 //!
 //! ```
 //! use qupath_filters::{rank, RankOp};
@@ -36,8 +45,11 @@
 use rayon::prelude::*;
 
 mod kernel;
+mod plan;
 
 pub use kernel::Kernel;
+
+use plan::Plan;
 
 /// Which rank statistic the filter computes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,165 +67,384 @@ pub enum RankOp {
 /// invents a background value, so a bright object touching the border stays
 /// bright rather than being eroded by imaginary zeros.
 ///
+/// This allocates a copy of `pixels` on every call. Callers filtering many
+/// tiles should use [`RankFilter`], which does not.
+///
 /// # Panics
 ///
 /// Panics if `width` is zero or does not divide `pixels.len()`.
 pub fn rank(pixels: &mut [f32], width: usize, radius: f64, op: RankOp) {
-    assert!(width > 0, "width must be non-zero");
-    assert_eq!(
-        pixels.len() % width,
-        0,
-        "width must divide the buffer length"
-    );
-
-    let height = pixels.len() / width;
-    let kernel = Kernel::new(radius);
-
-    // The filter reads a neighbourhood, so it cannot be done in place: a
-    // partially-written row would feed back into later pixels.
-    let source = pixels.to_vec();
-
-    // MIN is MAX with the sign flipped, as in ImageJ. Running one code path
-    // keeps the incremental logic below in a single place.
-    let sign = match op {
-        RankOp::Min => -1.0,
-        RankOp::Max => 1.0,
-    };
-
-    // Rows are independent: each reads the untouched `source` and writes only
-    // its own output row, so this parallelises without synchronisation. ImageJ
-    // threads the same way, and comparing a single-threaded port against a
-    // threaded original would not be a like-for-like measurement.
-    //
-    // Granularity is a row, not a pixel, per §6 of the guidelines. No float
-    // reduction crosses rows, so the result does not depend on how rayon splits
-    // the work — MIN and MAX select an existing value rather than accumulating.
-    let scan = Scan {
-        source: &source,
-        width,
-        height,
-        kernel: &kernel,
-        sign,
-    };
-    pixels
-        .par_chunks_mut(width)
-        .enumerate()
-        .for_each(|(y, row)| filter_row(&scan, row, y));
+    RankFilter::new().apply(pixels, width, radius, op);
 }
 
-/// The image geometry and kernel a row scan works against.
+/// A rank filter that owns its scratch space, for repeated application.
 ///
-/// These five values travel together through every helper below; grouping them
-/// keeps the incremental logic readable and the signatures short.
+/// The filter reads a neighbourhood, so it cannot overwrite a buffer it is
+/// still reading: filtering in place needs a copy of the source, and holding
+/// that copy here means a tile loop allocates once rather than once per tile.
+/// [`RankFilter::apply_into`] sidesteps the copy entirely by writing to a
+/// separate output. The decomposed kernel is cached alongside the buffers, so
+/// repeated calls at one radius do not rebuild it.
+#[derive(Debug, Default)]
+pub struct RankFilter {
+    /// Holds the caller's pixels during an in-place [`RankFilter::apply`], so
+    /// that the filter has an untouched image to read while it overwrites the
+    /// original. Unused by [`RankFilter::apply_into`].
+    staging: Vec<f32>,
+    /// The negated source for MIN, which has nowhere else to live. MAX does not
+    /// use it, and so copies nothing.
+    negated: Vec<f32>,
+    /// Cached decomposition, keyed on the radius that produced it.
+    plan: Option<(f64, Plan)>,
+}
+
+impl RankFilter {
+    /// Creates a filter with no scratch space yet allocated.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Applies the filter to `pixels`, in place, reusing this filter's buffers.
+    ///
+    /// Semantics are identical to [`rank`]; only the allocation behaviour
+    /// differs. In-place operation costs one copy of `pixels`, because the
+    /// filter reads a neighbourhood and cannot overwrite what it is still
+    /// reading. A tile pipeline that already has separate input and output
+    /// tiles should call [`RankFilter::apply_into`], which avoids that copy.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `width` is zero or does not divide `pixels.len()`.
+    pub fn apply(&mut self, pixels: &mut [f32], width: usize, radius: f64, op: RankOp) {
+        self.staging.clear();
+        self.staging.extend_from_slice(pixels);
+        let staging = std::mem::take(&mut self.staging);
+        self.apply_into(&staging, pixels, width, radius, op);
+        self.staging = staging;
+    }
+
+    /// Filters `source` into `out`, reusing this filter's buffers.
+    ///
+    /// `source` and `out` must be the same length and must not be the same
+    /// buffer; use [`RankFilter::apply`] to filter a buffer in place. For MAX
+    /// this copies nothing at all — the filter reads the caller's `source`
+    /// directly and writes straight to `out`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `width` is zero, does not divide the length, or if `source`
+    /// and `out` differ in length.
+    pub fn apply_into(
+        &mut self,
+        source: &[f32],
+        out: &mut [f32],
+        width: usize,
+        radius: f64,
+        op: RankOp,
+    ) {
+        assert!(width > 0, "width must be non-zero");
+        assert_eq!(
+            source.len(),
+            out.len(),
+            "source and output must describe the same image"
+        );
+        assert_eq!(
+            source.len() % width,
+            0,
+            "width must divide the buffer length"
+        );
+
+        let height = source.len() / width;
+        if height == 0 {
+            return;
+        }
+
+        if self
+            .plan
+            .as_ref()
+            .is_none_or(|(cached, _)| *cached != radius)
+        {
+            self.plan = Some((radius, Plan::for_radius(radius)));
+        }
+
+        // MIN is MAX on the negated image, as in ImageJ, which runs one code
+        // path with a flipped sign. Negation of an `f32` is exact, so this
+        // cannot perturb a result. MAX needs no negated copy and so reads the
+        // caller's buffer directly.
+        let source = match op {
+            RankOp::Max => source,
+            RankOp::Min => {
+                self.negated.clear();
+                self.negated.reserve(source.len());
+                self.negated.extend(source.iter().map(|value| -value));
+                &self.negated
+            }
+        };
+
+        let plan = &self.plan.as_ref().expect("plan set immediately above").1;
+        let scan = Scan {
+            source,
+            width,
+            height,
+            plan,
+            negate_output: matches!(op, RankOp::Min),
+        };
+
+        // Rows are independent: each reads the untouched source and writes only
+        // its own output row, so this parallelises without synchronisation.
+        // ImageJ threads the same way, and comparing a single-threaded port
+        // against a threaded original would not be a like-for-like measurement.
+        //
+        // Granularity is a row, not a pixel, per §6. No float reduction crosses
+        // rows, so the result does not depend on how rayon splits the work —
+        // MIN and MAX select an existing value rather than accumulating.
+        //
+        // `for_each_init` builds the per-row scratch once per rayon job rather
+        // than once per row. The scratch is O(width); the megabyte-scale buffer
+        // is `self.source`, which is reused across calls.
+        let scratch = || Scratch::new(width, plan.max_half_width());
+        out.par_chunks_mut(width)
+            .enumerate()
+            .for_each_init(scratch, |scratch, (y, out)| {
+                filter_row(&scan, scratch, out, y)
+            });
+    }
+}
+
+/// The image geometry and decomposed kernel a row filter works against.
 struct Scan<'a> {
     source: &'a [f32],
     width: usize,
     height: usize,
-    kernel: &'a Kernel,
-    /// `1.0` for MAX, `-1.0` for MIN. Flipping the sign lets one code path
-    /// serve both, as ImageJ does.
-    sign: f32,
-}
-
-/// Filters one row, carrying the running extremum across `x`.
-///
-/// This is ImageJ's lazy incremental scheme. A full area scan happens once per
-/// row; each step right then costs one column scan in the common case:
-///
-/// - if the entering column's extremum beats the running one, it *is* the new
-///   extremum, and nothing else need be read;
-/// - otherwise the leaving column decides. If its extremum is below the running
-///   one, the running extremum is still somewhere inside the kernel and stands;
-/// - only when the leaving column actually held the extremum must the area be
-///   rescanned.
-///
-/// So the per-pixel cost is O(kernel height), not O(kernel area), and the
-/// rescan is rare on real images. This is the difference the benchmark measures.
-///
-/// `out` is the single output row for `y`, not the whole image.
-fn filter_row(scan: &Scan<'_>, out: &mut [f32], y: usize) {
-    let mut running = f32::NEG_INFINITY;
-    let mut full_calculation = true;
-
-    for (x, out_pixel) in out.iter_mut().enumerate() {
-        if full_calculation {
-            running = scan.area_extremum(x, y, 0);
-        } else {
-            let entering = scan.side_extremum(x, y, true);
-            if entering >= running {
-                running = entering;
-            } else {
-                let leaving = scan.side_extremum(x, y, false);
-                if leaving >= running {
-                    // The extremum is leaving the kernel, so it has to be found
-                    // again. `entering` seeds the scan, and the rightmost column
-                    // is skipped because it is already accounted for.
-                    running = scan.area_extremum(x, y, 1).max(entering);
-                }
-            }
-        }
-        // After the first pixel of a row the incremental path is valid.
-        full_calculation = false;
-
-        *out_pixel = running * scan.sign;
-    }
+    plan: &'a Plan,
+    /// Set for MIN, where the source was negated on the way in and the output
+    /// has to be negated on the way out.
+    negate_output: bool,
 }
 
 impl Scan<'_> {
-    /// Scans the whole kernel at `(x, y)`, ignoring `ignore_right` columns at
-    /// the right edge.
-    fn area_extremum(&self, x: usize, y: usize, ignore_right: i32) -> f32 {
-        let mut best = f32::NEG_INFINITY;
-
-        for dy in -self.kernel.radius_rows()..=self.kernel.radius_rows() {
-            let half = self.kernel.half_width(dy);
-            if half < 0 {
-                continue;
-            }
-            let base = clamp_coord(y, dy, self.height) * self.width;
-            for dx in -half..=(half - ignore_right) {
-                let value = self.source[base + clamp_coord(x, dx, self.width)] * self.sign;
-                if value > best {
-                    best = value;
-                }
-            }
-        }
-
-        best
-    }
-
-    /// Scans the single column entering the kernel (`right`) or leaving it.
-    ///
-    /// Entering at `x` means the column at `x + half_width`; leaving means the
-    /// one at `x - half_width - 1`, which was inside the kernel at `x - 1`.
-    fn side_extremum(&self, x: usize, y: usize, right: bool) -> f32 {
-        let mut best = f32::NEG_INFINITY;
-
-        for dy in -self.kernel.radius_rows()..=self.kernel.radius_rows() {
-            let half = self.kernel.half_width(dy);
-            if half < 0 {
-                continue;
-            }
-            let base = clamp_coord(y, dy, self.height) * self.width;
-            let dx = if right { half } else { -half - 1 };
-            let value = self.source[base + clamp_coord(x, dx, self.width)] * self.sign;
-            if value > best {
-                best = value;
-            }
-        }
-
-        best
+    /// The source row at `y`, which must be in bounds.
+    fn row(&self, y: usize) -> &[f32] {
+        &self.source[y * self.width..(y + 1) * self.width]
     }
 }
 
-/// Offsets `coord` by `delta`, clamping to `[0, extent)` as ImageJ does.
+/// Row-sized working buffers, reused across every row a rayon job handles.
+struct Scratch {
+    /// Vertical maximum over the rows currently folded in, one entry per column.
+    column: Vec<f32>,
+    /// The column accumulator with its edges replicated, for the block scheme.
+    extended: Vec<f32>,
+    /// Per-block running maximum from the block start.
+    prefix: Vec<f32>,
+    /// Per-block running maximum to the block end.
+    suffix: Vec<f32>,
+}
+
+impl Scratch {
+    fn new(width: usize, max_half_width: usize) -> Self {
+        let extended = width + 2 * max_half_width;
+        Self {
+            column: vec![f32::NEG_INFINITY; width],
+            extended: vec![f32::NEG_INFINITY; extended],
+            prefix: vec![f32::NEG_INFINITY; extended],
+            suffix: vec![f32::NEG_INFINITY; extended],
+        }
+    }
+}
+
+/// Folds `value` into a running maximum.
+///
+/// Written as `value > acc` rather than [`f32::max`] deliberately: a `NaN`
+/// compares false against everything, so it is ignored and never becomes the
+/// running maximum. `f32::max` would return the other operand and let a `NaN`
+/// input propagate differently. Every accumulator below starts at negative
+/// infinity so that this holds uniformly.
 #[inline]
-fn clamp_coord(coord: usize, delta: i32, extent: usize) -> usize {
-    let shifted = coord as isize + delta as isize;
-    if shifted < 0 {
-        0
+fn fold(acc: &mut f32, value: f32) {
+    if value > *acc {
+        *acc = value;
+    }
+}
+
+/// Filters one row: `out` is the single output row for `y`.
+///
+/// The column accumulator holds the vertical maximum over rows
+/// `y - grown ..= y + grown`. Rectangles are visited shortest first, so the
+/// accumulator only ever grows, and each source row is folded in once.
+fn filter_row(scan: &Scan<'_>, scratch: &mut Scratch, out: &mut [f32], y: usize) {
+    let Scratch {
+        column,
+        extended,
+        prefix,
+        suffix,
+    } = scratch;
+
+    out.fill(f32::NEG_INFINITY);
+    column.fill(f32::NEG_INFINITY);
+    fold_row(column, scan.row(y));
+
+    // Rows already folded in. Once these stick at the image edge the clamped
+    // read repeats, and folding the same row again cannot change the maximum,
+    // so it is skipped.
+    let (mut lowest, mut highest) = (y, y);
+
+    for rect in scan.plan.rects() {
+        for distance in 1..=rect.half_height {
+            let above = y.saturating_sub(distance);
+            if above != lowest {
+                fold_row(column, scan.row(above));
+                lowest = above;
+            }
+            let below = (y + distance).min(scan.height - 1);
+            if below != highest {
+                fold_row(column, scan.row(below));
+                highest = below;
+            }
+        }
+        horizontal_max(column, out, rect.half_width, extended, prefix, suffix);
+    }
+
+    if scan.negate_output {
+        for value in out.iter_mut() {
+            *value = -*value;
+        }
+    }
+}
+
+/// `column[x] = max(column[x], row[x])` for every column.
+///
+/// Both slices are contiguous and equal-length, so this compiles to a plain
+/// vectorised maximum — the reason the decomposition is worth having.
+#[inline]
+fn fold_row(column: &mut [f32], row: &[f32]) {
+    for (acc, &value) in column.iter_mut().zip(row) {
+        fold(acc, value);
+    }
+}
+
+/// `out[x] = max(out[x], max over dx in [-half_width, half_width] of
+/// column[clamp(x + dx)])`.
+fn horizontal_max(
+    column: &[f32],
+    out: &mut [f32],
+    half_width: usize,
+    extended: &mut [f32],
+    prefix: &mut [f32],
+    suffix: &mut [f32],
+) {
+    // Two ways to do this, and the cheaper one depends on the window. Shifting
+    // the row costs `2 * half_width + 1` passes; the block scheme below costs
+    // four regardless of width. They cross at `half_width == 2` (five passes
+    // against four), so 3 is the first width where the block scheme is clearly
+    // ahead — and small windows dominate at the radii cell detection uses.
+    if half_width < 3 {
+        for dx in -(half_width as isize)..=(half_width as isize) {
+            fold_shifted(out, column, dx);
+        }
     } else {
-        (shifted as usize).min(extent - 1)
+        horizontal_max_blocks(column, out, half_width, extended, prefix, suffix);
+    }
+}
+
+/// `out[x] = max(out[x], column[clamp(x + dx)])`.
+///
+/// Split into three ranges so the middle one — almost the whole row — is a
+/// contiguous slice against a contiguous slice with no clamping arithmetic.
+fn fold_shifted(out: &mut [f32], column: &[f32], dx: isize) {
+    let width = column.len();
+    let shift = dx.unsigned_abs();
+
+    if shift >= width {
+        // The shift moves every read past an edge, so the clamped value is the
+        // same for the whole row. Only reachable on rows narrower than the
+        // kernel, but that is exactly where the general case below would index
+        // out of range.
+        let value = if dx < 0 { column[0] } else { column[width - 1] };
+        for acc in out.iter_mut() {
+            fold(acc, value);
+        }
+        return;
+    }
+
+    // `x + dx` is inside the row for x in [lo, hi), reading from `start`;
+    // outside it the clamped read is the first or last pixel.
+    let (lo, hi, start) = if dx < 0 {
+        (shift, width, 0)
+    } else {
+        (0, width - shift, shift)
+    };
+
+    for acc in &mut out[..lo] {
+        fold(acc, column[0]);
+    }
+    for (acc, &value) in out[lo..hi].iter_mut().zip(&column[start..]) {
+        fold(acc, value);
+    }
+    for acc in &mut out[hi..] {
+        fold(acc, column[width - 1]);
+    }
+}
+
+/// van Herk / Gil-Werman windowed maximum: O(1) per pixel, whatever the width.
+///
+/// The row is cut into blocks exactly as long as the window. Within a block,
+/// `prefix[e]` is the maximum from the block start to `e` and `suffix[e]` the
+/// maximum from `e` to the block end. Any window of that length spans at most
+/// two adjacent blocks, so `max(suffix[left], prefix[right])` is exactly the
+/// window maximum and never reaches beyond it — which is why the block length
+/// must equal the window length and not merely exceed it.
+///
+/// Edge clamping is handled by replicating the first and last pixel into an
+/// extended row, so the scan itself has no boundary cases.
+fn horizontal_max_blocks(
+    column: &[f32],
+    out: &mut [f32],
+    half_width: usize,
+    extended: &mut [f32],
+    prefix: &mut [f32],
+    suffix: &mut [f32],
+) {
+    let width = column.len();
+    let span = 2 * half_width + 1;
+    let len = width + 2 * half_width;
+
+    let extended = &mut extended[..len];
+    extended[..half_width].fill(column[0]);
+    extended[half_width..half_width + width].copy_from_slice(column);
+    extended[half_width + width..].fill(column[width - 1]);
+
+    let prefix = &mut prefix[..len];
+    let suffix = &mut suffix[..len];
+    for start in (0..len).step_by(span) {
+        let end = (start + span).min(len);
+
+        let mut running = f32::NEG_INFINITY;
+        for (acc, &value) in prefix[start..end].iter_mut().zip(&extended[start..end]) {
+            fold(&mut running, value);
+            *acc = running;
+        }
+
+        let mut running = f32::NEG_INFINITY;
+        for (acc, &value) in suffix[start..end]
+            .iter_mut()
+            .zip(&extended[start..end])
+            .rev()
+        {
+            fold(&mut running, value);
+            *acc = running;
+        }
+    }
+
+    for ((acc, &left), &right) in out
+        .iter_mut()
+        .zip(&suffix[..width])
+        .zip(&prefix[2 * half_width..])
+    {
+        let mut best = left;
+        fold(&mut best, right);
+        fold(acc, best);
     }
 }
 
@@ -272,6 +503,73 @@ mod tests {
         }
     }
 
+    /// The definition, applied literally: max over every kernel offset with
+    /// clamped reads. Slow, obviously correct, and independent of everything
+    /// the fast path does.
+    fn reference(pixels: &[f32], width: usize, radius: f64, op: RankOp) -> Vec<f32> {
+        let height = pixels.len() / width;
+        let kernel = Kernel::new(radius);
+        let sign = if matches!(op, RankOp::Min) { -1.0 } else { 1.0 };
+        let mut out = vec![0.0f32; pixels.len()];
+
+        for y in 0..height {
+            for x in 0..width {
+                let mut best = f32::NEG_INFINITY;
+                for dy in -kernel.radius_rows()..=kernel.radius_rows() {
+                    let half = kernel.half_width(dy);
+                    if half < 0 {
+                        continue;
+                    }
+                    let sy = (y as isize + dy as isize).clamp(0, height as isize - 1) as usize;
+                    for dx in -half..=half {
+                        let sx = (x as isize + dx as isize).clamp(0, width as isize - 1) as usize;
+                        fold(&mut best, pixels[sy * width + sx] * sign);
+                    }
+                }
+                out[y * width + x] = best * sign;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn matches_the_literal_definition_over_many_shapes() {
+        // The decomposition, the block scheme and the edge clamping all have to
+        // agree with the definition at once. Non-square images and radii on
+        // both sides of the block-scheme threshold are the cases where an
+        // off-by-one in any of the three would survive the smaller tests above.
+        for &(width, height) in &[(1, 9), (9, 1), (13, 7), (7, 13), (32, 32), (5, 5)] {
+            let pixels: Vec<f32> = (0..width * height)
+                .map(|i| ((i * 37) % 101) as f32 - 50.0)
+                .collect();
+            for radius in [0.0, 1.0, 1.5, 2.0, 2.5, 3.0, 5.0, 8.0, 15.0] {
+                for op in [RankOp::Min, RankOp::Max] {
+                    let mut actual = pixels.clone();
+                    rank(&mut actual, width, radius, op);
+                    assert_eq!(
+                        actual,
+                        reference(&pixels, width, radius, op),
+                        "{op:?} radius {radius} on {width}x{height}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nan_inputs_are_ignored_rather_than_propagated() {
+        // Not pinned against ImageJ — no recorded fixture contains NaN — but
+        // pinned here because the accumulator's comparison order decides it,
+        // and the previous implementation ignored NaN the same way.
+        let mut pixels = vec![1.0f32; 25];
+        pixels[12] = f32::NAN;
+        rank(&mut pixels, 5, 1.0, RankOp::Max);
+        assert!(
+            pixels.iter().all(|&v| v == 1.0),
+            "a NaN must not become the maximum"
+        );
+    }
+
     #[test]
     fn result_is_independent_of_thread_count() {
         // §5 requires parallel work to be reproducible. MIN/MAX select an
@@ -292,6 +590,56 @@ mod tests {
             pool.install(|| rank(&mut pixels, width, 3.0, RankOp::Max));
             assert_eq!(pixels, reference, "diverged with {threads} threads");
         }
+    }
+
+    #[test]
+    fn a_reused_filter_matches_a_fresh_one() {
+        // The point of `RankFilter` is that the buffers survive between calls;
+        // stale contents leaking into a later result would be the failure mode.
+        let width = 16;
+        let mut filter = RankFilter::new();
+        for radius in [2.0, 5.0, 2.0, 1.0] {
+            for len in [width * 16, width * 4, width * 16] {
+                let source: Vec<f32> = (0..len).map(|i| ((i * 13) % 71) as f32).collect();
+
+                let mut reused = source.clone();
+                filter.apply(&mut reused, width, radius, RankOp::Max);
+
+                let mut fresh = source.clone();
+                rank(&mut fresh, width, radius, RankOp::Max);
+
+                assert_eq!(reused, fresh, "radius {radius}, {len} pixels");
+            }
+        }
+    }
+
+    #[test]
+    fn filtering_into_a_buffer_matches_filtering_in_place() {
+        // `apply_into` is the path that copies nothing for MAX, so it is also
+        // the path where a missing copy would show up as reading half-written
+        // data. Both ops, both sides of the block-scheme threshold.
+        let width = 24;
+        let source: Vec<f32> = (0..width * 20).map(|i| ((i * 29) % 83) as f32).collect();
+        let mut filter = RankFilter::new();
+
+        for radius in [1.0, 2.0, 5.0, 9.0] {
+            for op in [RankOp::Min, RankOp::Max] {
+                let mut in_place = source.clone();
+                filter.apply(&mut in_place, width, radius, op);
+
+                let mut out = vec![0.0f32; source.len()];
+                filter.apply_into(&source, &mut out, width, radius, op);
+
+                assert_eq!(out, in_place, "{op:?} radius {radius}");
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "same image")]
+    fn mismatched_output_length_panics() {
+        let mut out = vec![0.0f32; 8];
+        RankFilter::new().apply_into(&[1.0; 9], &mut out, 3, 1.0, RankOp::Max);
     }
 
     #[test]

@@ -14,14 +14,17 @@ public class BenchRankFilter {
         int width = 512;
         int height = 512;
         int warmup = 20;
-        int timed = 50;
+        int timed = 60;
 
         float[] source = new float[width * height];
         for (int i = 0; i < source.length; i++) {
             source[i] = (i * 37) % 251;
         }
 
-        for (double radius : new double[]{2.0, 5.0}) {
+        // 2.0 and 5.0 are the historical pair. The rest exist to show how each
+        // implementation scales with the kernel, which is the axis on which the
+        // Rust side changed.
+        for (double radius : new double[]{1.0, 2.0, 3.0, 5.0, 8.0, 10.0, 20.0}) {
             // Warm the JIT before timing; these iterations are discarded.
             for (int i = 0; i < warmup; i++) {
                 run(source, width, height, radius);
@@ -38,8 +41,13 @@ public class BenchRankFilter {
 
             java.util.Arrays.sort(times);
             double medianMs = times[timed / 2] / 1e6;
-            System.out.printf("rank_512x512/max_r%.0f  median %.3f ms  (%.3f Melem/s)  guard=%.1f%n",
-                    radius, medianMs, (width * height) / (medianMs * 1000.0), guard);
+            // The minimum is reported alongside the median because this machine
+            // is not quiet: under load the median measures contention as much
+            // as the filter, while the minimum estimates the uncontended cost.
+            // The Rust side reports the same statistic, so the two compare.
+            double minMs = times[0] / 1e6;
+            System.out.printf("rank_512x512/max_r%.0f  min %.3f ms  median %.3f ms  (%.3f Melem/s at min)  guard=%.1f%n",
+                    radius, minMs, medianMs, (width * height) / (minMs * 1000.0), guard);
         }
 
         // RankFilters leaves non-daemon worker threads alive, so the JVM does

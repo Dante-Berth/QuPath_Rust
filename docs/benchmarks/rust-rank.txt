@@ -1,23 +1,88 @@
-running 12 tests
-Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 7.3s, enable flat sampling, or reduce sample count to 50.
-rank_512x512/max_r2     time:   [685.17 µs 690.56 µs 696.58 µs]
-                        thrpt:  [376.33 Melem/s 379.61 Melem/s 382.60 Melem/s]
+
+running 20 tests
+test kernel::tests::areas_match_the_recorded_kernels ... ignored
+test kernel::tests::imagej_radius_adjustments_change_the_area ... ignored
+test kernel::tests::out_of_range_rows_are_empty ... ignored
+test kernel::tests::radius_one_is_a_full_three_by_three ... ignored
+test kernel::tests::rows_are_symmetric ... ignored
+test plan::tests::heights_ascend_so_the_accumulator_only_grows ... ignored
+test plan::tests::radius_five_is_four_rectangles ... ignored
+test plan::tests::rectangles_reconstruct_the_kernel_exactly ... ignored
+test tests::a_flat_image_is_unchanged ... ignored
+test tests::a_reused_filter_matches_a_fresh_one ... ignored
+test tests::edges_clamp_rather_than_darkening ... ignored
+test tests::filtering_into_a_buffer_matches_filtering_in_place ... ignored
+test tests::matches_the_literal_definition_over_many_shapes ... ignored
+test tests::max_dilates_an_impulse_into_the_kernel ... ignored
+test tests::min_and_max_bracket_the_input ... ignored
+test tests::min_erodes_a_single_dark_pixel ... ignored
+test tests::mismatched_output_length_panics - should panic ... ignored
+test tests::nan_inputs_are_ignored_rather_than_propagated ... ignored
+test tests::ragged_buffer_panics - should panic ... ignored
+test tests::result_is_independent_of_thread_count ... ignored
+
+test result: ok. 0 passed; 0 failed; 20 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+rank_512x512/max_r1     time:   [54.919 µs 61.307 µs 68.431 µs]
+                        thrpt:  [3.8308 Gelem/s 4.2759 Gelem/s 4.7733 Gelem/s]
                  change:
-                        time:   [-8.1453% +5.9845% +22.182%] (p = 0.45 > 0.05)
-                        thrpt:  [-18.155% -5.6466% +8.8676%]
-                        No change in performance detected.
-Found 16 outliers among 100 measurements (16.00%)
-  3 (3.00%) low mild
-  3 (3.00%) high mild
-  10 (10.00%) high severe
-Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 7.5s, enable flat sampling, or reduce sample count to 50.
-rank_512x512/max_r5     time:   [1.4251 ms 1.4362 ms 1.4489 ms]
-                        thrpt:  [180.93 Melem/s 182.53 Melem/s 183.95 Melem/s]
+                        time:   [+1.4115% +7.4604% +14.816%] (p = 0.02 < 0.05)
+                        thrpt:  [-12.904% -6.9425% -1.3919%]
+                        Performance has regressed.
+Found 9 outliers among 100 measurements (9.00%)
+  2 (2.00%) high mild
+  7 (7.00%) high severe
+rank_512x512/max_r2     time:   [70.907 µs 76.356 µs 82.273 µs]
+                        thrpt:  [3.1863 Gelem/s 3.4332 Gelem/s 3.6970 Gelem/s]
                  change:
-                        time:   [-11.185% -8.2576% -5.2861%] (p = 0.00 < 0.05)
-                        thrpt:  [+5.5811% +9.0008% +12.593%]
+                        time:   [+3.7053% +8.8280% +14.115%] (p = 0.00 < 0.05)
+                        thrpt:  [-12.369% -8.1119% -3.5729%]
+                        Performance has regressed.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+rank_512x512/max_r3     time:   [151.59 µs 160.25 µs 169.70 µs]
+                        thrpt:  [1.5448 Gelem/s 1.6358 Gelem/s 1.7293 Gelem/s]
+                 change:
+                        time:   [+7.8751% +14.534% +20.608%] (p = 0.00 < 0.05)
+                        thrpt:  [-17.087% -12.690% -7.3002%]
+                        Performance has regressed.
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+rank_512x512/max_r5     time:   [247.64 µs 258.89 µs 271.60 µs]
+                        thrpt:  [965.18 Melem/s 1.0126 Gelem/s 1.0586 Gelem/s]
+                 change:
+                        time:   [+3.7116% +6.5641% +9.9492%] (p = 0.00 < 0.05)
+                        thrpt:  [-9.0489% -6.1598% -3.5788%]
+                        Performance has regressed.
+Found 9 outliers among 100 measurements (9.00%)
+  5 (5.00%) high mild
+  4 (4.00%) high severe
+rank_512x512/max_r8     time:   [366.36 µs 378.18 µs 392.56 µs]
+                        thrpt:  [667.78 Melem/s 693.18 Melem/s 715.53 Melem/s]
+                 change:
+                        time:   [-15.691% -12.972% -10.191%] (p = 0.00 < 0.05)
+                        thrpt:  [+11.348% +14.906% +18.611%]
                         Performance has improved.
-Found 7 outliers among 100 measurements (7.00%)
-  2 (2.00%) low mild
-  3 (3.00%) high mild
-  2 (2.00%) high severe
+Found 9 outliers among 100 measurements (9.00%)
+  5 (5.00%) high mild
+  4 (4.00%) high severe
+rank_512x512/max_r10    time:   [634.37 µs 651.58 µs 671.16 µs]
+                        thrpt:  [390.59 Melem/s 402.32 Melem/s 413.23 Melem/s]
+                 change:
+                        time:   [+23.881% +28.589% +32.889%] (p = 0.00 < 0.05)
+                        thrpt:  [-24.749% -22.233% -19.277%]
+                        Performance has regressed.
+Found 10 outliers among 100 measurements (10.00%)
+  7 (7.00%) high mild
+  3 (3.00%) high severe
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 7.8s, enable flat sampling, or reduce sample count to 50.
+rank_512x512/max_r20    time:   [1.5142 ms 1.5413 ms 1.5695 ms]
+                        thrpt:  [167.03 Melem/s 170.08 Melem/s 173.12 Melem/s]
+                 change:
+                        time:   [+14.494% +17.116% +19.614%] (p = 0.00 < 0.05)
+                        thrpt:  [-16.398% -14.615% -12.660%]
+                        Performance has regressed.
+Found 4 outliers among 100 measurements (4.00%)
+  4 (4.00%) high mild
+

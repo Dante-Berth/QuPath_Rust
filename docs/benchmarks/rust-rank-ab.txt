@@ -1,0 +1,11 @@
+512x512 f32 MAX, minimum of 200 interleaved repetitions, microseconds
+
+radius    previous    in-place        into   speedup
+          (1 copy)    (1 copy)  (0 copies)  in-place
+     1       439.2       109.6        57.2     4.01x
+     2       630.1       122.0        69.9     5.17x
+     3       823.0       158.5       111.1     5.19x
+     5      1296.4       214.8       165.2     6.04x
+     8      2251.9       313.9       264.5     7.17x
+    10      2810.6       411.4       337.1     6.83x
+    20      8436.2      1003.2       915.1     8.41x

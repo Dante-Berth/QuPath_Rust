@@ -1,4 +1,4 @@
 machine: Linux 6.8.0-101-generic
 cpu: 13th Gen Intel(R) Core(TM) i7-13800H
-jdk: openjdk version "25.0.4" 2026-07-21 LTS
-recorded: 2026-08-09T13:18:03Z
+jdk: openjdk version "25.0.3" 2026-04-21
+recorded: 2026-08-09T19:59:05Z

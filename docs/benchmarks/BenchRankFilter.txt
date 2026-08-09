@@ -1,2 +1,7 @@
-rank_512x512/max_r2  median 1,315 ms  (199,312 Melem/s)  guard=11900,0
-rank_512x512/max_r5  median 1,492 ms  (175,662 Melem/s)  guard=11900,0
+rank_512x512/max_r1  min 1,060 ms  median 1,221 ms  (247,289 Melem/s at min)  guard=9360,0
+rank_512x512/max_r2  min 0,790 ms  median 1,263 ms  (331,905 Melem/s at min)  guard=14280,0
+rank_512x512/max_r3  min 0,680 ms  median 0,963 ms  (385,256 Melem/s at min)  guard=14280,0
+rank_512x512/max_r5  min 0,903 ms  median 1,366 ms  (290,457 Melem/s at min)  guard=14280,0
+rank_512x512/max_r8  min 1,053 ms  median 1,612 ms  (248,896 Melem/s at min)  guard=14940,0
+rank_512x512/max_r10  min 1,265 ms  median 1,427 ms  (207,256 Melem/s at min)  guard=14940,0
+rank_512x512/max_r20  min 3,414 ms  median 3,788 ms  (76,793 Melem/s at min)  guard=15000,0
