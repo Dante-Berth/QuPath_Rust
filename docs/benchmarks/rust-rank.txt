@@ -1,20 +1,23 @@
-running 11 tests
-rank_512x512/max_r2     time:   [9.9321 ms 9.9544 ms 9.9786 ms]
-                        thrpt:  [26.271 Melem/s 26.334 Melem/s 26.394 Melem/s]
+running 12 tests
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 7.3s, enable flat sampling, or reduce sample count to 50.
+rank_512x512/max_r2     time:   [685.17 µs 690.56 µs 696.58 µs]
+                        thrpt:  [376.33 Melem/s 379.61 Melem/s 382.60 Melem/s]
                  change:
-                        time:   [+0.1452% +0.3902% +0.6686%] (p = 0.00 < 0.05)
-                        thrpt:  [-0.6641% -0.3887% -0.1450%]
-                        Change within noise threshold.
-Found 3 outliers among 100 measurements (3.00%)
-  2 (2.00%) high mild
-  1 (1.00%) high severe
-Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 5.4s, or reduce sample count to 90.
-rank_512x512/max_r5     time:   [53.042 ms 53.086 ms 53.135 ms]
-                        thrpt:  [4.9335 Melem/s 4.9381 Melem/s 4.9422 Melem/s]
+                        time:   [-8.1453% +5.9845% +22.182%] (p = 0.45 > 0.05)
+                        thrpt:  [-18.155% -5.6466% +8.8676%]
+                        No change in performance detected.
+Found 16 outliers among 100 measurements (16.00%)
+  3 (3.00%) low mild
+  3 (3.00%) high mild
+  10 (10.00%) high severe
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 7.5s, enable flat sampling, or reduce sample count to 50.
+rank_512x512/max_r5     time:   [1.4251 ms 1.4362 ms 1.4489 ms]
+                        thrpt:  [180.93 Melem/s 182.53 Melem/s 183.95 Melem/s]
                  change:
-                        time:   [-0.3334% -0.1825% -0.0406%] (p = 0.02 < 0.05)
-                        thrpt:  [+0.0406% +0.1828% +0.3346%]
-                        Change within noise threshold.
-Found 6 outliers among 100 measurements (6.00%)
-  5 (5.00%) high mild
-  1 (1.00%) high severe
+                        time:   [-11.185% -8.2576% -5.2861%] (p = 0.00 < 0.05)
+                        thrpt:  [+5.5811% +9.0008% +12.593%]
+                        Performance has improved.
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+  2 (2.00%) high severe

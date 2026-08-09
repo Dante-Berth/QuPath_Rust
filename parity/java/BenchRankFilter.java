@@ -41,6 +41,11 @@ public class BenchRankFilter {
             System.out.printf("rank_512x512/max_r%.0f  median %.3f ms  (%.3f Melem/s)  guard=%.1f%n",
                     radius, medianMs, (width * height) / (medianMs * 1000.0), guard);
         }
+
+        // RankFilters leaves non-daemon worker threads alive, so the JVM does
+        // not exit on its own. Everything is written by now.
+        System.out.flush();
+        System.exit(0);
     }
 
     private static float[] run(float[] source, int width, int height, double radius) {

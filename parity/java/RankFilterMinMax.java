@@ -40,6 +40,11 @@ public class RankFilterMinMax {
         out.setLength(out.length() - 2);
         out.append("\n  ]\n}\n");
         System.out.print(out);
+
+        // RankFilters leaves non-daemon worker threads alive, so the JVM would
+        // otherwise hang here with the fixture already fully written.
+        System.out.flush();
+        System.exit(0);
     }
 
     /** A ramp with a couple of extrema, so MIN and MAX differ everywhere. */

@@ -111,47 +111,85 @@ The honest end-to-end number today remains the one in `docs/profiles/README.md`:
 **15.87 s** for QuPath cell detection on a 4000×4000 region, unchanged, because
 no ported code is in that path.
 
-## Rank filter (MIN/MAX) — the Rust port is SLOWER
+## Rank filter (MIN/MAX)
 
 The profile puts `RankFilters.getSideMax` and `getAreaMax` at 11.6% of
-cell-detection self time, so a port looked worthwhile. Measured, it is not:
+cell-detection self time. This is the record of porting it, including the two
+intermediate versions that lost, because the losses are the informative part.
 
-| Radius | ImageJ | Rust (this port) | |
-| --- | ---: | ---: | --- |
-| 2.0 | 1.32 ms | 9.95 ms | **7.6× slower** |
-| 5.0 | 1.49 ms | 53.09 ms | **35.6× slower** |
+| Radius | ImageJ | Naive O(area) | + incremental | + rayon | vs ImageJ |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2.0 | 1.32 ms | 9.95 ms | 4.79 ms | **0.691 ms** | **1.90× faster** |
+| 5.0 | 1.49 ms | 53.09 ms | 11.24 ms | **1.436 ms** | **1.04× faster** |
+
+Run-to-run variation on the parallel figures is a few percent, so treat the
+radius-5 result as parity with ImageJ rather than a win.
 
 512×512 `f32`, MAX. ImageJ: median of 50 timed iterations after 20 warmup, JVM
-startup excluded. Rust: criterion median, `target-cpu=x86-64-v3`. Raw output in
-`BenchRankFilter.txt` and `rust-rank.txt`.
+startup excluded, and ImageJ's own threading left enabled. Rust: criterion
+median, `target-cpu=x86-64-v3`, 20 cores. Raw output in `BenchRankFilter.txt`
+and `rust-rank.txt`.
 
-### Why
+### The first version was 7.6–35.6× slower
 
-Two reasons, and the algorithmic one dominates:
+Writing the obvious thing — scan the whole kernel per pixel — lost badly, and
+the scaling said why. Growing the kernel 4.2× in area (radius 2 → 5, 21 → 89
+pixels) slowed ImageJ by 1.13× and the naive port by 5.34×, tracking the area
+exactly. ImageJ was not doing the obvious thing.
 
-- **ImageJ uses a running min/max; this port does not.** As the kernel slides
-  one column, ImageJ updates the extremum incrementally instead of rescanning —
-  O(1) per pixel against O(kernel area). The scaling shows it plainly: when the
-  kernel grows 4.2× in area (radius 2 → 5, 21 → 89 pixels), ImageJ slows by
-  1.13× while this port slows by 5.34×, tracking the area exactly.
-- **ImageJ's `RankFilters` is multithreaded.** This port is single-threaded.
+**Rust was never the variable.** ImageJ was running ~4 operations per pixel in
+Java while the port ran 89 in Rust. Rust makes each operation faster; it does
+not make 89 fewer than 4. This is §0's ordering measured from the wrong side.
 
-This is §0 of the guidelines demonstrated from the wrong side: the speedup comes
-from doing less work, and Rust does not supply it. A naive O(area) filter in
-Rust loses to a smarter O(1) algorithm in Java, by a lot.
+### What ImageJ actually does
 
-### Status
+Not van Herk — a *lazy* incremental extremum, read from `RankFilters.java`
+rather than guessed. Sliding one column right:
 
-**The port is kept for its parity value, not its speed**, and is not on any hot
-path. Its 42 recorded cases pin ImageJ's kernel geometry exactly — including the
-two radius bands ImageJ nudges (`[1.5, 1.75)` → 1.75, `[2.5, 2.85)` → 2.85) and
-the `r² + 1` cutoff that makes radius 1 a full 3×3 square. That is the hard part
-of the algorithm and it is now captured in fixtures, so a running-extremum
-rewrite can be checked against it rather than against a fresh reading of ImageJ.
+1. if the entering column's extremum beats the running one, it **is** the new
+   extremum, and nothing else is read;
+2. otherwise the leaving column decides — if its extremum is below the running
+   one, the running extremum is still inside the kernel and stands;
+3. only when the leaving column *held* the extremum is a full rescan needed.
 
-Replacing this with a van Herk/Gil-Werman running extremum is the obvious next
-step for this filter. Until that is measured to beat ImageJ, **no speedup should
-be claimed for rank filtering**, and this section stands as the record of it.
+The rescan is rare on real images, so the common case is O(kernel height), not
+O(kernel area). Implementing this took the port from 9.95 ms to 4.79 ms at
+radius 2, and from 53.09 ms to 11.24 ms at radius 5.
+
+### Then parallelism, for a like-for-like comparison
+
+Still 3.6× behind at that point, and the remaining difference was structural:
+`RankFilters` threads its work and the port did not. Comparing a
+single-threaded port against a threaded original is not a like-for-like
+measurement.
+
+Rows are independent — each reads the untouched source and writes only its own
+output row — so `par_chunks_mut` parallelises them without synchronisation, at
+row granularity per §6. MIN and MAX select an existing value rather than
+accumulating, so no float reduction crosses a row boundary and the result does
+not depend on how rayon splits the work; a test asserts bit-identical output at
+1, 2, and 8 threads.
+
+### What the 1.9× is and is not
+
+It is a like-for-like comparison: same workload, same machine, both sides
+threaded, same algorithm class, identical output on all 42 parity cases. The
+margin comes from layout and lower per-operation cost, which is the 1–3× §0
+predicts for equivalent code — **not** from a better algorithm, because the
+algorithm is ImageJ's.
+
+It shrinks as the radius grows (1.90× at r=2, 1.04× at r=5): the larger kernel
+spends more time in the column scans, where ImageJ's cache-stripe layout does
+the same work as this port. **At radius 5 this is parity, not a win**, and at
+larger radii ImageJ may well come out ahead.
+
+The radius that matters is whichever `WatershedCellDetection` actually passes —
+it calls `rank` with several, derived from the user's cell-size parameters — so
+the useful figure for a real pipeline sits somewhere between these two, closer
+to parity than to 1.9×.
+
+And it remains 11.6% of one stage. End-to-end detection time is unchanged —
+see below.
 
 ## Environment
 
