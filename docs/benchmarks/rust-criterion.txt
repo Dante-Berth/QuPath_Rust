@@ -1,0 +1,11 @@
+measurement/scan        time:   [388.19 µs 388.72 µs 389.35 µs]
+                        thrpt:  [2.5684 Gelem/s 2.5725 Gelem/s 2.5761 Gelem/s]
+                 change:
+--
+measurement/filter      time:   [78.171 µs 78.439 µs 78.759 µs]
+                        thrpt:  [12.697 Gelem/s 12.749 Gelem/s 12.792 Gelem/s]
+                 change:
+--
+measurement/filter_to_indices
+                        time:   [402.68 µs 403.77 µs 404.79 µs]
+                        thrpt:  [2.4704 Gelem/s 2.4766 Gelem/s 2.4834 Gelem/s]

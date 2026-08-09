@@ -1,0 +1,11 @@
+{
+  "n_objects": 1000000,
+  "n_features": 20,
+  "warmup_iters": 20,
+  "timed_iters": 50,
+  "list_type": "GENERAL",
+  "build_ms": 1593.632,
+  "scan_ms": {"median": 43.6146, "min": 42.9716},
+  "filter_ms": {"median": 43.8436, "min": 43.1832},
+  "jvm": "25.0.4+7-LTS"
+}
