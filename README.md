@@ -22,13 +22,36 @@ to reproduce its behaviour, which makes it a derivative work.
 
 ## Status
 
-Early. The columnar object table (`crates/qupath-objects`) exists and is tested
-against QuPath's documented semantics. Measurement computation, parity
-harness, and benchmarks are in progress.
+Five crates, four of them checked against fixtures recorded from a real QuPath
+build:
+
+| Crate | Does | Parity |
+| --- | --- | --- |
+| `qupath-objects` | Columnar detection/measurement table | recorded |
+| `qupath-watershed` | Marker-controlled flood, bucket queue | recorded |
+| `qupath-filters` | Circular-kernel MIN/MAX rank filter | recorded, 42 cases |
+| `qupath-slide` | Aperio SVS / tiled TIFF reader, pure Rust | recorded, 5 regions |
+| `qupath-pipeline` | Streams slide tiles through the above | **none yet** |
+
+`qupath-pipeline` reads real slide pixels and runs the ported stages over them
+with bounded memory, but it is **not** `WatershedCellDetection`: Gaussian blur,
+`MaximumFinder`, morphological reconstruction, ROI tracing and measurement are
+not ported. Its output is flooded basins, not cells, and its runtime is
+therefore not comparable with QuPath's.
+
+**End-to-end cell detection is unchanged at QuPath's 15.87 s**, and will stay
+that way until the stages above exist. Component speedups and what they are
+worth are in [docs/benchmarks/README.md](docs/benchmarks/README.md); what comes
+next is in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Building
 
-Rust: `cargo test` — no system dependencies.
+Rust: `cargo test` — no system dependencies. Reading JPEG 2000 slides would
+need OpenSlide through FFI and is not implemented; those files are refused by
+name rather than mis-decoded.
+
+Tests that need a slide skip themselves when `data/` is empty — see
+[docs/test-data.md](docs/test-data.md).
 
 QuPath (for parity fixtures and benchmarks) needs **JDK 25**. The Gradle wrapper
 cannot auto-provision it from a JDK below 17, so point it at a JDK 25 explicitly:
