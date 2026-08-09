@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Dante-Berth/QuPath_Rust"
+rust-version = "1.90"
+
+[workspace.dependencies]
+rustc-hash = "2"
+rayon = "1.10"
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+cast_possible_truncation = "warn"
+needless_pass_by_value = "warn"
+
+# Benchmarks are meaningless without optimisation; `cargo bench` uses this.
+[profile.bench]
+lto = "thin"
+codegen-units = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
