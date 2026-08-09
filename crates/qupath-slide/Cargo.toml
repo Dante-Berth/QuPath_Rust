@@ -1,0 +1,19 @@
+[package]
+name = "qupath-slide"
+description = "Reads pyramidal whole-slide images (Aperio SVS / tiled TIFF) as tiles."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rayon.workspace = true
+thiserror.workspace = true
+zune-jpeg = "0.4"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false }

@@ -91,3 +91,40 @@ index. There is no global pool and no per-object map.
 **Consequence:** feature lookup by name is not available in an inner loop by
 design — callers resolve a `FeatureId` once, outside the loop. Observable
 values are unchanged.
+
+## D-004 — Slide pixels match QuPath's decode to within one channel step
+
+**QuPath:** reads SVS through Bio-Formats, which decodes the tiles' baseline
+JPEG with its own IDCT.
+
+**Here:** `qupath_slide` decodes the same tiles with `zune-jpeg`.
+
+**Measured**, against `qupath-extension-bioformats` on JDK 25, over the five
+regions in `parity/fixtures/SlideRegion.json`:
+
+| Case | Level | Worst channel difference | Mean |
+| --- | ---: | ---: | ---: |
+| `tile_interior` | 0 | 0 | 0.000 |
+| `tile_seam` | 0 | 0 | 0.000 |
+| `tissue` | 0 | **1** | 0.009 |
+| `level_1` | 1 | 0 | 0.000 |
+| `level_2` | 2 | 0 | 0.000 |
+
+**Consequence:** four of the five cases are bit-identical, and the fifth differs
+by one step on a small number of channels. JPEG fixes the inverse DCT only to a
+stated accuracy, not bit for bit, so two conforming decoders are permitted to
+differ here; requiring exact equality would be requiring one specific IDCT
+implementation. The parity test tolerates 4 and asserts the mean stays under
+0.75, which no rounding difference can breach but a systematic colour error
+would — and did, before it was fixed.
+
+**That colour error is worth recording**, because it is the failure mode this
+fixture exists to catch. Aperio sets `PhotometricInterpretation = 2` (RGB) and
+stores JPEG components that are already R, G and B, but writes no Adobe APP14
+marker saying so. A decoder following the JFIF convention treats three
+components as YCbCr and converts, turning a white (243,243,243) pixel into
+(255,121,255). The output still looks like a plausible H&E slide. Reading the
+TIFF tag rather than trusting the JPEG's markers is what fixes it.
+
+**Status:** matches QuPath within documented tolerance. Geometry — level sizes,
+level count, tile placement — is asserted exactly, with no tolerance.
