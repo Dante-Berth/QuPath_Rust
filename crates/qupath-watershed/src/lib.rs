@@ -2,9 +2,22 @@
 //!
 //! The algorithm is unchanged from QuPath: seed the queue with unlabelled
 //! pixels adjacent to a label, then repeatedly take the highest-valued queued
-//! pixel and adopt its neighbours' label if they agree. Only the priority queue
-//! differs — see [`queue`] for why, and `docs/profiles/README.md` for the
-//! measurement that motivated it.
+//! pixel and adopt its neighbours' label if they agree. Two things differ, and
+//! neither changes the result — see `docs/profiles/README.md` for the
+//! measurement that motivated both:
+//!
+//! - the priority queue is a bucket queue rather than a comparison heap, which
+//!   is the point of [`queue`];
+//! - a pixel away from the image border reaches its neighbours by adding a
+//!   precomputed flat offset, rather than by recovering `(x, y)` through an
+//!   integer division and bounds-checking each shift.
+//!
+//! Neighbour order is preserved exactly, because it is what fixes FIFO
+//! tie-breaking on plateaus and therefore where the watershed line falls.
+//!
+//! A pipeline flooding many tiles should hold a [`Watershed`] and call
+//! [`Watershed::flood`], which reuses the per-pixel state and the queue instead
+//! of rebuilding them per tile.
 //!
 //! ```
 //! use qupath_watershed::{watershed, Connectivity};
