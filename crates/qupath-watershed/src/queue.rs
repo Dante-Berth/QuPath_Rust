@@ -48,6 +48,18 @@ pub struct HierarchicalQueue {
     min_value: f32,
 }
 
+/// Summarises the queue rather than printing `LEVELS` vectors, which would be
+/// thousands of lines and none of them useful.
+impl std::fmt::Debug for HierarchicalQueue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HierarchicalQueue")
+            .field("len", &self.len)
+            .field("top", &self.top)
+            .field("range", &(self.min_value, self.max_value))
+            .finish_non_exhaustive()
+    }
+}
+
 impl HierarchicalQueue {
     /// Creates a queue quantising values over `[min_value, max_value]`.
     ///
@@ -66,6 +78,26 @@ impl HierarchicalQueue {
             max_value,
             min_value,
         }
+    }
+
+    /// Clears the queue and re-points it at a new value range, keeping every
+    /// level's allocation.
+    ///
+    /// [`HierarchicalQueue::new`] allocates `LEVELS` separate `Vec`s. A flood
+    /// that builds a queue per tile therefore performs four thousand
+    /// allocations per tile, which §6 of the project guidelines calls a defect;
+    /// reusing one queue turns that into a clear per tile. Clearing all
+    /// `LEVELS` unconditionally, rather than tracking which were touched, costs
+    /// a few microseconds against a flood measured in milliseconds.
+    pub fn reset(&mut self, min_value: f32, max_value: f32) {
+        for level in &mut self.levels {
+            level.clear();
+        }
+        self.heads.fill(0);
+        self.top = LEVELS - 1;
+        self.len = 0;
+        self.min_value = min_value;
+        self.max_value = max_value;
     }
 
     /// Maps a value to its level: `max_value` to `LEVELS - 1`, `min_value` to 0.

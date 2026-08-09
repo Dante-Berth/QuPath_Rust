@@ -88,66 +88,185 @@ pub fn watershed(
     min_threshold: f32,
     connectivity: Connectivity,
 ) {
-    assert_eq!(
-        values.len(),
-        labels.len(),
-        "values and labels must describe the same image"
-    );
-    assert!(width > 0, "width must be non-zero");
-    assert_eq!(
-        values.len() % width,
-        0,
-        "width must divide the buffer length"
-    );
+    Watershed::new().flood(values, labels, width, min_threshold, connectivity);
+}
 
-    let height = values.len() / width;
+/// Pixel has been queued, or must never be queued. QuPath keeps the same flag
+/// in a separate boolean array.
+const QUEUED: u8 = 1;
+/// Pixel lies on the image border, so a neighbour offset can leave the image
+/// and the flood has to bounds-check it. Interior pixels skip that entirely.
+const BORDER: u8 = 2;
 
-    // `queued` marks pixels that must never enter the queue: below threshold,
-    // already labelled, or queued once already. QuPath keeps the same array.
-    let mut queued = vec![false; values.len()];
+/// A watershed that owns its working buffers, for repeated flooding.
+///
+/// A tile pipeline floods once per tile, and building the per-pixel state and
+/// the queue's `LEVELS` level vectors per tile is allocation in the tile loop —
+/// a defect under §6 of the project guidelines. Holding them here turns that
+/// into a clear.
+#[derive(Debug, Default)]
+pub struct Watershed {
+    /// Per-pixel [`QUEUED`] and [`BORDER`] flags.
+    state: Vec<u8>,
+    /// Reused across floods; see [`HierarchicalQueue::reset`].
+    queue: Option<HierarchicalQueue>,
+}
 
-    let (min_value, max_value) = value_range(values, min_threshold);
-    let mut queue = HierarchicalQueue::new(min_value, max_value, values.len());
+impl Watershed {
+    /// Creates a watershed with no working buffers yet allocated.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-    seed(
-        values,
-        labels,
-        width,
-        height,
-        min_threshold,
-        &mut queued,
-        &mut queue,
-    );
+    /// Floods `labels` outward over `values`, in place, reusing this instance's
+    /// buffers. Semantics are identical to [`watershed`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `values` and `labels` differ in length, or if `width` does not
+    /// divide that length.
+    pub fn flood(
+        &mut self,
+        values: &[f32],
+        labels: &mut [f32],
+        width: usize,
+        min_threshold: f32,
+        connectivity: Connectivity,
+    ) {
+        assert_eq!(
+            values.len(),
+            labels.len(),
+            "values and labels must describe the same image"
+        );
+        assert!(width > 0, "width must be non-zero");
+        assert_eq!(
+            values.len() % width,
+            0,
+            "width must divide the buffer length"
+        );
+        assert!(
+            u32::try_from(values.len()).is_ok(),
+            "image has more pixels than a u32 index can address"
+        );
 
-    let offsets = connectivity.offsets();
-    while let Some(pixel) = queue.pop() {
-        let index = pixel as usize;
-        let x = index % width;
-        let y = index / width;
+        let height = values.len() / width;
 
-        let Some(label) = neighbour_label(labels, width, height, x, y, offsets) else {
-            // Neighbours disagree: this pixel is on the watershed line.
-            continue;
+        self.state.clear();
+        self.state.resize(values.len(), 0);
+
+        let (min_value, max_value) = value_range(values, min_threshold);
+        let queue = match &mut self.queue {
+            Some(queue) => {
+                queue.reset(min_value, max_value);
+                queue
+            }
+            slot => slot.insert(HierarchicalQueue::new(min_value, max_value, values.len())),
         };
-        labels[index] = label;
 
-        for &(dx, dy) in offsets {
-            let Some((nx, ny)) = shift(x, y, dx, dy, width, height) else {
-                continue;
-            };
-            let neighbour = ny * width + nx;
-            if queued[neighbour] {
+        seed(
+            values,
+            labels,
+            width,
+            height,
+            min_threshold,
+            &mut self.state,
+            queue,
+        );
+
+        // Neighbour offsets as flat index deltas, in the same order as the
+        // `(dx, dy)` pairs. The order is what fixes plateau tie-breaking, so it
+        // must not change; only the arithmetic does.
+        let pairs = connectivity.offsets();
+        let mut flat = [0isize; 8];
+        for (slot, &(dx, dy)) in flat.iter_mut().zip(pairs) {
+            *slot = isize::try_from(dy).expect("offsets are +/-1") * width_step(width)
+                + isize::try_from(dx).expect("offsets are +/-1");
+        }
+        let flat = &flat[..pairs.len()];
+
+        while let Some(pixel) = queue.pop() {
+            let index = pixel as usize;
+
+            // Interior pixels — everything but a one-pixel frame, so all but
+            // about 0.8% of a 512x512 tile — cannot have a neighbour outside
+            // the image. They reach their neighbours by adding a precomputed
+            // offset, skipping the `index / width` and `index % width` that the
+            // coordinate form needs on every pop. Those are hardware integer
+            // divisions by a runtime value, which the compiler cannot turn into
+            // a multiply, and there is one of each per popped pixel.
+            if self.state[index] & BORDER == 0 {
+                let Some(label) = interior_label(labels, index, flat) else {
+                    continue;
+                };
+                labels[index] = label;
+
+                for &offset in flat {
+                    let neighbour = index.wrapping_add_signed(offset);
+                    if self.state[neighbour] & QUEUED != 0 {
+                        continue;
+                    }
+                    self.state[neighbour] |= QUEUED;
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "image length checked to fit u32 above"
+                    )]
+                    queue.push(neighbour as PixelIndex, values[neighbour]);
+                }
                 continue;
             }
-            queued[neighbour] = true;
-            // The cast is bounded by the length assertion in `seed`.
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "image length is checked to fit u32 in seed"
-            )]
-            queue.push(neighbour as PixelIndex, values[neighbour]);
+
+            let x = index % width;
+            let y = index / width;
+
+            let Some(label) = neighbour_label(labels, width, height, x, y, pairs) else {
+                // Neighbours disagree: this pixel is on the watershed line.
+                continue;
+            };
+            labels[index] = label;
+
+            for &(dx, dy) in pairs {
+                let Some((nx, ny)) = shift(x, y, dx, dy, width, height) else {
+                    continue;
+                };
+                let neighbour = ny * width + nx;
+                if self.state[neighbour] & QUEUED != 0 {
+                    continue;
+                }
+                self.state[neighbour] |= QUEUED;
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "image length checked to fit u32 above"
+                )]
+                queue.push(neighbour as PixelIndex, values[neighbour]);
+            }
         }
     }
+}
+
+/// `width` as a signed row stride.
+fn width_step(width: usize) -> isize {
+    isize::try_from(width).expect("width fits an isize on any supported target")
+}
+
+/// [`neighbour_label`] for a pixel known to have all its neighbours in bounds.
+///
+/// Identical in result to the coordinate form; it only reaches the neighbours
+/// by flat offset instead of by `(x, y)` arithmetic with a bounds check each.
+fn interior_label(labels: &[f32], index: usize, offsets: &[isize]) -> Option<f32> {
+    let mut found: Option<f32> = None;
+    for &offset in offsets {
+        let label = labels[index.wrapping_add_signed(offset)];
+        if label == 0.0 {
+            continue;
+        }
+        match found {
+            None => found = Some(label),
+            Some(existing) if existing != label => return None,
+            Some(_) => {}
+        }
+    }
+    found
 }
 
 /// Returns the range of floodable values, used to size the quantiser.
@@ -176,32 +295,35 @@ fn seed(
     width: usize,
     height: usize,
     min_threshold: f32,
-    queued: &mut [bool],
+    state: &mut [u8],
     queue: &mut HierarchicalQueue,
 ) {
-    assert!(
-        u32::try_from(values.len()).is_ok(),
-        "image has more pixels than a u32 index can address"
-    );
-
     for y in 0..height {
+        let on_horizontal_edge = y == 0 || y + 1 == height;
         for x in 0..width {
             let index = y * width + x;
+
+            // Marked once here rather than recomputed per pop; the flood reads
+            // it to decide whether a neighbour can leave the image.
+            if on_horizontal_edge || x == 0 || x + 1 == width {
+                state[index] |= BORDER;
+            }
+
             let value = values[index];
 
             // Below-threshold pixels are marked queued so they are never added
             // later, exactly as QuPath does.
             if value <= min_threshold {
-                queued[index] = true;
+                state[index] |= QUEUED;
                 continue;
             }
             if labels[index] != 0.0 {
-                queued[index] = true;
+                state[index] |= QUEUED;
             } else if has_labelled_orthogonal_neighbour(labels, width, height, x, y) {
-                queued[index] = true;
+                state[index] |= QUEUED;
                 #[expect(
                     clippy::cast_possible_truncation,
-                    reason = "length checked to fit u32 above"
+                    reason = "length checked to fit u32 by the caller"
                 )]
                 queue.push(index as PixelIndex, value);
             }
@@ -378,6 +500,129 @@ mod tests {
             Connectivity::Eight,
         );
         assert_eq!(labels[8], 5.0, "the far corner is reachable diagonally");
+    }
+
+    /// The flood written only in coordinate form — the path border pixels still
+    /// take — so the interior fast path has something independent to agree with.
+    fn flood_coordinates_only(
+        values: &[f32],
+        labels: &mut [f32],
+        width: usize,
+        min_threshold: f32,
+        connectivity: Connectivity,
+    ) {
+        let height = values.len() / width;
+        let mut state = vec![0u8; values.len()];
+        let (min_value, max_value) = value_range(values, min_threshold);
+        let mut queue = HierarchicalQueue::new(min_value, max_value, values.len());
+        seed(
+            values,
+            labels,
+            width,
+            height,
+            min_threshold,
+            &mut state,
+            &mut queue,
+        );
+
+        let pairs = connectivity.offsets();
+        while let Some(pixel) = queue.pop() {
+            let index = pixel as usize;
+            let x = index % width;
+            let y = index / width;
+
+            let Some(label) = neighbour_label(labels, width, height, x, y, pairs) else {
+                continue;
+            };
+            labels[index] = label;
+
+            for &(dx, dy) in pairs {
+                let Some((nx, ny)) = shift(x, y, dx, dy, width, height) else {
+                    continue;
+                };
+                let neighbour = ny * width + nx;
+                if state[neighbour] & QUEUED != 0 {
+                    continue;
+                }
+                state[neighbour] |= QUEUED;
+                queue.push(
+                    u32::try_from(neighbour).expect("test image is small"),
+                    values[neighbour],
+                );
+            }
+        }
+    }
+
+    /// An EDM-like surface with plateaus, and markers on a grid.
+    fn plateau_image(width: usize, height: usize) -> (Vec<f32>, Vec<f32>) {
+        let mut values = Vec::with_capacity(width * height);
+        for y in 0..height {
+            for x in 0..width {
+                let fx = (x % 16) as f32 - 8.0;
+                let fy = (y % 16) as f32 - 8.0;
+                // Floored, so equal values are common and tie-breaking matters.
+                values.push(((256.0 - fx * fx - fy * fy).max(0.0) / 4.0).floor());
+            }
+        }
+
+        let mut labels = vec![0.0f32; width * height];
+        let mut next = 1.0;
+        for y in (8..height).step_by(16) {
+            for x in (8..width).step_by(16) {
+                labels[y * width + x] = next;
+                next += 1.0;
+            }
+        }
+        (values, labels)
+    }
+
+    #[test]
+    fn the_interior_fast_path_agrees_with_the_coordinate_path() {
+        // The existing cases are a few pixels across, where almost every pixel
+        // is on the border and the fast path barely runs. This one is 48x48, so
+        // 92% of pixels take the interior path, and it has plateaus so the FIFO
+        // tie-breaking that fixes the watershed lines is exercised too.
+        let (width, height) = (48, 48);
+        let (values, seeds) = plateau_image(width, height);
+
+        for connectivity in [Connectivity::Four, Connectivity::Eight] {
+            let mut fast = seeds.clone();
+            watershed(&values, &mut fast, width, f32::NEG_INFINITY, connectivity);
+
+            let mut slow = seeds.clone();
+            flood_coordinates_only(&values, &mut slow, width, f32::NEG_INFINITY, connectivity);
+
+            assert_eq!(fast, slow, "paths diverged for {connectivity:?}");
+            assert!(
+                fast.iter().filter(|&&l| l != 0.0).count() > width * height / 2,
+                "the flood should have labelled most of the image"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reused_watershed_matches_a_fresh_one() {
+        // The buffers survive between floods, so stale state leaking from one
+        // image into the next is the failure mode this pins.
+        let mut reused = Watershed::new();
+        for &(width, height) in &[(48, 48), (16, 32), (48, 48)] {
+            let (values, seeds) = plateau_image(width, height);
+            for connectivity in [Connectivity::Four, Connectivity::Eight] {
+                let mut from_reused = seeds.clone();
+                reused.flood(
+                    &values,
+                    &mut from_reused,
+                    width,
+                    f32::NEG_INFINITY,
+                    connectivity,
+                );
+
+                let mut fresh = seeds.clone();
+                watershed(&values, &mut fresh, width, f32::NEG_INFINITY, connectivity);
+
+                assert_eq!(from_reused, fresh, "{width}x{height} {connectivity:?}");
+            }
+        }
     }
 
     #[test]

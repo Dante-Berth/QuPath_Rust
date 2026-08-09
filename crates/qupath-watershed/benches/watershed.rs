@@ -20,7 +20,7 @@ use std::collections::BinaryHeap;
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use qupath_watershed::{Connectivity, HierarchicalQueue, watershed};
+use qupath_watershed::{Connectivity, HierarchicalQueue, Watershed, watershed};
 
 /// QuPath's `PixelWithValue`: a heap object per queued pixel, ordered by value
 /// descending with an insertion counter breaking ties.
@@ -75,6 +75,23 @@ fn bench_queue(c: &mut Criterion) {
     let mut group = c.benchmark_group("queue_push_pop");
     group.throughput(criterion::Throughput::Elements(n as u64));
 
+    // Reusing one queue across floods, which is what a tile pipeline does.
+    // `new` allocates LEVELS separate vectors; `reset` allocates nothing.
+    group.bench_function("hierarchical_reused", |b| {
+        let mut q = HierarchicalQueue::new(0.0, 128.0, n);
+        b.iter(|| {
+            q.reset(0.0, 128.0);
+            for (i, &v) in values.iter().enumerate() {
+                q.push(i as u32, v);
+            }
+            let mut sum = 0u64;
+            while let Some(p) = q.pop() {
+                sum += u64::from(p);
+            }
+            black_box(sum)
+        });
+    });
+
     group.bench_function("hierarchical", |b| {
         b.iter(|| {
             let mut q = HierarchicalQueue::new(0.0, 128.0, n);
@@ -128,21 +145,40 @@ fn bench_watershed(c: &mut Criterion) {
         }
     }
 
+    // Buffers are allocated once, outside the timed region, and the markers are
+    // restored inside it — a 1 MB copy against a flood measured in
+    // milliseconds. Handing the routine a fresh clone per iteration via
+    // `iter_batched` instead makes the allocator a first-order term in the
+    // result; the rank filter benchmark had exactly that bug.
     c.bench_function("watershed_512x512", |b| {
-        b.iter_batched(
-            || seeds.clone(),
-            |mut labels| {
-                watershed(
-                    &values,
-                    &mut labels,
-                    width,
-                    f32::NEG_INFINITY,
-                    Connectivity::Eight,
-                );
-                black_box(labels.iter().filter(|&&l| l != 0.0).count())
-            },
-            criterion::BatchSize::LargeInput,
-        );
+        let mut labels = seeds.clone();
+        b.iter(|| {
+            labels.copy_from_slice(&seeds);
+            watershed(
+                &values,
+                &mut labels,
+                width,
+                f32::NEG_INFINITY,
+                Connectivity::Eight,
+            );
+            black_box(labels.iter().filter(|&&l| l != 0.0).count())
+        });
+    });
+
+    c.bench_function("watershed_512x512_reused", |b| {
+        let mut labels = seeds.clone();
+        let mut flooder = Watershed::new();
+        b.iter(|| {
+            labels.copy_from_slice(&seeds);
+            flooder.flood(
+                &values,
+                &mut labels,
+                width,
+                f32::NEG_INFINITY,
+                Connectivity::Eight,
+            );
+            black_box(labels.iter().filter(|&&l| l != 0.0).count())
+        });
     });
 }
 

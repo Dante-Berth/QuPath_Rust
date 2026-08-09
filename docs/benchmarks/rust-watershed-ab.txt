@@ -1,0 +1,6 @@
+EDM-like plateau surface, 8-connected, minimum of 100 interleaved repetitions
+
+      image    previous     current      reused   speedup
+    256x256       1.86ms       1.42ms       1.27ms     1.47x
+    512x512       7.07ms       5.24ms       5.09ms     1.39x
+  1024x1024      28.02ms      21.11ms      20.02ms     1.40x

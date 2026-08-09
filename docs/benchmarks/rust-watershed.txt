@@ -1,40 +1,67 @@
-running 12 tests
+
+running 14 tests
 test queue::tests::degenerate_range_still_pops_everything_fifo ... ignored
 test queue::tests::equal_values_pop_fifo ... ignored
 test queue::tests::interleaved_push_and_pop_keeps_order ... ignored
 test queue::tests::len_tracks_push_and_pop ... ignored
 test queue::tests::pops_in_descending_value_order ... ignored
 test queue::tests::values_outside_the_range_are_clamped ... ignored
+test tests::a_reused_watershed_matches_a_fresh_one ... ignored
 test tests::eight_connectivity_reaches_diagonals ... ignored
 test tests::empty_labels_leave_the_image_untouched ... ignored
 test tests::markers_are_not_overwritten ... ignored
 test tests::mismatched_buffers_panic - should panic ... ignored
+test tests::the_interior_fast_path_agrees_with_the_coordinate_path ... ignored
 test tests::threshold_blocks_flooding ... ignored
 test tests::two_markers_split_at_the_ridge ... ignored
-test result: ok. 0 passed; 0 failed; 12 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+test result: ok. 0 passed; 0 failed; 14 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+queue_push_pop/hierarchical_reused
+                        time:   [3.4135 ms 3.4254 ms 3.4402 ms]
+                        thrpt:  [304.80 Melem/s 306.11 Melem/s 307.19 Melem/s]
+                 change:
+                        time:   [-5.1302% -3.9923% -2.9168%] (p = 0.00 < 0.05)
+                        thrpt:  [+3.0044% +4.1583% +5.4076%]
+                        Performance has improved.
+Found 10 outliers among 100 measurements (10.00%)
+  5 (5.00%) high mild
+  5 (5.00%) high severe
 queue_push_pop/hierarchical
-                        time:   [5.6057 ms 5.6582 ms 5.7159 ms]
-                        thrpt:  [183.45 Melem/s 185.32 Melem/s 187.05 Melem/s]
+                        time:   [5.3112 ms 5.3277 ms 5.3461 ms]
+                        thrpt:  [196.14 Melem/s 196.82 Melem/s 197.43 Melem/s]
                  change:
-                        time:   [-0.8194% +0.2717% +1.3897%] (p = 0.64 > 0.05)
-                        thrpt:  [-1.3706% -0.2710% +0.8262%]
-                        No change in performance detected.
-Found 7 outliers among 100 measurements (7.00%)
+                        time:   [-3.9543% -3.1532% -2.3591%] (p = 0.00 < 0.05)
+                        thrpt:  [+2.4161% +3.2559% +4.1170%]
+                        Performance has improved.
+Found 9 outliers among 100 measurements (9.00%)
   6 (6.00%) high mild
-  1 (1.00%) high severe
-Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 11.9s, or reduce sample count to 40.
+  3 (3.00%) high severe
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 11.2s, or reduce sample count to 40.
 queue_push_pop/binary_heap
-                        time:   [116.64 ms 117.50 ms 118.47 ms]
-                        thrpt:  [8.8510 Melem/s 8.9242 Melem/s 8.9899 Melem/s]
+                        time:   [109.23 ms 109.54 ms 109.91 ms]
+                        thrpt:  [9.5405 Melem/s 9.5723 Melem/s 9.6001 Melem/s]
                  change:
-                        time:   [+2.6991% +3.7298% +4.7866%] (p = 0.00 < 0.05)
-                        thrpt:  [-4.5679% -3.5957% -2.6282%]
-                        Performance has regressed.
-Found 4 outliers among 100 measurements (4.00%)
+                        time:   [-1.0503% -0.4503% +0.0881%] (p = 0.12 > 0.05)
+                        thrpt:  [-0.0880% +0.4524% +1.0614%]
+                        No change in performance detected.
+Found 6 outliers among 100 measurements (6.00%)
   3 (3.00%) high mild
-  1 (1.00%) high severe
-watershed_512x512       time:   [9.7203 ms 9.7985 ms 9.8813 ms]
-                        change: [-2.1143% -1.1162% -0.0985%] (p = 0.04 < 0.05)
+  3 (3.00%) high severe
+
+watershed_512x512       time:   [5.0008 ms 5.0082 ms 5.0171 ms]
+                        change: [-0.7764% -0.4742% -0.1589%] (p = 0.00 < 0.05)
                         Change within noise threshold.
-Found 3 outliers among 100 measurements (3.00%)
-  3 (3.00%) high mild
+Found 7 outliers among 100 measurements (7.00%)
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+
+watershed_512x512_reused
+                        time:   [4.8986 ms 4.9092 ms 4.9209 ms]
+                        change: [-2.0862% -1.7157% -1.3604%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 12 outliers among 100 measurements (12.00%)
+  7 (7.00%) high mild
+  5 (5.00%) high severe
+
