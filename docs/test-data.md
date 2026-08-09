@@ -20,9 +20,12 @@ Sizes verified 2026-08-09:
 
 | File | Size | Use |
 | --- | ---: | --- |
-| `Aperio/CMU-1-Small-Region.svs` | 1.9 MB | Unit tests and CI. Small enough to fetch on every run. |
-| `Aperio/CMU-1.svs` | 170 MB | The default benchmark slide. Plain JPEG compression. |
-| `Aperio/CMU-1-JP2K-33005.svs` | 127 MB | Same slide, JPEG 2000 compressed — the case needing OpenJPEG/OpenSlide FFI. |
+| `Aperio/CMU-1-Small-Region.svs` | 1,938,955 B (1.9 MB) | Unit tests and CI. Small enough to fetch on every run. |
+| `Aperio/CMU-1.svs` | 177,552,579 B (177.6 MB) | The default benchmark slide. Plain JPEG compression. |
+| `Aperio/CMU-1-JP2K-33005.svs` | 132,565,343 B (132.6 MB) | Same slide, JPEG 2000 compressed — the case needing OpenJPEG/OpenSlide FFI. |
+
+Exact byte counts, checked against `Content-Length` on the server, so a truncated
+download is caught by `stat -c%s` rather than by a confusing decode failure later.
 
 ```bash
 mkdir -p data

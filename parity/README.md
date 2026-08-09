@@ -9,12 +9,22 @@ change in either implementation show up as a diff.
 
 ## Regenerating
 
-Needs JDK 25 and a built `qupath-core`. From the repository root:
+Needs JDK 25+ and a built `qupath-core`. From the repository root:
 
 ```bash
-export JAVA_HOME=/path/to/jdk-25
 ./parity/record.sh
 ```
+
+That is enough when `java` on `PATH` is already 25 or newer. Otherwise point
+`JAVA_HOME` at a JDK 25 installation, which takes precedence:
+
+```bash
+JAVA_HOME=/path/to/jdk-25 ./parity/record.sh
+```
+
+Gradle cannot auto-provision the toolchain here — Gradle itself needs a JVM to
+start — so the JDK must be installed before the first run. On Debian/Ubuntu,
+`sudo apt install openjdk-25-jdk` makes it the default `java`.
 
 The script builds `qupath-core` if needed, resolves its runtime classpath from
 Gradle, runs each recorder in `java/`, and writes `fixtures/<name>.json`.

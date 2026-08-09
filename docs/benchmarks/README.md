@@ -6,9 +6,12 @@ from both implementations on the same machine.
 Regenerate with:
 
 ```bash
-JAVA_HOME=/path/to/jdk-25 ./parity/bench.sh   # QuPath side
+./parity/bench.sh                              # QuPath side
 RUSTFLAGS="-C target-cpu=x86-64-v3" cargo bench -p qupath-objects
 ```
+
+`bench.sh` needs JDK 25+ on `PATH`, or `JAVA_HOME` pointing at one — see
+`parity/README.md`.
 
 ## Measurement scan and filter
 
