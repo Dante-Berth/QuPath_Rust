@@ -22,3 +22,9 @@ target
 /qupath
 # Slide images: see docs/test-data.md for how to fetch them
 /data
+# Compiled profiling driver
+/profile/build
+# Raw JFR recordings and their JVM logs are megabytes and regenerable from
+# profile/run.sh; the derived *-hot.txt summaries are committed instead.
+/docs/profiles/*.jfr
+/docs/profiles/*.log
