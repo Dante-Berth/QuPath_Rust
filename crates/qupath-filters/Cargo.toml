@@ -1,0 +1,20 @@
+[package]
+name = "qupath-filters"
+description = "Circular-kernel rank filters (MIN/MAX) matching ImageJ's RankFilters, as QuPath invokes them."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "rank"
+harness = false

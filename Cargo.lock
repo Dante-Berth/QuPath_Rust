@@ -234,6 +234,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "qupath-filters"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+]
+
+[[package]]
 name = "qupath-objects"
 version = "0.1.0"
 dependencies = [

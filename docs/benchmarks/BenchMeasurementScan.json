@@ -4,8 +4,8 @@
   "warmup_iters": 20,
   "timed_iters": 50,
   "list_type": "GENERAL",
-  "build_ms": 1593.632,
-  "scan_ms": {"median": 43.6146, "min": 42.9716},
-  "filter_ms": {"median": 43.8436, "min": 43.1832},
-  "jvm": "25.0.4+7-LTS"
+  "build_ms": 1518.709,
+  "scan_ms": {"median": 44.2656, "min": 43.4350},
+  "filter_ms": {"median": 44.3004, "min": 43.6710},
+  "jvm": "25.0.3+9-2-22.04.2-Ubuntu"
 }

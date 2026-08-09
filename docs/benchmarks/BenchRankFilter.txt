@@ -1,0 +1,2 @@
+rank_512x512/max_r2  median 1,315 ms  (199,312 Melem/s)  guard=11900,0
+rank_512x512/max_r5  median 1,492 ms  (175,662 Melem/s)  guard=11900,0
