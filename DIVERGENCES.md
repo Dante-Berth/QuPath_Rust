@@ -14,14 +14,32 @@ neighbouring `FloatList` rather than a deliberate choice.
 
 **Here:** `qupath_objects::Table` stores `f32` columns.
 
-**Consequence:** none for parity. The stored values are bit-identical to what
-QuPath retains, because QuPath discards the extra mantissa bits at write time
-too. We use half the memory to hold the same information.
+**Measured**, against `qupath-core-0.8.0-SNAPSHOT` on JDK 25, storing
+`0.1234567890123456789`:
 
-**Status:** matches QuPath's observable behaviour. If QuPath fixes the
-truncation upstream, this entry must be revisited — parity would then require
-`f64` columns, and the decision should be re-made against a profile rather than
-assumed.
+| List type | Value read back | Equals input | Equals `(float)` input |
+| --- | --- | --- | --- |
+| `GENERAL` | `0.12345678901234568` | yes | no |
+| `DOUBLE` | `0.12345679104328156` | no | **yes** |
+| `FLOAT` | `0.12345679104328156` | no | **yes** |
+
+So `DOUBLE` and `FLOAT` are bit-identical in QuPath, and `f32` columns here
+reproduce both exactly. `GENERAL` — which boxes `Double` objects — is the one
+type that retains full `f64` precision.
+
+**Consequence:** `PathObject` defaults to `GENERAL`
+(`qupath-core/src/main/java/qupath/lib/objects/PathObject.java:223`), so
+measurements set on a default `PathObject` and read straight back can differ
+from our columns in the bits below `f32`. This is bounded by `f32` epsilon
+(~1.2e-7 relative) and sits well inside the 1e-5 relative tolerance used for
+scalar parity, but it must be accounted for in any test that claims bit
+equality. Values that have made a round trip through QuPath's `DOUBLE`/`FLOAT`
+lists, or through a saved `.qpdata`, match exactly.
+
+**Status:** matches QuPath's observable behaviour for `DOUBLE`/`FLOAT`. If
+QuPath fixes the truncation upstream, this entry must be revisited — parity
+would then require `f64` columns, and the decision should be re-made against a
+profile rather than assumed.
 
 ## D-002 — Measurement names are interned per table, not globally
 

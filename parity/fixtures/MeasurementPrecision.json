@@ -1,0 +1,70 @@
+{
+  "source": "qupath-core MeasurementList",
+  "absent_measurement_returns": "NaN",
+  "cases": [
+    {
+      "input_bits": "3fbf9add3746f65f",
+      "stored": {
+        "GENERAL": "3fbf9add3746f65f",
+        "DOUBLE": "3fbf9add40000000",
+        "FLOAT": "3fbf9add40000000"
+      }
+    },
+    {
+      "input_bits": "3fd5555555555555",
+      "stored": {
+        "GENERAL": "3fd5555555555555",
+        "DOUBLE": "3fd5555560000000",
+        "FLOAT": "3fd5555560000000"
+      }
+    },
+    {
+      "input_bits": "400921fb54442d18",
+      "stored": {
+        "GENERAL": "400921fb54442d18",
+        "DOUBLE": "400921fb60000000",
+        "FLOAT": "400921fb60000000"
+      }
+    },
+    {
+      "input_bits": "3e45798ee2308c3a",
+      "stored": {
+        "GENERAL": "3e45798ee2308c3a",
+        "DOUBLE": "3e45798ee0000000",
+        "FLOAT": "3e45798ee0000000"
+      }
+    },
+    {
+      "input_bits": "419d6f34547e6b75",
+      "stored": {
+        "GENERAL": "419d6f34547e6b75",
+        "DOUBLE": "419d6f3460000000",
+        "FLOAT": "419d6f3460000000"
+      }
+    },
+    {
+      "input_bits": "0000000000000000",
+      "stored": {
+        "GENERAL": "0000000000000000",
+        "DOUBLE": "0000000000000000",
+        "FLOAT": "0000000000000000"
+      }
+    },
+    {
+      "input_bits": "bff8000000000000",
+      "stored": {
+        "GENERAL": "bff8000000000000",
+        "DOUBLE": "bff8000000000000",
+        "FLOAT": "bff8000000000000"
+      }
+    },
+    {
+      "input_bits": "7ff8000000000000",
+      "stored": {
+        "GENERAL": "7ff8000000000000",
+        "DOUBLE": "7ff8000000000000",
+        "FLOAT": "7ff8000000000000"
+      }
+    }
+  ]
+}
