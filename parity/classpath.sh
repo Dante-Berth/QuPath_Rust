@@ -1,5 +1,10 @@
-# Shared JDK check and qupath-core classpath resolution.
+# Shared JDK check and QuPath classpath resolution.
 # Sourced by record.sh and bench.sh; sets `java_bin` and `cp`.
+#
+# Set `modules` before sourcing to pull in more than qupath-core, e.g.
+#   modules=(qupath-core qupath-core-processing)
+# qupath-core-processing carries the ImageJ-backed detection code
+# (WatershedCellDetection and friends), which qupath-core alone does not.
 #
 # shellcheck shell=bash
 
@@ -21,8 +26,12 @@ if ! grep -qE '"(2[5-9]|[3-9][0-9])' <<<"$java_version"; then
     exit 1
 fi
 
-echo "==> building qupath-core" >&2
-(cd "$qupath" && ./gradlew -q :qupath-core:jar)
+modules=("${modules[@]:-qupath-core}")
+
+echo "==> building ${modules[*]}" >&2
+jar_tasks=()
+for m in "${modules[@]}"; do jar_tasks+=(":$m:jar"); done
+(cd "$qupath" && ./gradlew -q "${jar_tasks[@]}")
 
 echo "==> resolving runtime classpath" >&2
 init_script="$(mktemp)"
@@ -37,10 +46,18 @@ allprojects {
   }
 }
 GRADLE
-cp="$(cd "$qupath" && ./gradlew -q -I "$init_script" :qupath-core:printParityCp 2>/dev/null \
-    | sed -n 's/^CPSTART://p')"
+cp_tasks=()
+for m in "${modules[@]}"; do cp_tasks+=(":$m:printParityCp"); done
+cp="$(cd "$qupath" && ./gradlew -q -I "$init_script" "${cp_tasks[@]}" 2>/dev/null \
+    | sed -n 's/^CPSTART://p' | paste -sd: -)"
 if [[ -z "$cp" ]]; then
-    echo "error: could not resolve qupath-core runtime classpath" >&2
+    echo "error: could not resolve runtime classpath for ${modules[*]}" >&2
     exit 1
 fi
-cp="$cp:$(find "$qupath/qupath-core/build/libs" -name '*.jar' | tr '\n' ':')"
+
+# Each module's own jar sits outside its runtimeClasspath, so add them too.
+for m in "${modules[@]}"; do
+    libs="$qupath/$m/build/libs"
+    [[ -d "$libs" ]] || { echo "error: $libs not found after build" >&2; exit 1; }
+    cp="$cp:$(find "$libs" -name '*.jar' | tr '\n' ':')"
+done
