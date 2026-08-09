@@ -1,0 +1,40 @@
+running 12 tests
+test queue::tests::degenerate_range_still_pops_everything_fifo ... ignored
+test queue::tests::equal_values_pop_fifo ... ignored
+test queue::tests::interleaved_push_and_pop_keeps_order ... ignored
+test queue::tests::len_tracks_push_and_pop ... ignored
+test queue::tests::pops_in_descending_value_order ... ignored
+test queue::tests::values_outside_the_range_are_clamped ... ignored
+test tests::eight_connectivity_reaches_diagonals ... ignored
+test tests::empty_labels_leave_the_image_untouched ... ignored
+test tests::markers_are_not_overwritten ... ignored
+test tests::mismatched_buffers_panic - should panic ... ignored
+test tests::threshold_blocks_flooding ... ignored
+test tests::two_markers_split_at_the_ridge ... ignored
+test result: ok. 0 passed; 0 failed; 12 ignored; 0 measured; 0 filtered out; finished in 0.00s
+queue_push_pop/hierarchical
+                        time:   [5.6057 ms 5.6582 ms 5.7159 ms]
+                        thrpt:  [183.45 Melem/s 185.32 Melem/s 187.05 Melem/s]
+                 change:
+                        time:   [-0.8194% +0.2717% +1.3897%] (p = 0.64 > 0.05)
+                        thrpt:  [-1.3706% -0.2710% +0.8262%]
+                        No change in performance detected.
+Found 7 outliers among 100 measurements (7.00%)
+  6 (6.00%) high mild
+  1 (1.00%) high severe
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 11.9s, or reduce sample count to 40.
+queue_push_pop/binary_heap
+                        time:   [116.64 ms 117.50 ms 118.47 ms]
+                        thrpt:  [8.8510 Melem/s 8.9242 Melem/s 8.9899 Melem/s]
+                 change:
+                        time:   [+2.6991% +3.7298% +4.7866%] (p = 0.00 < 0.05)
+                        thrpt:  [-4.5679% -3.5957% -2.6282%]
+                        Performance has regressed.
+Found 4 outliers among 100 measurements (4.00%)
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+watershed_512x512       time:   [9.7203 ms 9.7985 ms 9.8813 ms]
+                        change: [-2.1143% -1.1162% -0.0985%] (p = 0.04 < 0.05)
+                        Change within noise threshold.
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild

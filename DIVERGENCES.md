@@ -41,6 +41,44 @@ QuPath fixes the truncation upstream, this entry must be revisited — parity
 would then require `f64` columns, and the decision should be re-made against a
 profile rather than assumed.
 
+## D-003 — Watershed seeds every border pixel, following a QuPath NaN quirk
+
+**QuPath:** `Watershed`'s queue constructor decides whether an unlabelled pixel
+starts on the flood front by testing its four orthogonal neighbours with
+`ipLabels.getPixelValue(...) != 0f`
+(`qupath-core-processing/src/main/java/qupath/imagej/processing/Watershed.java:228-233`).
+`ImageProcessor.getPixelValue` returns **`NaN`** outside a `FloatProcessor`, and
+`NaN != 0f` is true, so every pixel on the image border is seeded as though it
+were adjacent to a label — whether or not any label is nearby.
+
+**Measured**, against `qupath-core-processing` at `e7662d8` on JDK 25, flooding
+a flat 6×4 plateau from markers at the two top corners:
+
+```text
+labels in           QuPath out          if OOB were treated as 0
+1 0 0 0 0 2         1 1 1 1 0 2         1 1 1 0 2 2
+0 0 0 0 0 0         1 1 1 1 0 2         1 1 1 0 2 2
+0 0 0 0 0 0         1 1 1 1 0 2         1 1 1 0 2 2
+0 0 0 0 0 0         1 1 1 1 1 0         1 1 1 0 2 2
+```
+
+The right-hand result is what a symmetric reading of the algorithm produces. The
+middle is what QuPath actually does: the watershed line shifts a column and the
+bottom-right corner is left unlabelled.
+
+**Here:** `has_labelled_orthogonal_neighbour` returns `true` for out-of-bounds
+neighbours, reproducing the middle column exactly.
+
+**Consequence:** on interior regions — the overwhelmingly common case, since
+detection runs on tiles whose objects are away from the edge — this is
+unobservable. It matters only for markers within one pixel of the image border,
+where it changes which side of a plateau a boundary falls on. Pinned by the
+`plateau_four` and `plateau_eight` cases in `parity/fixtures/WatershedFlood.json`.
+
+**Status:** deliberate bug-for-bug parity. The target is matching QuPath, not
+matching the textbook. If QuPath ever bounds-checks the seeding, this and the
+fixture must both be revisited.
+
 ## D-002 — Measurement names are interned per table, not globally
 
 **QuPath:** each `MeasurementList` owns its own name list, deduplicated across

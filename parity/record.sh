@@ -5,6 +5,9 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Recorders reach into qupath-core-processing for the ImageJ-backed algorithms
+# (Watershed and friends), not just qupath-core.
+modules=(qupath-core qupath-core-processing)
 # shellcheck source=parity/classpath.sh
 source "$root/parity/classpath.sh"
 

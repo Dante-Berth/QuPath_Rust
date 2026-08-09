@@ -1,0 +1,20 @@
+[package]
+name = "qupath-watershed"
+description = "Marker-controlled watershed with a hierarchical queue, matching QuPath's Watershed."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "watershed"
+harness = false
