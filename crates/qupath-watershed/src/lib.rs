@@ -37,8 +37,10 @@
 //! assert_eq!(labels[9], 2.0);
 //! ```
 
+mod label;
 mod queue;
 
+pub use label::{Labeller, label_image};
 pub use queue::{HierarchicalQueue, LEVELS, PixelIndex};
 
 /// Neighbourhood used when propagating labels.
