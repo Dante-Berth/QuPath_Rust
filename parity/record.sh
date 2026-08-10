@@ -15,8 +15,11 @@ fixtures="$root/parity/fixtures"
 mkdir -p "$fixtures"
 
 # Bench* are timing harnesses driven by bench.sh, not fixture recorders.
+# SlideRegion needs qupath-extension-bioformats and a slide, which is why it has
+# its own script; running it here truncated its committed fixture and then
+# aborted under `set -e`, taking the recorders after it with it.
 for src in "$root"/parity/java/*.java; do
-    case "$(basename "$src")" in Bench*) continue ;; esac
+    case "$(basename "$src")" in Bench* | SlideRegion.java) continue ;; esac
     name="$(basename "$src" .java)"
     echo "==> recording $name" >&2
     # Recorders write JSON to stdout; SLF4J and JVM warnings go to stderr.

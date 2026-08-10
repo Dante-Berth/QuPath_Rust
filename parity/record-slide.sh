@@ -35,4 +35,17 @@ if [[ ! -s "$fixtures/SlideRegion.json" ]]; then
     exit 1
 fi
 
+# Colour deconvolution of a real tile. The synthetic half of this fixture is
+# recorded by record.sh into ColourDeconvolution.json and needs no slide; this
+# is the tile case, which does, and so writes a separate file.
+echo "==> recording ColourDeconvolutionTile from $(basename "$slide")" >&2
+"$java_bin" -cp "$cp." "$root/parity/java/ColourDeconvolution.java" "$slide" \
+    | sed -n '/^{$/,$p' >"$fixtures/ColourDeconvolutionTile.json"
+
+if [[ ! -s "$fixtures/ColourDeconvolutionTile.json" ]]; then
+    echo "error: tile recorder produced no JSON" >&2
+    exit 1
+fi
+
 echo "==> done; $(wc -c <"$fixtures/SlideRegion.json") bytes in fixtures/SlideRegion.json" >&2
+echo "        $(wc -c <"$fixtures/ColourDeconvolutionTile.json") bytes in fixtures/ColourDeconvolutionTile.json" >&2
