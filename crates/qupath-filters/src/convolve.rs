@@ -109,11 +109,25 @@ pub fn convolve(
 /// allocates once rather than once per tile. [`Convolver::apply_into`] avoids
 /// the copy entirely by writing to a separate output, which is what the pipeline
 /// does.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Convolver {
     /// Holds the caller's pixels during an in-place [`Convolver::apply`].
     /// Unused by [`Convolver::apply_into`].
     staging: Vec<f32>,
+    /// Whether to spread rows across rayon. See
+    /// [`Convolver::with_parallel_rows`].
+    parallel_rows: bool,
+}
+
+impl Default for Convolver {
+    /// Written out rather than derived, because a derived `bool` default would
+    /// silently make the convolution sequential.
+    fn default() -> Self {
+        Self {
+            staging: Vec::new(),
+            parallel_rows: true,
+        }
+    }
 }
 
 impl Convolver {
@@ -121,6 +135,17 @@ impl Convolver {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Chooses whether rows are spread across rayon, which they are by default.
+    ///
+    /// A caller already inside a rayon job should turn this off; see
+    /// [`crate::RankFilter::with_parallel_rows`] for why nesting is
+    /// both a §6 violation and slower here.
+    #[must_use]
+    pub fn with_parallel_rows(mut self, parallel: bool) -> Self {
+        self.parallel_rows = parallel;
+        self
     }
 
     /// Convolves `pixels` in place, reusing this convolver's buffer.
@@ -149,6 +174,7 @@ impl Convolver {
             kernel_width,
             kernel_height,
             true,
+            self.parallel_rows,
         );
         self.staging = staging;
     }
@@ -178,6 +204,7 @@ impl Convolver {
             kernel_width,
             kernel_height,
             true,
+            self.parallel_rows,
         );
     }
 
@@ -210,11 +237,17 @@ impl Convolver {
             kernel_width,
             kernel_height,
             false,
+            self.parallel_rows,
         );
     }
 }
 
 /// The convolution itself. Free function so both entry points share one body.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the shared body of three public entry points, each of which fixes \
+              one of the trailing flags"
+)]
 fn apply_into(
     source: &[f32],
     out: &mut [f32],
@@ -223,6 +256,7 @@ fn apply_into(
     kernel_width: usize,
     kernel_height: usize,
     wide: bool,
+    parallel_rows: bool,
 ) {
     assert!(width > 0, "width must be non-zero");
     assert_eq!(
@@ -265,9 +299,15 @@ fn apply_into(
     // Rows are independent: each reads the untouched source and writes only its
     // own output row. Granularity is a row, not a pixel, per §6. No accumulation
     // crosses rows, so the split cannot change the result.
-    out.par_chunks_mut(width)
-        .enumerate()
-        .for_each(|(y, out)| scan.row(out, y));
+    if parallel_rows {
+        out.par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, out)| scan.row(out, y));
+    } else {
+        out.chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, out)| scan.row(out, y));
+    }
 }
 
 /// The image geometry and kernel one row of the convolution works against.

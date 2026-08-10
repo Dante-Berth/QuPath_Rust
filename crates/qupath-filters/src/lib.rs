@@ -91,7 +91,7 @@ pub fn rank(pixels: &mut [f32], width: usize, radius: f64, op: RankOp) {
 /// [`RankFilter::apply_into`] sidesteps the copy entirely by writing to a
 /// separate output. The decomposed kernel is cached alongside the buffers, so
 /// repeated calls at one radius do not rebuild it.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RankFilter {
     /// Holds the caller's pixels during an in-place [`RankFilter::apply`], so
     /// that the filter has an untouched image to read while it overwrites the
@@ -102,6 +102,22 @@ pub struct RankFilter {
     negated: Vec<f32>,
     /// Cached decomposition, keyed on the radius that produced it.
     plan: Option<(f64, Plan)>,
+    /// Whether to spread rows across rayon. See
+    /// [`RankFilter::with_parallel_rows`].
+    parallel_rows: bool,
+}
+
+impl Default for RankFilter {
+    /// Written out rather than derived, because a derived `bool` default would
+    /// silently make the filter sequential.
+    fn default() -> Self {
+        Self {
+            staging: Vec::new(),
+            negated: Vec::new(),
+            plan: None,
+            parallel_rows: true,
+        }
+    }
 }
 
 impl RankFilter {
@@ -109,6 +125,23 @@ impl RankFilter {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Chooses whether rows are spread across rayon, which they are by default.
+    ///
+    /// **A caller that is already inside a rayon job should turn this off.**
+    /// §6 forbids nesting `par_iter`, and this is why: the tile pipeline runs
+    /// one job per tile, and a nested parallel filter lets rayon resume some
+    /// *other* tile's job on this thread while this one is still in the middle
+    /// of its own. Anything the outer job was holding — a thread-local scratch
+    /// buffer, a `RefCell` borrow — is then re-entered. It also contends for the
+    /// same cores the outer level already saturates: measured on a 2120 px tile,
+    /// the erosion is faster sequentially inside a four-tile run than it is
+    /// nested, 0.014 s against 0.051 s.
+    #[must_use]
+    pub fn with_parallel_rows(mut self, parallel: bool) -> Self {
+        self.parallel_rows = parallel;
+        self
     }
 
     /// Applies the filter to `pixels`, in place, reusing this filter's buffers.
@@ -210,11 +243,18 @@ impl RankFilter {
         // than once per row. The scratch is O(width); the megabyte-scale buffer
         // is `self.source`, which is reused across calls.
         let scratch = || Scratch::new(width, plan.max_half_width());
-        out.par_chunks_mut(width)
-            .enumerate()
-            .for_each_init(scratch, |scratch, (y, out)| {
-                filter_row(&scan, scratch, out, y)
-            });
+        if self.parallel_rows {
+            out.par_chunks_mut(width)
+                .enumerate()
+                .for_each_init(scratch, |scratch, (y, out)| {
+                    filter_row(&scan, scratch, out, y)
+                });
+        } else {
+            let mut scratch = scratch();
+            out.chunks_mut(width)
+                .enumerate()
+                .for_each(|(y, out)| filter_row(&scan, &mut scratch, out, y));
+        }
     }
 }
 
