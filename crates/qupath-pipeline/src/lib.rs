@@ -9,26 +9,26 @@
 //! # What this is not
 //!
 //! **It is not `WatershedCellDetection`, and its output is not detections.**
-//! Every image-processing stage QuPath runs before the watershed is now here
-//! and pinned against QuPath's own output — background subtraction by
+//! Every image-processing stage QuPath runs before the watershed is here and
+//! pinned against QuPath's own output — background subtraction by
 //! reconstruction, the Laplacian of Gaussian, the regional maxima, the
-//! labelling and the flood. What is absent is everything QuPath does *after*
-//! the flood, which is where a basin becomes a cell:
+//! labelling and the flood — and so now are the first two things it does
+//! afterwards: tracing each basin to a hole-filled region, and dropping the
+//! ones whose mean intensity or background overlap disqualifies them.
 //!
-//! - **ROI tracing.** QuPath converts the label image to polygons with
-//!   `getFilledPolygonROIs`, which fills interior holes. A basin with a hole is
-//!   one object there and an annulus here.
-//! - **The mean-intensity test.** Every candidate whose mean over the
-//!   background-subtracted image is `<= threshold` (0.1 by default) is dropped.
-//! - **The area filter.** Objects outside 10–400 µm² are dropped.
+//! What is still absent, all of it downstream of the filter:
+//!
 //! - **Merging and the shape split.** The survivors are dilated, intersected
 //!   with the thresholded Laplacian, and split again by a distance-transform
-//!   watershed.
+//!   watershed. This changes object identity, not only count.
+//! - **The area filter.** Objects outside 10–400 µm² are dropped — but *after*
+//!   that merge and split, on its objects rather than on these, which is why it
+//!   is not applied here.
 //! - **Cell expansion and measurement.**
 //!
-//! Those five are why the count here is not QuPath's count, and all of them cut
-//! it. The counts below are basins that passed no object-level test, and no
-//! fixture pins them. `docs/ROADMAP.md` §1.5 is where they get ported.
+//! Those are why [`Outcome::objects`] is not QuPath's count. It is a count of
+//! candidates that passed the first object-level test and no other, and
+//! `docs/ROADMAP.md` §1.5 is where the rest get ported.
 //!
 //! What this does establish is the path: real pixels, real decode, every ported
 //! stage in QuPath's own order, at tile granularity, with memory that does not
@@ -41,6 +41,7 @@
 //! across tiles. [`Outcome::peak_resident_bytes`] reports the high-water mark
 //! so that a test can assert it, as §6 requires.
 
+mod objects;
 mod stain;
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -48,9 +49,10 @@ use std::time::Instant;
 
 use qupath_filters::{Convolver, GaussianBlur, RankFilter, RankOp, Reconstructor};
 use qupath_slide::{Slide, SlideError};
-use qupath_watershed::{Connectivity, Labeller, Watershed};
+use qupath_watershed::{Connectivity, Labeller, RegionTracer, Watershed};
 use rayon::prelude::*;
 
+pub use objects::{ObjectFilter, RegionStats};
 pub use stain::Stains;
 
 /// A rectangle of a pyramid level, in that level's pixel coordinates.
@@ -112,6 +114,17 @@ pub struct Params {
     /// that corresponds to what detection does, and the previous 0.12 was an
     /// optical-density threshold that no longer means anything here.
     pub threshold: f32,
+    /// Mean intensity a traced candidate must **exceed** to survive.
+    ///
+    /// This is QuPath's `threshold` parameter, 0.1 by default, and it is a
+    /// different number from [`Params::threshold`] above: that one gates the
+    /// flood and QuPath hardcodes it to zero, while this one gates objects.
+    ///
+    /// The mean is taken over `ipToMeasure` — the optical density *after* the
+    /// background subtraction and *before* the blur and the Laplacian — across
+    /// the candidate's filled region. The test is `mean <= threshold` drops, so
+    /// a candidate landing exactly on this value does not survive.
+    pub intensity_threshold: f64,
     /// Flood connectivity.
     pub connectivity: Connectivity,
 }
@@ -134,6 +147,9 @@ impl Default for Params {
             // peak of the Laplacian and its surroundings are negative, so zero
             // is where the object boundary falls rather than a tuned constant.
             threshold: 0.0,
+            // QuPath's `threshold` parameter. Nothing scales it: it is an
+            // optical density, so it is independent of the pixel size.
+            intensity_threshold: 0.1,
             // `Watershed.doWatershed(fpLoG, ipNucleusLabels, 0, false)` — the
             // `false` is `conn8`. Four, not eight, and not the same as the
             // 8-connected neighbourhood the maxima test uses one line earlier.
@@ -164,6 +180,8 @@ struct StageClocks {
     maxima: AtomicU64,
     label: AtomicU64,
     flood: AtomicU64,
+    trace: AtomicU64,
+    filter: AtomicU64,
 }
 
 /// Time spent in each stage, in seconds, summed across threads.
@@ -185,6 +203,10 @@ pub struct Stages {
     pub label: f64,
     /// The watershed flood.
     pub flood: f64,
+    /// Tracing each basin to a hole-filled region.
+    pub trace: f64,
+    /// The mean-intensity and background-mask tests over those regions.
+    pub filter: f64,
 }
 
 impl Stages {
@@ -199,6 +221,8 @@ impl Stages {
             + self.maxima
             + self.label
             + self.flood
+            + self.trace
+            + self.filter
     }
 }
 
@@ -213,6 +237,16 @@ pub struct Outcome {
     pub markers: u64,
     /// Pixels that ended up carrying a label.
     pub labelled: u64,
+    /// Basins traced to hole-filled candidate regions, summed over tiles.
+    ///
+    /// Lower than [`Outcome::markers`] wherever two basins met with no
+    /// watershed line between them, or one enclosed another.
+    pub regions: u64,
+    /// Candidates surviving the mean-intensity and background-mask tests.
+    ///
+    /// **Still not QuPath's cell count.** The merge, the shape split and the
+    /// area filter all come after this and all of them change it.
+    pub objects: u64,
     /// Wall-clock seconds for the whole run.
     pub elapsed: f64,
     /// Per-stage totals, summed across threads.
@@ -262,6 +296,11 @@ struct Scratch {
     /// Non-empty only where a region exceeded [`Params::max_background`], which
     /// on most tiles is never, so it usually stays at zero capacity.
     background_mask: Vec<f32>,
+    /// QuPath's `ipToMeasure`: `density` copied once the background has been
+    /// subtracted and before the blur touches it. The object filter measures
+    /// this and nothing else measures it, which is why it is a separate buffer
+    /// rather than a stage the pipeline could read back.
+    to_measure: Vec<f32>,
     /// The Laplacian of Gaussian: written from `density`, and the image every
     /// stage after it reads. Separate because the convolution reads a
     /// neighbourhood and so cannot write over what it is still reading.
@@ -269,12 +308,16 @@ struct Scratch {
     /// How far each pixel of `log` stands above the saddle that reaches it.
     prominence: Vec<f32>,
     labels: Vec<f32>,
+    /// Which traced candidate each pixel belongs to, holes included.
+    regions: Vec<u32>,
     blur: GaussianBlur,
     filter: RankFilter,
     convolver: Convolver,
     reconstructor: Reconstructor,
     labeller: Labeller,
     flooder: Watershed,
+    tracer: RegionTracer,
+    objects: ObjectFilter,
 }
 
 impl Scratch {
@@ -284,15 +327,19 @@ impl Scratch {
             density: Vec::new(),
             background: Vec::new(),
             background_mask: Vec::new(),
+            to_measure: Vec::new(),
             log: Vec::new(),
             prominence: Vec::new(),
             labels: Vec::new(),
+            regions: Vec::new(),
             blur: GaussianBlur::new(),
             filter: RankFilter::new(),
             convolver: Convolver::new(),
             reconstructor: Reconstructor::new(),
             labeller: Labeller::new(),
             flooder: Watershed::new(),
+            tracer: RegionTracer::new(),
+            objects: ObjectFilter::new(),
         }
     }
 }
@@ -355,6 +402,8 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
     let clocks = StageClocks::default();
     let markers = AtomicU64::new(0);
     let labelled = AtomicU64::new(0);
+    let regions = AtomicU64::new(0);
+    let objects = AtomicU64::new(0);
     let width = level.tile_width as usize;
 
     // CMU-1 carries no stain estimate of its own, so QuPath falls back to these
@@ -378,9 +427,17 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
             // estimated and subtracted from the detection image *before* the
             // Laplacian of Gaussian, not after it.
             let mark = Instant::now();
+            let mut background_masked = false;
             if params.background_radius > 0.0 {
-                subtract_background(scratch, width, params);
+                background_masked = subtract_background(scratch, width, params);
             }
+            // `ipToMeasure = fpLoG.duplicate()` when a background was
+            // subtracted, and `ipToMeasure = fpDetection` when none was. Taking
+            // the copy here covers both: `density` is the subtracted image in
+            // the first case and the untouched optical density in the second.
+            // Timed with the stage that produced it; it is one tile memcpy.
+            scratch.to_measure.clear();
+            scratch.to_measure.extend_from_slice(&scratch.density);
             clocks.background.fetch_add(nanos(mark), Ordering::Relaxed);
 
             let mark = Instant::now();
@@ -425,6 +482,38 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
                 scratch.labels.iter().filter(|&&l| l != 0.0).count() as u64,
                 Ordering::Relaxed,
             );
+
+            // `getFilledPolygonROIs(ipNucleusLabels, Wand.FOUR_CONNECTED)`
+            // against a threshold of 0.5: basins become candidate objects, with
+            // their holes filled and anything they enclose absorbed.
+            let mark = Instant::now();
+            scratch.regions.clear();
+            scratch.regions.resize(scratch.labels.len(), 0);
+            let traced = scratch.tracer.trace_into(
+                &scratch.labels,
+                &mut scratch.regions,
+                width,
+                0.5,
+                f32::INFINITY,
+            );
+            clocks.trace.fetch_add(nanos(mark), Ordering::Relaxed);
+            regions.fetch_add(u64::from(traced), Ordering::Relaxed);
+
+            let mark = Instant::now();
+            let background = if background_masked {
+                Some(scratch.background_mask.as_slice())
+            } else {
+                None
+            };
+            let kept = scratch.objects.apply(
+                &scratch.to_measure,
+                &scratch.regions,
+                traced,
+                params.intensity_threshold,
+                background,
+            );
+            clocks.filter.fetch_add(nanos(mark), Ordering::Relaxed);
+            objects.fetch_add(u64::from(kept), Ordering::Relaxed);
             Ok(())
         })
         .collect();
@@ -437,6 +526,8 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
         pixels: tiles.len() as u64 * (width * level.tile_height as usize) as u64,
         markers: markers.load(Ordering::Relaxed),
         labelled: labelled.load(Ordering::Relaxed),
+        regions: regions.load(Ordering::Relaxed),
+        objects: objects.load(Ordering::Relaxed),
         elapsed,
         stages: Stages {
             decode: seconds(&clocks.decode),
@@ -447,6 +538,8 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
             maxima: seconds(&clocks.maxima),
             label: seconds(&clocks.label),
             flood: seconds(&clocks.flood),
+            trace: seconds(&clocks.trace),
+            filter: seconds(&clocks.filter),
         },
         peak_resident_bytes: peak_resident_bytes(),
     })
@@ -528,8 +621,15 @@ fn seed_markers(
 /// image with its opening — which is what a morphological opening reads like —
 /// keeps the background and discards the nuclei. The subtraction keeps exactly
 /// what the opening threw away, which is the nuclei.
-fn subtract_background(scratch: &mut Scratch, width: usize, params: Params) {
+///
+/// Returns whether `scratch.background_mask` was populated, which is QuPath's
+/// `bpBackgroundMask != null`. The object filter reads that mask, so it is
+/// cleared on every call rather than only when it is rebuilt: leaving a
+/// previous tile's mask behind would reject this tile's candidates at
+/// coordinates that mean nothing here.
+fn subtract_background(scratch: &mut Scratch, width: usize, params: Params) -> bool {
     let radius = params.background_radius;
+    scratch.background_mask.clear();
 
     scratch.background.clear();
     scratch.background.resize(scratch.density.len(), 0.0);
@@ -544,13 +644,12 @@ fn subtract_background(scratch: &mut Scratch, width: usize, params: Params) {
     // Regions too dark to be background at all. QuPath only allocates the mask
     // if some pixel exceeds the limit, and on tissue that is usually never, so
     // the common path is this scan and nothing else.
-    if params.max_background > 0.0
+    let masked = params.max_background > 0.0
         && scratch
             .background
             .iter()
-            .any(|&value| value > params.max_background)
-    {
-        scratch.background_mask.clear();
+            .any(|&value| value > params.max_background);
+    if masked {
         scratch.background_mask.extend(
             scratch
                 .background
@@ -577,6 +676,7 @@ fn subtract_background(scratch: &mut Scratch, width: usize, params: Params) {
     for (value, &estimate) in scratch.density.iter_mut().zip(&scratch.background) {
         *value -= estimate;
     }
+    masked
 }
 
 /// Process high-water resident set size, from `/proc/self/status`.

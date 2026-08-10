@@ -65,6 +65,8 @@ fn main() {
         ("maxima", stages.maxima),
         ("labelling", stages.label),
         ("watershed", stages.flood),
+        ("tracing", stages.trace),
+        ("object filter", stages.filter),
     ] {
         println!(
             "  {name:<13} {seconds:7.3} s  {:5.1}%",
@@ -79,15 +81,21 @@ fn main() {
         outcome.labelled,
         100.0 * outcome.labelled as f64 / outcome.pixels as f64
     );
+    println!(
+        "{} basins traced to candidates, {} passed the intensity filter ({:.1}% dropped)",
+        outcome.regions,
+        outcome.objects,
+        100.0 * (outcome.regions - outcome.objects) as f64 / outcome.regions as f64
+    );
     if let Some(bytes) = outcome.peak_resident_bytes {
         println!("peak resident memory: {:.0} MB", bytes as f64 / 1e6);
     }
     println!(
-        "\nNote: basins, not cells. Every image stage QuPath runs before its\n\
-         watershed is now here and pinned against QuPath's own output, but\n\
-         everything it runs after — ROI tracing, the mean-intensity test, the\n\
-         area filter, the merge and shape split — is not. All four of those\n\
-         only ever remove objects, so this count is an upper bound on QuPath's\n\
-         and the two are still not comparable."
+        "\nNote: candidates, not cells. Every image stage QuPath runs before its\n\
+         watershed is here and pinned against QuPath's own output, and so are the\n\
+         tracing and the intensity filter that follow it. What is not here is the\n\
+         merge and shape split, the area filter that runs on *its* objects, and\n\
+         the tile seams of ROADMAP §2. All of those only ever remove objects, so\n\
+         this count is still an upper bound on QuPath's rather than a match."
     );
 }
