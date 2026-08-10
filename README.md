@@ -80,7 +80,9 @@ compare against QuPath's own numbers could have found any of them.
 **End-to-end cell detection is unchanged at QuPath's 15.87 s**, and will stay
 that way until the stages above exist. Component speedups and what they are
 worth are in [docs/benchmarks/README.md](docs/benchmarks/README.md); what comes
-next is in [docs/ROADMAP.md](docs/ROADMAP.md).
+next is in [docs/ROADMAP.md](docs/ROADMAP.md). **New here? Start with
+[docs/MEMO.md](docs/MEMO.md)** — what is finished, what is genuinely faster, and
+what to distrust, in one page.
 
 ## Building
 

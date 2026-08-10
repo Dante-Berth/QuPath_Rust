@@ -3,6 +3,10 @@
 Where the port stands, what comes next, and what each next thing needs before
 it can claim anything. Written to be picked up cold.
 
+**Start with `docs/MEMO.md`** if you have not read it — twenty minutes of
+orientation, including an honest accounting of what is genuinely faster and what
+only looks it. This file is the detail underneath that.
+
 ## State of play
 
 Five crates, all five now with parity fixtures recorded from a real QuPath
@@ -14,7 +18,7 @@ build.
 | `qupath-watershed` | Marker-controlled flood, bucket queue, 4/8-connected labelling, filled-region tracing | `WatershedFlood.json`, 3 cases; `RegionalMaxima.json` labels, 13 surfaces; `ObjectFilters.json` regions, 17 images | queue 20-32x vs heap; flood 1.40x vs previous; labelling and tracing identical |
 | `qupath-filters` | MIN/MAX rank filter, Gaussian blur, convolution, morphological reconstruction | `RankFilterMinMax.json` 42 cases; `GaussianBlur.json` 10 kernels + 12 images; `LaplacianConvolution.json` 5 scales + 17 images; `RegionalMaxima.json` 11 reconstructions + 13 surfaces | rank 3.1-9.7x vs ImageJ; blur, convolution and reconstruction bit-identical |
 | `qupath-slide` | Aperio SVS / tiled TIFF reader | `SlideRegion.json`, 5 regions | 4000x4000 region in 0.09 s |
-| `qupath-pipeline` | Tiles a region QuPath's way, streams each tile through the above, filters and de-duplicates the candidates | `ColourDeconvolution*.json`; `ObjectFilters.json` statistics and decisions, 17 images | 42.5 Mpx/s on a saturated grid; 48,045 candidates against QuPath's 25,757 cells |
+| `qupath-pipeline` | Tiles a region QuPath's way, streams each tile through the above, filters and de-duplicates the candidates | `ColourDeconvolution*.json`; `ObjectFilters.json` statistics and decisions, 17 images | 42.6 Mpx/s on a saturated grid; 48,045 candidates against QuPath's 25,757 cells |
 
 **The end-to-end number is still QuPath's 15.87 s**, because the pipeline is not
 `WatershedCellDetection`. Every image-processing stage QuPath runs *before* its
@@ -70,7 +74,7 @@ QuPath's grid, against QuPath's 25,757 cells.
 4000x4000 region, and that is not a regression: the region is smaller than one
 of QuPath's grid steps, so it is now 4 tiles on 20 threads where it used to be
 272. Per pixel the work fell 30% (0.253 to 0.178 s/Mpx summed across threads).
-On a region large enough to fill the pool the pipeline does **42.5 Mpx/s**.
+On a region large enough to fill the pool the pipeline does **42.6 Mpx/s**.
 Quote that one, or quote both with the tile counts attached.
 
 ### The correction this file owes: §1.4 was not the stage that fixes the count
@@ -663,20 +667,36 @@ already ported.
    cache-blocking the separable stages within a tile, or accepting it; what is
    *not* available is going back to small tiles, because that is the §2 bug.
 
-   Two things already came out of this and are done:
+   Two things already came out of this and are done. **Both were measured
+   one variable at a time**, best of 5 on a 9000x9000 region, every variant
+   producing the same 142,957 objects:
 
-   - **The nested `par_iter` is gone.** The rank filter and the convolver were
-     rayon-parallel over rows *inside* a rayon job per tile — a §6 violation that
-     had been there since the tile loop was written. Removing it is worth **+14%
-     at saturation** (37.2 to 42.5 Mpx/s), because the inner level was only
-     contending for cores the outer level already had. It costs the few-tile case,
-     where the region is smaller than one grid step and 16 of 20 cores now idle;
+   | Variant | Best | Mpx/s |
+   | --- | ---: | ---: |
+   | `map_init` scratch, rows nested | 2.053 s | 39.5 |
+   | `map_init` scratch, rows sequential | 1.750 s | 46.3 |
+   | thread-local scratch, rows sequential (**main**) | 1.901 s | 42.6 |
+
+   - **The nested `par_iter` is gone**, and that is a real **1.17x**. The rank
+     filter and the convolver were rayon-parallel over rows *inside* a rayon job
+     per tile — a §6 violation that had been there since the tile loop was
+     written — and the inner level was only contending for cores the outer level
+     already had. It costs the few-tile case, where the region is smaller than one
+     grid step and 16 of 20 cores now idle;
      `RankFilter::with_parallel_rows(true)` is still there for that.
-   - **Per-worker scratch is a thread-local, not `map_init`.** `map_init` builds
-     its state once per rayon *job*, and rayon makes more jobs when there are more
-     items, so peak memory grew with the tile count rather than the thread count.
-     At 2 MB a tile nobody noticed; at 145 MB it is the difference between bounded
-     and unbounded. `bounded_memory` asserts the property directly now.
+   - **Per-worker scratch is a thread-local, not `map_init`**, and that costs
+     **8%**. `map_init` builds its state once per rayon *job*, and rayon makes
+     more jobs when there are more items, so peak memory grew with the tile count
+     rather than the thread count. At 2 MB a tile nobody noticed; at 145 MB it is
+     the difference between bounded and unbounded. The 8% is the price of the
+     bound and is paid deliberately.
+
+   **Net, the two together are 1.08x** — not the 1.14x an earlier revision of
+   this file claimed from a single-shot pair of runs that also happened to change
+   two things at once. Caveat on all three rows: separate processes, not
+   interleaved in one, so they do not meet the bar
+   `docs/benchmarks/README.md` sets for a component claim. Treat 1.17x and 8% as
+   approximate and the ordering as sound.
 9. **SIMD**, last, per §0.5 — and only behind a scalar fallback with a
    differential test. Note §4.3 and §4.4 got 2.3x and 3.7x without any explicit
    SIMD, by removing a dependency rather than by widening an instruction.
@@ -800,7 +820,13 @@ the third stage running.
   with the item count. Invisible while tiles were 2 MB; unbounded once they were
   145 MB.
 - **Do not nest `par_iter`, and this repository had for months.** The rank filter
-  and the convolver parallelised rows inside a per-tile rayon job. It cost 14% at
-  saturation, and it made a thread-local scratch unsound — rayon resumes another
-  tile's job on the blocked thread, which re-enters whatever the outer job was
-  holding. §6 says not to; the reason is both of those.
+  and the convolver parallelised rows inside a per-tile rayon job. It cost 1.17x
+  at saturation, and it made a thread-local scratch unsound — rayon resumes
+  another tile's job on the blocked thread, which re-enters whatever the outer
+  job was holding. §6 says not to; the reason is both of those.
+- **Two changes measured together are not a measurement.** The 1.17x above was
+  first reported as "+14%" from one run before the session and one after, with
+  the scratch strategy changed in between as well. Re-measured one variable at a
+  time it is 1.17x for the nesting and *minus* 8% for the scratch, netting 1.08x.
+  The direction happened to survive; the number did not, and nothing guaranteed
+  the direction would.
