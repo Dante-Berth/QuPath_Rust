@@ -128,3 +128,68 @@ TIFF tag rather than trusting the JPEG's markers is what fixes it.
 
 **Status:** matches QuPath within documented tolerance. Geometry — level sizes,
 level count, tile placement — is asserted exactly, with no tolerance.
+
+## D-005 — Detection runs at the slide's own pixel size, not QuPath's 0.5 µm
+
+**QuPath:** `WatershedCellDetection` does not analyse the pixels it is given. It
+resolves `requestedPixelSizeMicrons` (default 0.5) against the slide's own pixel
+size, takes the larger of the two, and requests the region at that downsample
+(`getPreferredPixelSizeMicrons` →
+`ServerTools.getDownsampleFactor`,
+`qupath-core-processing/src/main/java/qupath/imagej/detect/cells/WatershedCellDetection.java:402-431`).
+It then converts every micron-valued parameter against the **resampled** pixel
+size.
+
+On CMU-1, whose `MPP` is 0.4990, that is a downsample of 1.002 — an interpolated
+resample by a factor just above one — after which the effective pixel size is
+exactly 0.5 µm and QuPath's parameters come out as round numbers:
+
+| Parameter | QuPath, at 0.5 µm/px | Here, at 0.4990 µm/px |
+| --- | ---: | ---: |
+| Background radius | 16.00 px | 16.03 px |
+| Sigma | 3.000 px | 3.006 px |
+| Minimum area | 40.0 px² | 40.2 px² |
+| Maximum area | 1600 px² | 1606.4 px² |
+
+**Here:** `qupath-pipeline` reads level 0 as it is and converts the same micron
+values against the pixel size it actually has. The parameters differ in the
+third significant figure, and the pixels themselves are not interpolated.
+
+**Consequence:** unquantified, and it is the one entry in this file that is not
+yet measured. Both effects are small — a 0.2% difference in every radius, and a
+resample by 1.002 — but they are not zero, and they fall on a stage whose output
+feeds a maximum test, which is where small differences have previously turned
+into different object counts. It must be quantified before §1.6 compares counts,
+because a count that differs by a few per cent cannot be attributed until this
+is ruled out.
+
+**Status:** deliberate, and provisional. Matching QuPath exactly would mean
+porting its resample, which is an ImageJ `ImageProcessor.resize` with its own
+interpolation convention and would need its own fixture. Reading the slide at
+its native resolution is the more defensible default for this pipeline —
+resampling by 1.002 destroys information for nothing — but "more defensible" is
+not "the same", and the target here is the same.
+
+## D-006 — Reconstruction does not validate that the marker lies under the mask
+
+**QuPath:** `MorphologicalReconstruction.morphologicalReconstruction(marker,
+mask)` only ever *raises* the marker. It has a `validateMarkerMask` that would
+clamp a marker lying above its mask (`copyBits(..., Blitter.MIN)`) and **does
+not call it**. A marker pixel above its mask value is therefore left exactly
+where it is, and the result is not a reconstruction of anything.
+
+**Measured**, against `qupath-core-processing` on JDK 25: a uniform marker of
+5.0 under a ramp mask spanning -0.5 to 0.15 comes back as 5.0 everywhere, in
+`parity/fixtures/RegionalMaxima.json`'s `marker-above-mask` case.
+
+**Here:** reproduced exactly. `Reconstructor::reconstruct` raises and never
+lowers, and says so in its documentation.
+
+**Consequence:** none for either caller, and both satisfy the precondition
+structurally rather than by checking it — the regional-maximum transform starts
+from a copy of the mask with holes punched in it, and the opening by
+reconstruction starts from an erosion of the mask. A third caller would have to
+establish it for itself.
+
+**Status:** deliberate bug-for-bug parity. Adding the clamp would be correct in
+general and wrong here.

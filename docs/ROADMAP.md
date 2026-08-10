@@ -11,29 +11,65 @@ build.
 | Crate | Does | Parity | Measured |
 | --- | --- | --- | --- |
 | `qupath-objects` | Columnar detection/measurement table | `MeasurementPrecision.json` | ~100x on scan/filter |
-| `qupath-watershed` | Marker-controlled flood, bucket queue | `WatershedFlood.json`, 3 cases | queue 20-32x vs heap; flood 1.40x vs previous |
-| `qupath-filters` | MIN/MAX rank filter, Gaussian blur, convolution | `RankFilterMinMax.json` 42 cases; `GaussianBlur.json` 10 kernels + 12 images; `LaplacianConvolution.json` 5 scales + 17 images | rank 3.1-9.7x vs ImageJ; blur and convolution bit-identical |
+| `qupath-watershed` | Marker-controlled flood, bucket queue, 4/8-connected labelling | `WatershedFlood.json`, 3 cases; `RegionalMaxima.json` labels, 13 surfaces | queue 20-32x vs heap; flood 1.40x vs previous; labelling identical |
+| `qupath-filters` | MIN/MAX rank filter, Gaussian blur, convolution, morphological reconstruction | `RankFilterMinMax.json` 42 cases; `GaussianBlur.json` 10 kernels + 12 images; `LaplacianConvolution.json` 5 scales + 17 images; `RegionalMaxima.json` 11 reconstructions + 13 surfaces | rank 3.1-9.7x vs ImageJ; blur, convolution and reconstruction bit-identical |
 | `qupath-slide` | Aperio SVS / tiled TIFF reader | `SlideRegion.json`, 5 regions | 4000x4000 region in 0.09 s |
-| `qupath-pipeline` | Streams tiles through the above | `ColourDeconvolution*.json` | 17.8 Mpx in 0.091 s, 53 MB peak |
+| `qupath-pipeline` | Streams tiles through the above | `ColourDeconvolution*.json` | 17.8 Mpx in 0.21 s, 60 MB peak |
 
 **The end-to-end number is still QuPath's 15.87 s**, because the pipeline is not
-`WatershedCellDetection`. It runs real slide pixels through the ported stages
-and nothing else. Do not compare the two figures until §1 below is done; the
-pipeline currently produces 91,957 basins where QuPath detects 25,757 cells.
+`WatershedCellDetection`. Every image-processing stage QuPath runs *before* its
+watershed is now ported and pinned; nothing it runs *after* is. Do not compare
+the two figures until §1.5 below is done; the pipeline currently produces 88,424
+basins where QuPath detects 25,757 cells.
 
 **The pipeline's own figure is not a speedup series and must not be read as
-one.** It has moved 0.114 s -> 0.062 s -> 0.091 s -> 0.114 s, and no step was
-the same work as the one before it: §1.1 corrected a wrong stain vector, and
-§1.2 and §1.3 each added a stage that had been missing. A figure that goes up
-because a stage was added is the honest outcome.
+one.** It has moved 0.114 s -> 0.062 s -> 0.091 s -> 0.114 s -> 0.21 s, and no
+step was the same work as the one before it: §1.1 corrected a wrong stain
+vector, and §1.2, §1.3 and §1.4 each added a stage that had been missing. A
+figure that goes up because a stage was added is the honest outcome.
 
-**The counts are not a quality series either, and they have now gone the wrong
-way**: 397,822 -> 211,728 -> 42,966 -> 91,957 basins, against QuPath's 25,757
-cells. The last step is §1.3 landing: a Laplacian is a second derivative, so it
-manufactures local maxima wherever the blurred image has structure, and the
-stage that removes them — §1.4's prominence test — is exactly what is still
-missing. A correct stage made the count worse, and it will keep being worse
-until the stage that tames it exists. This is why the count is not a score.
+**The counts are not a quality series either**: 397,822 -> 211,728 -> 42,966 ->
+91,957 -> 88,424 basins, against QuPath's 25,757 cells.
+
+### The correction this file owes: §1.4 was not the stage that fixes the count
+
+Two revisions of this file said the prominence test in `findRegionalMaxima` was
+what would bring the count down — "the stage that removes them", "exactly what
+is still missing". **It is ported now, bit-identically, and it removes
+essentially nothing.** Measured on the profiled region: 88,422 candidate maxima
+before the prominence test, 88,424 markers after it. The +2 is the 4-connected
+labelling splitting two diagonal pairs; the prominence test itself discarded
+none of them.
+
+The reasoning was wrong in a way worth keeping, because it is the same shape as
+the `MaximumFinder` and `EOSIN` errors — a plausible reading of the source that
+nobody checked against a run:
+
+- `findRegionalMaxima(fpLoG, 0.001f, false)` looks like an h-maxima transform
+  with `h = 0.001`, and the threshold looks like a prominence floor. It is
+  neither. `0.001` gates the maximum's **value**, and what survives is
+  prominence **strictly greater than zero**.
+- A prominence of exactly zero happens only on an exact plateau — a terrace
+  whose pixels are bit-identical to a neighbour that is not itself a maximum.
+  On synthetic surfaces that is common, which is why the fixture's
+  `shoulder-plateau` case is emphatic. On a real Laplacian of Gaussian, values
+  are continuous floats and exact ties essentially never occur.
+- So on real data the stage is an identity on the marker count. It is still
+  required — it is what QuPath computes, and the port is now bit-identical to it
+  — but it is a correctness fix, not a count fix.
+
+**Where the count gap actually is**, measured on the same region (see §1.5):
+QuPath's object-level filters, all of which run *after* the watershed and all of
+which only ever remove objects. Applying its area window (40.2–1606 px²) to the
+basins here would drop 27%; its mean-intensity test (`> 0.1` on the
+background-subtracted optical density) would drop 25%; together they leave
+50,927. The remaining 2x is the merge-and-split, the ROI tracing's hole filling,
+and the tile seams of §2 — none of which is ported and each of which is a
+plausible several thousand.
+
+The lesson for the next stage on this list: **measure what a stage removes
+before claiming it is the one that will.** The count was used as a prediction
+here and it was a bad one.
 
 The parts that *are* comparable — component A/B runs, interleaved, asserting
 identical output — are in `docs/benchmarks/README.md`.
@@ -135,8 +171,9 @@ a pass and each output pixel is accumulated by one line in a fixed order.
 QuPath's 25,757 cells for this region — from 8.2x too many to 1.7x. That was the
 noise-driven maxima this item predicted, going away. It was never parity, and
 §1.3 landing afterwards took the count back up to 91,957: the blur alone
-suppresses maxima, and the Laplacian that follows it creates them again. Only
-§1.4 removes the ones that should not be there.
+suppresses maxima, and the Laplacian that follows it creates them again. The
+sentence that used to end this paragraph — "only §1.4 removes the ones that
+should not be there" — was wrong, and §1.4 records why.
 
 The blur was 31% of pipeline stage time when it landed and is now 17%, after
 the change in §4.3. See `docs/benchmarks/README.md` for both, including the
@@ -173,10 +210,16 @@ convolved the pre-blur image.
 
 Optimised in the same pass, 3.69x in place — see §4.4.
 
-### 1.4 The maxima — and a correction to what this file used to say
+### 1.4 The maxima — **done**
 
-**This section previously named `MaximumFinder`. That was wrong.**
-`WatershedCellDetection` never calls it. What it calls is:
+Pinned by `RegionalMaxima.json`: 11 marker/mask pairs through
+`morphologicalReconstruction`, and 13 whole surfaces through
+`findRegionalMaxima` and the `labelImage` after it. **Bit-identical** to
+QuPath on every value of every case, asserted rather than reported — this is
+comparisons and assignments with one absolute difference at the end, so there is
+no rounding freedom and any difference is a defect.
+
+What detection calls:
 
 ```java
 ImageProcessor ipTemp = MorphologicalReconstruction.findRegionalMaxima(fpLoG, 0.001f, false);
@@ -184,60 +227,139 @@ ImageProcessor ipNucleusLabels = RoiLabeling.labelImage(ipTemp, 0, false);
 Watershed.doWatershed(fpLoG, ipNucleusLabels, 0, false);
 ```
 
-`MaximumFinder` *is* used elsewhere in QuPath — by `TMADearrayer`,
-`SubcellularDetection` and `WatershedCellMembraneDetection` — which is
-presumably how it got into this list. Porting it would have produced a correct
-implementation of an algorithm this pipeline never runs.
+Two levels are recorded so a failure says which half is wrong. `getMaximaLabels`
+sits between them and is package-private, so it is pinned only through what the
+pair produce.
 
-**This also merges what used to be §1.3's second half and §1.4 into one item.**
-`findRegionalMaxima` *is* morphological reconstruction; the 5.1% of self time
-the profile attributed to `dilateAndCompare` is time spent inside it. They were
-never two stages.
+Five things the call site does not show, each mutation-checked against a case
+that fails without it:
 
-The algorithm, from
-`qupath-core-processing/.../imagej/processing/MorphologicalReconstruction.java`:
+- **The maximum test is not strict**, and it skips the one-pixel frame:
+  `getMaximaLabels` marks every pixel `>= 0.001` that is `>=` all eight
+  neighbours, scanning `y1+1 .. y2-1`. Making it strict, or scanning the border,
+  both fail.
+- **Reconstruction only ever raises the marker.** It assumes `marker <= mask`
+  and never checks: `validateMarkerMask` exists for exactly that and
+  `morphologicalReconstruction` does not call it. A marker above its mask is
+  left where it is, and the fixture's `marker-above-mask` comes back untouched.
+  Both callers here satisfy the precondition structurally.
+- **Reconstruction is 8-connected in the queue too.** The raster passes read
+  both diagonals of the previous row for free, so a queue that propagates only
+  orthogonally passes every ordinary case; `diagonal-serpentine` is a corridor
+  whose legs join only at corners, and it is what caught that. A checkerboard
+  was tried first and did *not* catch it — the raster passes settle it — which
+  is worth remembering before trusting a case that looks discriminating.
+- **The output is `|reconstructed - original|`**, an absolute difference.
+  Dropping the `abs` fails.
+- **The labelling is 4-connected and its threshold is strictly `> 0`**, where
+  the maxima that produced the pixels were found 8-connected and gated at
+  `0.001`. Three thresholds in two lines and none of them is the same number.
 
-1. `getMaximaLabels` copies the image and sets every pixel that is `>= 0.001`
-   and `>=` all eight neighbours to **negative infinity**. Note this is a
-   non-strict test, so plateaus are all marked.
-2. `morphologicalReconstruction(marker, mask)` fills those holes back up by
-   geodesic dilation under the original image, run to convergence: raster
-   forward/backward `dilateAndCompare` passes while more than 10% of pixels
-   change, then a queue-based pass.
-3. `copyBits(..., Blitter.DIFFERENCE)` leaves `|reconstructed - original|`,
-   which is the **prominence** of each maximum — how far it stands above the
-   highest saddle that reaches it.
-4. `labelImage(ipTemp, 0, false)` labels **4-connected** components of
-   prominence `> 0`. Note the connectivity: `seed_maxima` currently groups
-   8-connected.
+Two properties confirmed rather than assumed, by mutation:
 
-So the prominence test this file wanted is real, but it lives in the
-reconstruction rather than in a tolerance flood. Two consequences worth
-recording before porting:
+- **The fixed point does not depend on the traversal.** Turning the queue from
+  FIFO to LIFO, and deleting the `>10%` repeat loop entirely, both leave every
+  case bit-identical. So a future faster traversal is free to differ — which is
+  not true of anything else ported in this crate.
+- **The queue phase is still load-bearing.** Deleting it fails, on the
+  serpentine cases: the raster passes alone do not converge on a path that
+  doubles back.
 
-- Reconstruction by dilation has a **unique fixed point**, independent of the
-  order pixels are visited in. So the port is free to use a faster traversal
-  than QuPath's raster-then-queue scheme and still be exact — which is not true
-  of most of what has been ported so far.
-- `fpLoG.setRoi(roi)` is called *before* `findRegionalMaxima` and bounds every
-  loop inside it, where the Laplacian on the line above ran over the whole
-  image. The tile pipeline uses whole tiles, so this is currently moot, but it
-  stops being moot as soon as a real ROI is passed.
+`fpLoG.setRoi(roi)` is called *before* `findRegionalMaxima` and bounds every
+loop inside it, where the Laplacian on the line above ran over the whole image.
+The tile pipeline uses whole tiles, so this is still moot, and stops being moot
+as soon as a real ROI is passed.
 
-Fixture: record `findRegionalMaxima` on small synthetic surfaces with plateaus
-and near-equal peaks, plus one real tile, and record `morphologicalReconstruction`
-separately on hand-built marker/mask pairs so a failure says which half is
-wrong. `getMaximaLabels` is package-private and cannot be called directly, so
-the two-level fixture is how it gets pinned.
+**On the count, see the correction at the top of this file.** This stage removed
+2 markers net on the profiled region, not the thousands this list predicted, and
+the prediction was the error rather than the port.
 
-The bucket queue in `qupath-watershed` is directly reusable for step 2.
+Cost in place: 12.0% of pipeline stage time, which is the reconstruction — the
+labelling that follows it is 0.9%.
 
-### 1.5 Thresholding, ROI tracing, measurements
+### 1.4b Background subtraction — **done, and it was a real divergence**
 
-The tail of detection: threshold the reconstructed image, trace object
-boundaries to ROIs, compute per-object measurements into the columnar table
-that `qupath-objects` already provides. ROI tracing is the fiddly one — QuPath
-uses a specific contour-following convention and the vertices must match.
+Not previously on this list, which is why it is numbered here rather than
+renumbering everything below it. Found while reading the call site for §1.4.
+
+`WatershedCellDetection` does not run its rank filter the way this pipeline was
+running one. Its median filter defaults to radius **0** and is skipped entirely;
+what actually sits between the deconvolution and the blur is:
+
+```java
+ipBackground = fpLoG.duplicate();
+bpBackgroundMask = estimateBackground(fpLoG, ipBackground, backgroundRadius, maxBackground, true);
+fpLoG.copyBits(ipBackground, 0, 0, Blitter.SUBTRACT);
+```
+
+`estimateBackground` is an **opening by reconstruction** — erode by 8 µm, then
+let the result grow back under the original image — and the line after it
+**subtracts** that estimate. Together they are a top hat.
+
+The pipeline had a morphological opening at radius 2 px *replacing* the image,
+described in its own doc comment as standing in for the median filter. Three
+things wrong at once: the wrong operation (opening, not opening by
+reconstruction), the wrong radius (2 px against 16.03), and — the one that
+matters — **replacing rather than subtracting**, which keeps the background and
+discards the nuclei instead of the other way round. It produced a perfectly
+plausible image, like the other three bugs this repository has caught.
+
+Both halves reuse pinned code: the MIN rank filter from §1.2's crate and the
+reconstruction from §1.4. `max_background` is ported too — the scan for regions
+too dark to be background, and the dilated mask that drops them to negative
+infinity — because it changes the estimate. QuPath's *other* use of that mask,
+discarding nuclei that sit on it, is an object-level test and belongs in §1.5
+with the rest.
+
+The flood connectivity was wrong in the same place and is fixed with it:
+`doWatershed(fpLoG, ipNucleusLabels, 0, false)` — the `false` is `conn8`, so the
+flood is **4**-connected, not 8. It is also not the connectivity of the maxima
+test one line earlier, which is 8.
+
+This stage now costs 52% of pipeline stage time, the largest by a wide margin —
+59% of it the radius-16 erosion, 40% the reconstruction. Both numbers are new
+and neither has been looked at; see §4.7.
+
+### 1.5 ROI tracing, the object filters, measurements — **the count gap**
+
+This is now the whole remaining gap, and §1.4's correction at the top of this
+file is the argument that it is. Everything QuPath does after the watershed, in
+order, with what each is worth on the profiled region:
+
+| Stage | Measured effect on the 88,424 basins |
+| --- | --- |
+| `getFilledPolygonROIs`, 4-connected, holes filled | not measured; changes object identity, not only count |
+| mean intensity `> 0.1` on the background-subtracted OD | 66,740 survive (25% dropped) |
+| `bp.filter(MAX)`, AND with the thresholded LoG | merges adjacent basins; not measured |
+| `watershedPostProcess`: EDM watershed, splits by shape | splits some back; not measured |
+| area outside 10–400 µm² (40.2–1606 px² here) | 64,826 survive (27% dropped) |
+| both filters together | **50,927** |
+| QuPath | **25,757** |
+
+The two filters that are cheap to estimate account for a little under half the
+gap. The remaining 2x has to be in the merge-and-split, the hole filling, or the
+tile seams of §2, and **which of those it is has not been established** — the
+estimates above were taken on raw basins, where QuPath measures traced,
+merged-and-resplit objects, so they are indicative and not a prediction.
+
+Order to port in, cheapest evidence first:
+
+1. **The mean-intensity and area filters**, which need only per-label sums and
+   counts over the label image — no tracing. Do these first: they are a
+   histogram pass, and they will say how much of the gap is really elsewhere.
+2. **Tile seams (§2)**, which are a correctness bug independent of all this and
+   inflate every count above.
+3. **ROI tracing.** The fiddly one: QuPath uses ImageJ's `Wand` with a specific
+   contour-following convention and fills interior holes, and the vertices must
+   match.
+4. **Merge and shape split**, which needs a Euclidean distance map and a second
+   watershed.
+5. **Measurements**, into the columnar table `qupath-objects` already provides.
+
+A fixture for each, recorded the same way as everything above. Note that the
+mean-intensity test measures `ipToMeasure`, which is the background-subtracted
+optical density **before** the blur and Laplacian — not the LoG the watershed
+ran on, and not the raw density either.
 
 ### 1.6 The claim
 
@@ -329,11 +451,30 @@ already ported.
    more than a strictly larger stage is a stall, and that ratio is worth
    checking for on every stage this list adds** — it is now the second time the
    same dependency has been shipped.
-5. **The watershed is now about 40% of pipeline stage time** — down from 53% only
-   because a stage was added in front of it, not because it got faster. It
-   remains the largest lever after §0.1, and it is still far above the 29.4% the
-   JFR profile attributed to it in QuPath.
-6. **SIMD**, last, per §0.5 — and only behind a scalar fallback with a
+5. **The watershed is now about 17% of pipeline stage time** — down from 40%
+   only because §1.4b added a much larger stage in front of it, not because it
+   got faster. In absolute terms it is unchanged.
+6. **The background stage is now 52% of pipeline stage time**, which makes it
+   the largest single lever and the first thing §4 should look at once §1 and §2
+   are done. It splits 59% erosion / 40% reconstruction, and **neither half has
+   been examined**:
+
+   - The erosion is the existing rank filter at radius 16.03, where every
+     measurement in `docs/benchmarks/README.md` was taken at radius 10 or below.
+     Its rectangle decomposition should make cost roughly independent of radius;
+     that it is now the single most expensive thing in the pipeline says the
+     assumption is worth re-testing at this radius rather than assumed.
+   - The reconstruction is fresh code and has had no optimisation pass at all.
+     Its raster halves are the same shape as the loop-carried accumulator that
+     §4.3 and §4.4 each found, but the dependency here is genuine — each pixel
+     reads the neighbour the pass just wrote — so the fix that worked twice does
+     not apply, and the §4.4 heuristic below would mislead here. The queue phase
+     is a different matter and is order-independent (§1.4), so it is free to be
+     restructured.
+
+   Apply the §4.4 heuristic before believing any of this: measure in place, and
+   check the ratio against the neighbouring stages.
+7. **SIMD**, last, per §0.5 — and only behind a scalar fallback with a
    differential test. Note §4.3 and §4.4 got 2.3x and 3.7x without any explicit
    SIMD, by removing a dependency rather than by widening an instruction.
 
@@ -394,4 +535,21 @@ not hypothetical ones. Two of them were hit again this session.
   Laplacian's nine taps cost more than the separable twenty-nine-tap blur ahead
   of it, because both had the same loop-carried accumulator — the second one
   written after the first was fixed. The stage table shows this for free; read
-  it that way when a stage lands.
+  it that way when a stage lands. Note the converse is not a clean bill of
+  health: §1.4b's background stage is the most expensive in the pipeline and
+  also has by far the largest kernel, so the heuristic says nothing about it
+  either way.
+- **Measure what a stage removes before claiming it is the one that will.** This
+  file predicted for two revisions that §1.4's prominence test was what would
+  bring the marker count down. It is now ported and bit-identical, and it
+  removes 0.0% of the markers on real data — the test only discards maxima on
+  exact plateaus, and a Laplacian of Gaussian of real pixels has none. The claim
+  was inferred from the source and never checked against a run, which is the
+  same failure as the `MaximumFinder` and `EOSIN` entries above. A count is
+  evidence about the stage that produced it, never about a stage that does not
+  exist yet.
+- **Reproducing a stage's inputs is not reproducing the stage.** The pipeline
+  ran a morphological opening where QuPath runs an opening by reconstruction and
+  then *subtracts* it. Same family of operation, opposite result: one keeps the
+  background, the other keeps the nuclei. It had been there through three
+  count changes, all of which were attributed to other stages.

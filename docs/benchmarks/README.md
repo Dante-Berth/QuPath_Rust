@@ -515,13 +515,38 @@ cost and was 3% of the flood, and the incremental rank filter looked like 1.9x
 ahead of ImageJ and was behind it from radius 3.
 
 The largest remaining piece of work is not a further optimisation of these
-three. It is closing the detection pipeline — the Laplacian is now done;
-`findRegionalMaxima` and the measurement tail are not — after which §0.1, doing
-less work by way of the right pyramid level, the right ROI and early rejection,
-becomes available and outranks everything measured here.
+three. It is closing the detection pipeline — the Laplacian, the regional maxima
+and the background subtraction are now done; the object filters, ROI tracing and
+the measurement tail are not — after which §0.1, doing less work by way of the
+right pyramid level, the right ROI and early rejection, becomes available and
+outranks everything measured here.
 
-Within the pipeline as it stands, the watershed is about 40% of stage time and
-the clear next target. Per the entries above it will be an interleaved A/B with
+### The stage table has moved, and every share below is now stale
+
+`findRegionalMaxima` and the background subtraction landed after the figures
+above were taken, and the second of them is expensive. Stage shares as they now
+stand, on the same 4000x4000 region:
+
+| Stage | Summed across threads | Share |
+| --- | ---: | ---: |
+| decode | 0.254 s | 5.8% |
+| deconvolve | 0.042 s | 1.0% |
+| **background** | **2.265 s** | **51.9%** |
+| gaussian blur | 0.369 s | 8.5% |
+| laplacian | 0.142 s | 3.3% |
+| maxima | 0.524 s | 12.0% |
+| labelling | 0.041 s | 0.9% |
+| watershed | 0.730 s | 16.7% |
+
+The watershed's 40% above is now 16.7%, and **it did not get faster** — a stage
+three times its size was added in front of it. Absolute figures are what carry
+between these tables; shares are not.
+
+The background stage splits 59% erosion (the MIN rank filter at radius 16.03)
+and 40% reconstruction. Neither has had an optimisation pass, and the rank
+filter's own measurements in this file were all taken at radius 10 or below.
+That is the next target rather than the watershed, but only after §1 and §2 of
+the roadmap — and per the entries above it will be an interleaved A/B with
 identical output asserted before any figure is claimed.
 
 Note that the watershed's *share* fell from 53% only because a stage was added
