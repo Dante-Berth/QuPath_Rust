@@ -9,11 +9,19 @@
 //! # What this is not
 //!
 //! **It is not `WatershedCellDetection`, and its output is not detections.**
-//! The stages QuPath runs that are not yet ported — Gaussian blur, its
-//! `MaximumFinder`, morphological reconstruction, thresholding, ROI tracing and
-//! measurement — are absent, and the marker rule here is a regional-maximum
-//! test without `MaximumFinder`'s prominence filter, so it over-segments. The
-//! counts below are flooded basins, not cells, and no fixture pins them.
+//! The stages QuPath runs that are not yet ported — `findRegionalMaxima`,
+//! thresholding, ROI tracing and measurement — are absent, and the marker rule
+//! here is a plain regional-maximum test with no prominence filter at all, so
+//! it over-segments. The counts below are flooded basins, not cells, and no
+//! fixture pins them.
+//!
+//! The Laplacian of Gaussian *is* complete as of the Laplacian port: both the
+//! blur and the 3x3 convolution that follows it are pinned bit-identical
+//! against ImageJ. What remains between here and detections is how the maxima
+//! are chosen — QuPath uses
+//! `MorphologicalReconstruction.findRegionalMaxima(fpLoG, 0.001f, false)`
+//! followed by a 4-connected `labelImage`, which is an h-maxima transform, and
+//! that prominence test is exactly what this pipeline lacks.
 //!
 //! What it does establish is the path: real pixels, real decode, the ported
 //! filter and flood, at tile granularity, with memory that does not grow with
@@ -31,7 +39,7 @@ mod stain;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use qupath_filters::{GaussianBlur, RankFilter, RankOp};
+use qupath_filters::{Convolver, GaussianBlur, RankFilter, RankOp};
 use qupath_slide::{Slide, SlideError};
 use qupath_watershed::{Connectivity, Watershed};
 use rayon::prelude::*;
@@ -56,11 +64,13 @@ pub struct Region {
 pub struct Params {
     /// Pyramid level to read.
     pub level: usize,
-    /// Radius of the morphological opening applied before flooding, in pixels.
+    /// Radius of the morphological opening applied before the blur, in pixels.
     ///
     /// QuPath derives its rank-filter radii from the user's cell-size
     /// parameters; this stands in for that until the detection front end is
-    /// ported.
+    /// ported. It sits where QuPath's median filter sits — before the Laplacian
+    /// of Gaussian, not after it — so that the maxima are found on a clean
+    /// second derivative rather than on a smeared one.
     pub open_radius: f64,
     /// Gaussian blur sigma in pixels, or zero to skip the blur.
     ///
@@ -70,7 +80,14 @@ pub struct Params {
     /// [`Params::default`] uses that. Nothing reads the pixel size off the
     /// slide yet, so a different slide needs this set by hand.
     pub sigma: f64,
-    /// Optical density below which a pixel is background and is never flooded.
+    /// Value below which a pixel is background and is never flooded.
+    ///
+    /// This applies to the **Laplacian of Gaussian**, not to optical density,
+    /// now that the Laplacian is in the pipeline. QuPath thresholds the same
+    /// image at zero — `SimpleThresholding.thresholdAbove(fpLoG, 0.0)`, and
+    /// `Watershed.doWatershed(fpLoG, labels, 0, false)` — so zero is the value
+    /// that corresponds to what detection does, and the previous 0.12 was an
+    /// optical-density threshold that no longer means anything here.
     pub threshold: f32,
     /// Flood connectivity.
     pub connectivity: Connectivity,
@@ -84,10 +101,10 @@ impl Default for Params {
             // 1.5 microns at CMU-1's 0.4990 um/px, which is what QuPath would
             // use on this slide with its own defaults.
             sigma: 1.5 / 0.4990,
-            // Haematoxylin OD of background glass is near zero; nuclei run well above
-            // 0.1 on this slide. Chosen to make the flood do representative
-            // work, not to match QuPath.
-            threshold: 0.12,
+            // What QuPath thresholds its own LoG at. A nucleus is a positive
+            // peak of the Laplacian and its surroundings are negative, so zero
+            // is where the object boundary falls rather than a tuned constant.
+            threshold: 0.0,
             connectivity: Connectivity::Eight,
         }
     }
@@ -101,8 +118,9 @@ impl Default for Params {
 struct StageClocks {
     decode: AtomicU64,
     deconvolve: AtomicU64,
-    blur: AtomicU64,
     filter: AtomicU64,
+    blur: AtomicU64,
+    laplacian: AtomicU64,
     maxima: AtomicU64,
     flood: AtomicU64,
 }
@@ -114,10 +132,12 @@ pub struct Stages {
     pub decode: f64,
     /// RGB to haematoxylin optical density.
     pub deconvolve: f64,
-    /// The Gaussian blur.
-    pub blur: f64,
     /// The rank-filter opening.
     pub filter: f64,
+    /// The Gaussian blur.
+    pub blur: f64,
+    /// The 3x3 Laplacian that completes the Laplacian of Gaussian.
+    pub laplacian: f64,
     /// Finding markers.
     pub maxima: f64,
     /// The watershed flood.
@@ -128,7 +148,13 @@ impl Stages {
     /// Total across every stage.
     #[must_use]
     pub fn total(&self) -> f64 {
-        self.decode + self.deconvolve + self.blur + self.filter + self.maxima + self.flood
+        self.decode
+            + self.deconvolve
+            + self.filter
+            + self.blur
+            + self.laplacian
+            + self.maxima
+            + self.flood
     }
 }
 
@@ -186,11 +212,16 @@ struct Scratch {
     rgb: Vec<u8>,
     density: Vec<f32>,
     opened: Vec<f32>,
+    /// The Laplacian of Gaussian: written from `opened`, and the image every
+    /// stage after it reads. Separate because the convolution reads a
+    /// neighbourhood and so cannot write over what it is still reading.
+    log: Vec<f32>,
     labels: Vec<f32>,
     candidates: Vec<bool>,
     stack: Vec<u32>,
     blur: GaussianBlur,
     filter: RankFilter,
+    convolver: Convolver,
     flooder: Watershed,
 }
 
@@ -200,15 +231,24 @@ impl Scratch {
             rgb: Vec::new(),
             density: Vec::new(),
             opened: Vec::new(),
+            log: Vec::new(),
             labels: Vec::new(),
             candidates: Vec::new(),
             stack: Vec::new(),
             blur: GaussianBlur::new(),
             filter: RankFilter::new(),
+            convolver: Convolver::new(),
             flooder: Watershed::new(),
         }
     }
 }
+
+/// The kernel `WatershedCellDetection` convolves with after its Gaussian blur,
+/// completing the Laplacian of Gaussian.
+///
+/// It sums to exactly zero, which is the branch of ImageJ's `Convolver` that
+/// leaves the kernel unnormalised — see `qupath_filters::kernel_scale`.
+const LAPLACIAN: [f32; 9] = [0.0, -1.0, 0.0, -1.0, 4.0, -1.0, 0.0, -1.0, 0.0];
 
 /// Runs the pipeline over `region`, returning summary counts and timings.
 ///
@@ -280,16 +320,9 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
             stains.haematoxylin_into(&scratch.rgb, &mut scratch.density);
             clocks.deconvolve.fetch_add(nanos(mark), Ordering::Relaxed);
 
-            // Where QuPath blurs: after deconvolution, before anything looks
-            // for maxima. Its next line is a 3x3 Laplacian, which is not ported
-            // yet, so this is the Gaussian half of QuPath's Laplacian of
-            // Gaussian and not the whole filter.
-            let mark = Instant::now();
-            if params.sigma > 0.0 {
-                scratch.blur.blur(&mut scratch.density, width, params.sigma);
-            }
-            clocks.blur.fetch_add(nanos(mark), Ordering::Relaxed);
-
+            // Stage order follows `WatershedCellDetection`: its rank filter runs
+            // on the detection image *before* the Laplacian of Gaussian, not
+            // after it, so the maxima are found on a clean second derivative.
             let mark = Instant::now();
             scratch.opened.clear();
             scratch.opened.resize(scratch.density.len(), 0.0);
@@ -308,10 +341,33 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
             clocks.filter.fetch_add(nanos(mark), Ordering::Relaxed);
 
             let mark = Instant::now();
-            scratch.labels.clear();
-            scratch.labels.resize(scratch.opened.len(), 0.0);
-            let seeded = seed_maxima(
+            if params.sigma > 0.0 {
+                scratch.blur.blur(&mut scratch.opened, width, params.sigma);
+            }
+            clocks.blur.fetch_add(nanos(mark), Ordering::Relaxed);
+
+            // The line after the blur in QuPath, completing the Laplacian of
+            // Gaussian. Written into its own buffer rather than in place: the
+            // convolution reads a 3x3 neighbourhood and cannot overwrite what
+            // it is still reading, and `apply_into` then copies nothing.
+            let mark = Instant::now();
+            scratch.log.clear();
+            scratch.log.resize(scratch.opened.len(), 0.0);
+            scratch.convolver.apply_into(
                 &scratch.opened,
+                &mut scratch.log,
+                width,
+                &LAPLACIAN,
+                3,
+                3,
+            );
+            clocks.laplacian.fetch_add(nanos(mark), Ordering::Relaxed);
+
+            let mark = Instant::now();
+            scratch.labels.clear();
+            scratch.labels.resize(scratch.log.len(), 0.0);
+            let seeded = seed_maxima(
+                &scratch.log,
                 &mut scratch.labels,
                 width,
                 params.threshold,
@@ -323,7 +379,7 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
 
             let mark = Instant::now();
             scratch.flooder.flood(
-                &scratch.opened,
+                &scratch.log,
                 &mut scratch.labels,
                 width,
                 params.threshold,
@@ -351,8 +407,9 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
         stages: Stages {
             decode: seconds(&clocks.decode),
             deconvolve: seconds(&clocks.deconvolve),
-            blur: seconds(&clocks.blur),
             filter: seconds(&clocks.filter),
+            blur: seconds(&clocks.blur),
+            laplacian: seconds(&clocks.laplacian),
             maxima: seconds(&clocks.maxima),
             flood: seconds(&clocks.flood),
         },

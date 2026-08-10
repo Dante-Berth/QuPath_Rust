@@ -59,8 +59,9 @@ fn main() {
     for (name, seconds) in [
         ("decode", stages.decode),
         ("deconvolve", stages.deconvolve),
-        ("gaussian blur", stages.blur),
         ("rank filter", stages.filter),
+        ("gaussian blur", stages.blur),
+        ("laplacian", stages.laplacian),
         ("maxima", stages.maxima),
         ("watershed", stages.flood),
     ] {
@@ -81,9 +82,11 @@ fn main() {
         println!("peak resident memory: {:.0} MB", bytes as f64 / 1e6);
     }
     println!(
-        "\nNote: basins, not cells. The blur is ported and pinned against\n\
-         ImageJ, but the Laplacian that follows it, QuPath's MaximumFinder,\n\
-         morphological reconstruction and the measurement stages are not, so\n\
-         this is not WatershedCellDetection and the counts are not comparable."
+        "\nNote: basins, not cells. The Laplacian of Gaussian is complete and\n\
+         pinned bit-identical against ImageJ, but the marker rule is still a\n\
+         plain regional maximum: QuPath's findRegionalMaxima applies a\n\
+         prominence test this does not, and the ROI and measurement stages are\n\
+         absent, so this is not WatershedCellDetection and the counts are not\n\
+         comparable."
     );
 }
