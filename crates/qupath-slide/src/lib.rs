@@ -262,9 +262,9 @@ impl Slide {
 
     /// Reads an arbitrary region of a level as RGB8, row-major.
     ///
-    /// Decodes only the tiles the region touches. Intended for tests, parity
-    /// recording and small crops — a whole-slide run should iterate tiles with
-    /// [`Slide::read_tile_into`] instead, so that memory stays bounded.
+    /// Decodes only the tiles the region touches. Allocates the output; a tile
+    /// loop should call [`Slide::read_region_into`] instead, which reuses both
+    /// the output and the decode scratch.
     ///
     /// # Errors
     ///
@@ -278,6 +278,38 @@ impl Slide {
         width: u32,
         height: u32,
     ) -> Result<Vec<u8>> {
+        let mut region = Vec::new();
+        let mut tile = Vec::new();
+        self.read_region_into(level, x, y, width, height, &mut region, &mut tile)?;
+        Ok(region)
+    }
+
+    /// Reads an arbitrary region of a level as RGB8 into `out`, row-major.
+    ///
+    /// `out` and `tile` are both reused across calls, so a tile loop over
+    /// regions allocates nothing — which is what §6 requires of the detection
+    /// pipeline, whose processing tiles do not line up with the TIFF's own tile
+    /// grid once they carry a halo.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the level is out of range, the region leaves the level, or a
+    /// tile does not decode.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a level, a rectangle and two reusable buffers; grouping them \
+                  would need a region type this crate does not otherwise have"
+    )]
+    pub fn read_region_into(
+        &self,
+        level: usize,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        out: &mut Vec<u8>,
+        tile: &mut Vec<u8>,
+    ) -> Result<()> {
         let info = self
             .levels
             .get(level)
@@ -305,8 +337,9 @@ impl Slide {
             });
         }
 
-        let mut region = vec![0u8; width as usize * height as usize * 3];
-        let mut tile = Vec::new();
+        out.clear();
+        out.resize(width as usize * height as usize * 3, 0);
+        let region = &mut out[..];
 
         let first_column = x / info.tile_width;
         let last_column = (x + width - 1) / info.tile_width;
@@ -315,7 +348,7 @@ impl Slide {
 
         for tile_row in first_row..=last_row {
             for tile_column in first_column..=last_column {
-                self.read_tile_into(level, tile_column, tile_row, &mut tile)?;
+                self.read_tile_into(level, tile_column, tile_row, tile)?;
 
                 let tile_x = tile_column * info.tile_width;
                 let tile_y = tile_row * info.tile_height;
@@ -340,7 +373,7 @@ impl Slide {
             }
         }
 
-        Ok(region)
+        Ok(())
     }
 }
 
