@@ -1,0 +1,10 @@
+ImageJ Convolver, one output pixel in flight against eight, minimum of 200 interleaved repetitions
+
+        tile   kernel          one        eight     gain
+      128²      3x3      0.045 ms      0.019 ms    2.36x
+      256²      3x3      0.131 ms      0.037 ms    3.54x
+      512²      3x3      0.295 ms      0.079 ms    3.73x
+     1024²      3x3      1.062 ms      0.238 ms    4.46x
+      256²      5x5      0.186 ms      0.060 ms    3.12x
+
+Output asserted bit-identical on every timed iteration.

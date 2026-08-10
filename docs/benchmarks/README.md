@@ -439,6 +439,58 @@ that.
 
 The watershed is now 53% of stage time and the clear next target.
 
+## Laplacian convolution: the same defect, in a second file
+
+The 3x3 Laplacian that completes the Laplacian of Gaussian landed at **19.8% of
+pipeline stage time** — more than the separable Gaussian blur in front of it, at
+14.6%. A nine-tap stencil costing more than a twenty-nine-tap separable blur is
+not an arithmetic cost; it is a stall.
+
+It was the same one the blur had, in code written after the blur was fixed.
+ImageJ's `Convolver` accumulates one output pixel at a time:
+
+```java
+sum += pixels2[offset+u]*kernel[i++];
+```
+
+and `sum` is a loop-carried `double`, so nine taps run as nine dependent adds at
+latency rather than throughput. Carrying eight output pixels at once, each with
+its own accumulator receiving the taps in the same order, breaks the chain
+without touching the arithmetic.
+
+| Tile | Kernel | One | Eight | Gain |
+| --- | ---: | ---: | ---: | ---: |
+| 128² | 3x3 | 0.045 ms | 0.019 ms | 2.36x |
+| 256² | 3x3 | 0.131 ms | 0.037 ms | **3.54x** |
+| 512² | 3x3 | 0.295 ms | 0.079 ms | 3.73x |
+| 1024² | 3x3 | 1.062 ms | 0.238 ms | 4.46x |
+| 256² | 5x5 | 0.186 ms | 0.060 ms | 3.12x |
+
+Raw output in `rust-convolve-ab.txt`. Every timed iteration asserts the two are
+**bit-identical**, as the blur's harness does.
+
+The 5x5 case is worth reading rather than skipping: it is *slower* than the 3x3
+at the same tile size, against the intuition that a longer dependency chain
+means a bigger win. Twenty-five taps across eight lanes also needs more live
+accumulators and more taps in flight, and the two effects pull against each
+other. The 3x3 is the one the pipeline runs.
+
+### And it carried over, almost exactly
+
+Measured in place as an interleaved A/B, best of three runs each way:
+
+| | Before | After |
+| --- | ---: | ---: |
+| Laplacian, summed across threads | 0.516 s | **0.140 s** |
+| Share of pipeline stage time | 20.6% | **6.4%** |
+| Markers seeded | 91,957 | 91,957 |
+
+**3.69x in place against 3.54x in isolation** at the pipeline's own 256² tile
+size. That is the fourth in-place check and the third that carried; like the
+deconvolution table and the blur, this removes work rather than overhead, and
+the stage is a single pass over a tile at exactly the size the isolated figure
+was taken at. The unchanged marker count is the check that it removed only that.
+
 ## Where this leaves the pipeline
 
 Three components are now faster in isolation, and the profile says what each is
@@ -463,15 +515,19 @@ cost and was 3% of the flood, and the incremental rank filter looked like 1.9x
 ahead of ImageJ and was behind it from radius 3.
 
 The largest remaining piece of work is not a further optimisation of these
-three. It is closing the detection pipeline — the Laplacian, `MaximumFinder`,
-morphological reconstruction and the measurement tail — after which §0.1, doing
+three. It is closing the detection pipeline — the Laplacian is now done;
+`findRegionalMaxima` and the measurement tail are not — after which §0.1, doing
 less work by way of the right pyramid level, the right ROI and early rejection,
 becomes available and outranks everything measured here.
 
-Within the pipeline as it stands, the watershed is 53% of stage time and the
-deconvolution and blur together are 18%. The next optimisation to look at is
-the watershed, and per the two entries above it will be an interleaved A/B with
+Within the pipeline as it stands, the watershed is about 40% of stage time and
+the clear next target. Per the entries above it will be an interleaved A/B with
 identical output asserted before any figure is claimed.
+
+Note that the watershed's *share* fell from 53% only because a stage was added
+in front of it, not because it got faster. Shares in this file move whenever the
+denominator does, and three of the entries above are stages that did not exist
+when the earliest figures here were taken.
 
 ## Environment
 

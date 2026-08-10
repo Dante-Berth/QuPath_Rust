@@ -58,6 +58,13 @@
 
 use rayon::prelude::*;
 
+/// Output pixels carried at once through the interior of a row.
+///
+/// Matches the blur's lane count and for the same reason: enough independent
+/// accumulators to hide the latency of an `f64` add, few enough that they stay
+/// in registers. `docs/benchmarks/README.md` records what it was worth.
+const LANES: usize = 8;
+
 /// ImageJ's `Convolver.getScale`: the reciprocal of the kernel sum, or 1.0.
 ///
 /// The zero-sum case is the one detection takes. ImageJ guards the division
@@ -134,7 +141,15 @@ impl Convolver {
         self.staging.clear();
         self.staging.extend_from_slice(pixels);
         let staging = std::mem::take(&mut self.staging);
-        apply_into(&staging, pixels, width, kernel, kernel_width, kernel_height);
+        apply_into(
+            &staging,
+            pixels,
+            width,
+            kernel,
+            kernel_width,
+            kernel_height,
+            true,
+        );
         self.staging = staging;
     }
 
@@ -155,7 +170,47 @@ impl Convolver {
         kernel_width: usize,
         kernel_height: usize,
     ) {
-        apply_into(source, out, width, kernel, kernel_width, kernel_height);
+        apply_into(
+            source,
+            out,
+            width,
+            kernel,
+            kernel_width,
+            kernel_height,
+            true,
+        );
+    }
+
+    /// As [`Convolver::apply_into`], with one output pixel in flight at a time.
+    ///
+    /// The implementation this crate had before the interior loop was widened,
+    /// retained only so the A/B harness measures against the real previous
+    /// version rather than a reimplementation of it. Bit-identical to
+    /// [`Self::apply_into`] — `widening_the_interior_loop_changes_nothing`
+    /// asserts it, and the harness asserts it again on every timed iteration.
+    ///
+    /// # Panics
+    ///
+    /// As [`Convolver::apply_into`].
+    #[doc(hidden)]
+    pub fn apply_into_narrow(
+        &mut self,
+        source: &[f32],
+        out: &mut [f32],
+        width: usize,
+        kernel: &[f32],
+        kernel_width: usize,
+        kernel_height: usize,
+    ) {
+        apply_into(
+            source,
+            out,
+            width,
+            kernel,
+            kernel_width,
+            kernel_height,
+            false,
+        );
     }
 }
 
@@ -167,6 +222,7 @@ fn apply_into(
     kernel: &[f32],
     kernel_width: usize,
     kernel_height: usize,
+    wide: bool,
 ) {
     assert!(width > 0, "width must be non-zero");
     assert_eq!(
@@ -203,6 +259,7 @@ fn apply_into(
         half_width: kernel_width / 2,
         half_height: kernel_height / 2,
         scale: kernel_scale(kernel),
+        wide,
     };
 
     // Rows are independent: each reads the untouched source and writes only its
@@ -225,6 +282,9 @@ struct Scan<'a> {
     half_height: usize,
     /// `1 / sum(kernel)`, or 1.0 when the sum is zero. See [`kernel_scale`].
     scale: f64,
+    /// Whether the interior carries [`LANES`] output pixels at once. False only
+    /// for the A/B harness, which measures against the previous version.
+    wide: bool,
 }
 
 impl Scan<'_> {
@@ -246,18 +306,79 @@ impl Scan<'_> {
             return;
         }
 
-        // Exactly the negation of ImageJ's `x < uc || x >= xedge`. On an image
-        // narrower than the kernel `x_edge` falls at or below `half_width` and
-        // this range is empty, which is the intended answer: every pixel is
-        // then an edge pixel. Clamping the ends instead would wrongly admit the
-        // pixels between them.
-        let interior = self.half_width..x_edge;
-        for (x, value) in out.iter_mut().enumerate() {
-            *value = if interior.contains(&x) {
-                self.interior(x, y)
-            } else {
-                self.clamped(x, y)
-            };
+        // `start..end` is exactly the negation of ImageJ's
+        // `x < uc || x >= xedge`, clamped into the row. Both ends need the
+        // clamp: on an image narrower than the kernel, `half_width` can exceed
+        // the width outright and `x_edge` falls at or below it, which leaves the
+        // interior empty — the intended answer, since every pixel is then an
+        // edge pixel.
+        let start = self.half_width.min(self.width);
+        let end = x_edge.max(start);
+
+        for (x, value) in out[..start].iter_mut().enumerate() {
+            *value = self.clamped(x, y);
+        }
+        if self.wide {
+            if end > start {
+                self.interior_span(&mut out[start..end], start, y);
+            }
+        } else {
+            for (offset, value) in out[start..end].iter_mut().enumerate() {
+                *value = self.interior(start + offset, y);
+            }
+        }
+        for (offset, value) in out[end..].iter_mut().enumerate() {
+            *value = self.clamped(end + offset, y);
+        }
+    }
+
+    /// The interior of one row, [`LANES`] output pixels at a time.
+    ///
+    /// Each lane keeps its own accumulator and receives the taps in the order a
+    /// single accumulator would give that pixel, so the result is
+    /// **bit-identical** to [`Scan::interior`] — this widens the loop, it does
+    /// not reassociate the sum, which would not be allowed.
+    ///
+    /// The reason it is worth doing is the one the blur hit: `sum +=` is a
+    /// loop-carried dependency, so a single accumulator runs the taps at the
+    /// latency of an `f64` add rather than its throughput. Nine taps chained
+    /// that way cost more than the separable 29-tap blur before it. Independent
+    /// lanes read adjacent taps, so the independence costs no extra loads.
+    fn interior_span(&self, out: &mut [f32], x_start: usize, y: usize) {
+        let span = 2 * self.half_width + 1;
+        let len = out.len();
+        let mut chunks = out.chunks_exact_mut(LANES);
+
+        for (chunk, index) in chunks.by_ref().zip(0..) {
+            let x0 = x_start + index * LANES;
+            let mut acc = [0.0f64; LANES];
+            let mut taps = self.kernel.iter();
+
+            for v in 0..=2 * self.half_height {
+                // ImageJ: offset = x + (y + v) * width, with v running from -vc.
+                let row = (y + v - self.half_height) * self.width;
+                for u in 0..span {
+                    let coefficient = *taps.next().expect("kernel length checked on entry");
+                    let start = row + x0 + u - self.half_width;
+                    let source = &self.source[start..start + LANES];
+                    // Fixed-length and contiguous, so this is one vector
+                    // multiply-add per lane group with no bounds checks.
+                    for (sum, &pixel) in acc.iter_mut().zip(source) {
+                        *sum += f64::from(pixel * coefficient);
+                    }
+                }
+            }
+
+            for (value, &sum) in chunk.iter_mut().zip(acc.iter()) {
+                *value = self.narrow(sum);
+            }
+        }
+
+        // The tail, one pixel at a time. Fewer than LANES of them per row.
+        let remainder = chunks.into_remainder();
+        let tail_start = x_start + len - remainder.len();
+        for (offset, value) in remainder.iter_mut().enumerate() {
+            *value = self.interior(tail_start + offset, y);
         }
     }
 
@@ -441,6 +562,46 @@ mod tests {
                     reference(&pixels, width, kernel, kw, kh),
                     "{kw}x{kh} kernel on {width}x{height}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn widening_the_interior_loop_changes_nothing() {
+        // The lanes exist to break the accumulator's dependency chain, not to
+        // reassociate the sum. Each lane must receive the taps in the same order
+        // a single accumulator would, so the two paths are bit-identical rather
+        // than merely close — an assertion the parity fixture then repeats
+        // against ImageJ.
+        //
+        // Widths are chosen around LANES so that the chunked span, its
+        // remainder, and an interior shorter than one chunk are all exercised:
+        // an interior of 1..width-1 has width-2 pixels, so width 10 divides
+        // evenly and the others do not.
+        let kernels: [(&[f32], usize, usize); 3] = [
+            (&LAPLACIAN, 3, 3),
+            (&[1.0, 2.0, 3.0, -1.0, 4.0, -2.0, 0.0, 5.0, -2.0], 3, 3),
+            (
+                &[
+                    1.0, 0.0, -1.0, 0.0, 2.0, 0.0, -2.0, 0.0, 1.0, 0.0, 3.0, 0.0, -1.0, 0.0, -3.0,
+                ],
+                5,
+                3,
+            ),
+        ];
+
+        for width in [3usize, 5, 7, 9, 10, 11, 16, 17, 23, 64] {
+            let pixels: Vec<f32> = (0..width * 12)
+                .map(|i| ((i * 37) % 101) as f32 / 40.0 - 0.5)
+                .collect();
+            for &(kernel, kw, kh) in &kernels {
+                let mut wide = pixels.clone();
+                convolve(&mut wide, width, kernel, kw, kh);
+
+                let mut narrow = vec![0.0f32; pixels.len()];
+                Convolver::new().apply_into_narrow(&pixels, &mut narrow, width, kernel, kw, kh);
+
+                assert_eq!(wide, narrow, "{kw}x{kh} kernel on width {width}");
             }
         }
     }
