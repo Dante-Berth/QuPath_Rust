@@ -28,17 +28,23 @@ Five crates, each checked against fixtures recorded from a real QuPath build:
 | --- | --- | --- |
 | `qupath-objects` | Columnar detection/measurement table | recorded |
 | `qupath-watershed` | Marker-controlled flood, bucket queue | recorded |
-| `qupath-filters` | MIN/MAX rank filter, ImageJ Gaussian blur | recorded, 42 + 22 cases |
+| `qupath-filters` | MIN/MAX rank filter, ImageJ Gaussian blur and convolution | recorded, 42 + 22 + 22 cases |
 | `qupath-slide` | Aperio SVS / tiled TIFF reader, pure Rust | recorded, 5 regions |
 | `qupath-pipeline` | Streams slide tiles through the above | colour deconvolution |
 
 `qupath-pipeline` reads real slide pixels and runs the ported stages over them
-with bounded memory, but it is **not** `WatershedCellDetection`: the 3x3
-Laplacian that follows the blur, `MaximumFinder`, morphological reconstruction,
-ROI tracing and measurement are not ported. Its output is flooded basins, not
-cells, and its runtime is therefore not comparable with QuPath's. Adding the
-Gaussian blur took it from 211,728 basins to 42,966, against QuPath's 25,757
-cells for the same region — closer, and still not the same thing.
+with bounded memory, but it is **not** `WatershedCellDetection`: the maximum
+finding, ROI tracing and measurement are not ported. Its output is flooded
+basins, not cells, and its runtime is therefore not comparable with QuPath's.
+
+The Laplacian of Gaussian is now complete — blur and 3x3 convolution, both
+bit-identical to ImageJ — and **the basin count went up when it landed**, from
+42,966 to 91,957 against QuPath's 25,757 cells. That is the honest direction: a
+Laplacian is a second derivative, so it creates local maxima wherever the
+blurred image has structure, and the stage that discards them is the one still
+missing. QuPath uses `MorphologicalReconstruction.findRegionalMaxima`, an
+h-maxima transform whose whole job is to merge maxima not separated by a real
+descent. The count is not a score until that exists.
 
 The deconvolution fixture is worth singling out, because it is the argument for
 this whole approach in miniature. It found that the port had been using the

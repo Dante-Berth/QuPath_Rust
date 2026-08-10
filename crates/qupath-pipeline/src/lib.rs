@@ -439,12 +439,22 @@ fn seconds(counter: &AtomicU64) -> f64 {
 /// tissue tile it gives 0 strict maxima against 15,751 candidates. Seeding per
 /// candidate instead would give thousands of basins per nucleus.
 ///
-/// **This is not QuPath's `MaximumFinder`.** That applies a prominence
-/// ("tolerance") test which discards maxima not separated by a deep enough
-/// valley, and it is what stops one nucleus producing several markers. Without
-/// it this over-segments. The counts it produces are therefore basins, not
-/// cells, and nothing pins them against QuPath — see the crate documentation
-/// and `docs/ROADMAP.md`.
+/// **This is not what QuPath does.** `WatershedCellDetection` calls
+/// `MorphologicalReconstruction.findRegionalMaxima(fpLoG, 0.001f, false)` and
+/// then `RoiLabeling.labelImage(ipTemp, 0, false)`. That is an h-maxima
+/// transform: it removes the candidate maxima, fills the holes back in by
+/// geodesic dilation under the original image, and keeps only those whose
+/// *prominence* — how far they stand above the highest saddle reaching them —
+/// is above zero. That prominence test is what stops one nucleus producing
+/// several markers, and this function has no equivalent, so it over-segments.
+///
+/// Two differences to carry over when it is ported: QuPath labels the survivors
+/// **4-connected**, where the grouping below is 8-connected; and it runs the
+/// whole transform inside the processor's ROI, where the Laplacian on the line
+/// before it runs over the whole image.
+///
+/// The counts this produces are therefore basins, not cells, and nothing pins
+/// them against QuPath — see the crate documentation and `docs/ROADMAP.md`.
 fn seed_maxima(
     values: &[f32],
     labels: &mut [f32],

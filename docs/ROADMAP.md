@@ -12,23 +12,31 @@ build.
 | --- | --- | --- | --- |
 | `qupath-objects` | Columnar detection/measurement table | `MeasurementPrecision.json` | ~100x on scan/filter |
 | `qupath-watershed` | Marker-controlled flood, bucket queue | `WatershedFlood.json`, 3 cases | queue 20-32x vs heap; flood 1.40x vs previous |
-| `qupath-filters` | MIN/MAX rank filter, Gaussian blur | `RankFilterMinMax.json` 42 cases; `GaussianBlur.json` 10 kernels + 12 images | rank 3.1-9.7x vs ImageJ; blur bit-identical |
+| `qupath-filters` | MIN/MAX rank filter, Gaussian blur, convolution | `RankFilterMinMax.json` 42 cases; `GaussianBlur.json` 10 kernels + 12 images; `LaplacianConvolution.json` 5 scales + 17 images | rank 3.1-9.7x vs ImageJ; blur and convolution bit-identical |
 | `qupath-slide` | Aperio SVS / tiled TIFF reader | `SlideRegion.json`, 5 regions | 4000x4000 region in 0.09 s |
 | `qupath-pipeline` | Streams tiles through the above | `ColourDeconvolution*.json` | 17.8 Mpx in 0.091 s, 53 MB peak |
 
 **The end-to-end number is still QuPath's 15.87 s**, because the pipeline is not
 `WatershedCellDetection`. It runs real slide pixels through the ported stages
 and nothing else. Do not compare the two figures until §1 below is done; the
-pipeline currently produces 42,966 basins where QuPath detects 25,757 cells.
+pipeline currently produces 91,957 basins where QuPath detects 25,757 cells.
 
 **The pipeline's own figure is not a speedup series and must not be read as
-one.** It has moved 0.114 s -> 0.062 s -> 0.091 s, and no step was the same
-work as the one before it: §1.1 corrected a wrong stain vector, and §1.2 added
-a stage that had been missing. A figure that goes up because a stage was added
-is the honest outcome; the counts moved with it, from 397,822 to 211,728 to
-42,966 basins against QuPath's 25,757 cells. The parts that *are* comparable —
-component A/B runs, interleaved, asserting identical output — are in
-`docs/benchmarks/README.md`.
+one.** It has moved 0.114 s -> 0.062 s -> 0.091 s -> 0.114 s, and no step was
+the same work as the one before it: §1.1 corrected a wrong stain vector, and
+§1.2 and §1.3 each added a stage that had been missing. A figure that goes up
+because a stage was added is the honest outcome.
+
+**The counts are not a quality series either, and they have now gone the wrong
+way**: 397,822 -> 211,728 -> 42,966 -> 91,957 basins, against QuPath's 25,757
+cells. The last step is §1.3 landing: a Laplacian is a second derivative, so it
+manufactures local maxima wherever the blurred image has structure, and the
+stage that removes them — §1.4's prominence test — is exactly what is still
+missing. A correct stage made the count worse, and it will keep being worse
+until the stage that tames it exists. This is why the count is not a score.
+
+The parts that *are* comparable — component A/B runs, interleaved, asserting
+identical output — are in `docs/benchmarks/README.md`.
 
 Reproduce everything:
 
@@ -123,45 +131,106 @@ a pass and each output pixel is accumulated by one line in a fixed order.
 `blurring_is_independent_of_how_lines_are_split` asserts that against 1, 2, 3,
 5 and 8 bands rather than trusting it.
 
-**The marker count fell from 211,728 to 42,966**, against QuPath's 25,757 cells
-for this region — from 8.2x too many to 1.7x. That is the noise-driven maxima
-this item predicted, going away. It is not parity: §1.3's prominence test and
-the 3x3 Laplacian on the line after the blur are both still missing, and the
-remaining factor is where they live.
+**The marker count fell from 211,728 to 42,966** when this landed, against
+QuPath's 25,757 cells for this region — from 8.2x too many to 1.7x. That was the
+noise-driven maxima this item predicted, going away. It was never parity, and
+§1.3 landing afterwards took the count back up to 91,957: the blur alone
+suppresses maxima, and the Laplacian that follows it creates them again. Only
+§1.4 removes the ones that should not be there.
 
 The blur was 31% of pipeline stage time when it landed and is now 17%, after
 the change in §4.3. See `docs/benchmarks/README.md` for both, including the
 transpose that was tried first and was slower.
 
-### 1.3 The Laplacian, then `MaximumFinder`
+### 1.3 The Laplacian — **done**
 
-Two things, in the order detection does them.
+Pinned by `LaplacianConvolution.json`: 17 images and 5 kernel scales through
+`FloatProcessor.convolve`, the call on the line after the blur. **Bit-identical**
+to ImageJ on every value, and the test asserts that rather than reporting it —
+unlike the blur there is nothing transcendental here, so there is no legitimate
+source of drift and any difference is a defect.
 
-The line after the blur is `fpLoG.convolve(new float[]{0,-1,0,-1,4,-1,0,-1,0},
-3, 3)`, which completes the Laplacian of Gaussian. It looks trivial and is not:
-ImageJ's `Convolver` normalises the kernel by its sum unless told otherwise —
-and this kernel sums to zero, which is its own branch — and has its own edge
-convention. Record `Convolver.convolveFloat` before porting it; the blur above
-is the second time in this repository that reading the source gave the wrong
-constant.
+Four things the call site does not show, each pinned by a case that fails
+without it:
 
-Then `MaximumFinder`, the piece that makes the marker count wrong. ImageJ's
-`MaximumFinder.getMaxima` sorts candidate maxima by value, floods each with a
-tolerance, and discards maxima reachable from a higher one without descending
-below `value - tolerance`.
+- **The Laplacian is the kernel normalisation skips.** `Convolver` divides by
+  the kernel sum but guards it with `if (sum != 0.0)`, and this kernel sums to
+  exactly zero, so the scale stays 1.0. Always normalising divides by zero;
+  never normalising passes this kernel and fails every other.
+- **The product rounds to `f32` before it widens.** Java evaluates
+  `pixels2[...] * kernel[i]` as `float*float` and only then adds it to the
+  `double`. Accumulating in full `f64` is a different answer — not for the
+  Laplacian, whose taps are `0`, `±1` and `4`, but for every other kernel.
+- **It correlates; the kernel is never flipped.**
+- **Edge taps clamp per coordinate**, which is *not* the blur's convention two
+  files away.
 
-- The prominence test is the whole algorithm; the plateau merging that
-  `qupath-pipeline::seed_maxima` already does is the easy half.
-- Fixture: record `getMaxima` output on small synthetic surfaces with plateaus
-  and near-equal peaks, plus one real tile.
-- The bucket queue in `qupath-watershed` is directly reusable here.
+`FloatProcessor.convolve` snapshots before handing the pixels to a fresh
+`Convolver`, so `normalize` is at its field default and the source is a clean
+copy. Worth checking rather than assuming: `Convolver` reads
+`getSnapshotPixels()` when one exists, and a stale snapshot would silently have
+convolved the pre-blur image.
 
-### 1.4 Morphological reconstruction
+Optimised in the same pass, 3.69x in place — see §4.4.
 
-5.1% of self time (`dilateAndCompare`). QuPath's
-`MorphologicalReconstruction` iterates dilate-and-compare to convergence —
-the naive form is what the profile caught, and a queue-based reconstruction is
-the standard fix, again reusing the bucket queue.
+### 1.4 The maxima — and a correction to what this file used to say
+
+**This section previously named `MaximumFinder`. That was wrong.**
+`WatershedCellDetection` never calls it. What it calls is:
+
+```java
+ImageProcessor ipTemp = MorphologicalReconstruction.findRegionalMaxima(fpLoG, 0.001f, false);
+ImageProcessor ipNucleusLabels = RoiLabeling.labelImage(ipTemp, 0, false);
+Watershed.doWatershed(fpLoG, ipNucleusLabels, 0, false);
+```
+
+`MaximumFinder` *is* used elsewhere in QuPath — by `TMADearrayer`,
+`SubcellularDetection` and `WatershedCellMembraneDetection` — which is
+presumably how it got into this list. Porting it would have produced a correct
+implementation of an algorithm this pipeline never runs.
+
+**This also merges what used to be §1.3's second half and §1.4 into one item.**
+`findRegionalMaxima` *is* morphological reconstruction; the 5.1% of self time
+the profile attributed to `dilateAndCompare` is time spent inside it. They were
+never two stages.
+
+The algorithm, from
+`qupath-core-processing/.../imagej/processing/MorphologicalReconstruction.java`:
+
+1. `getMaximaLabels` copies the image and sets every pixel that is `>= 0.001`
+   and `>=` all eight neighbours to **negative infinity**. Note this is a
+   non-strict test, so plateaus are all marked.
+2. `morphologicalReconstruction(marker, mask)` fills those holes back up by
+   geodesic dilation under the original image, run to convergence: raster
+   forward/backward `dilateAndCompare` passes while more than 10% of pixels
+   change, then a queue-based pass.
+3. `copyBits(..., Blitter.DIFFERENCE)` leaves `|reconstructed - original|`,
+   which is the **prominence** of each maximum — how far it stands above the
+   highest saddle that reaches it.
+4. `labelImage(ipTemp, 0, false)` labels **4-connected** components of
+   prominence `> 0`. Note the connectivity: `seed_maxima` currently groups
+   8-connected.
+
+So the prominence test this file wanted is real, but it lives in the
+reconstruction rather than in a tolerance flood. Two consequences worth
+recording before porting:
+
+- Reconstruction by dilation has a **unique fixed point**, independent of the
+  order pixels are visited in. So the port is free to use a faster traversal
+  than QuPath's raster-then-queue scheme and still be exact — which is not true
+  of most of what has been ported so far.
+- `fpLoG.setRoi(roi)` is called *before* `findRegionalMaxima` and bounds every
+  loop inside it, where the Laplacian on the line above ran over the whole
+  image. The tile pipeline uses whole tiles, so this is currently moot, but it
+  stops being moot as soon as a real ROI is passed.
+
+Fixture: record `findRegionalMaxima` on small synthetic surfaces with plateaus
+and near-equal peaks, plus one real tile, and record `morphologicalReconstruction`
+separately on hand-built marker/mask pairs so a failure says which half is
+wrong. `getMaximaLabels` is package-private and cannot be called directly, so
+the two-level fixture is how it gets pinned.
+
+The bucket queue in `qupath-watershed` is directly reusable for step 2.
 
 ### 1.5 Thresholding, ROI tracing, measurements
 
@@ -248,12 +317,25 @@ already ported.
    only the copy-in and the store were, and two transposes cost more. The
    profile share said "the y pass is expensive" and the reason was wrong. Worth
    remembering before the next one.
-4. **The watershed is now 53% of pipeline stage time**, far above the 29.4% the
-   JFR profile attributed to it in QuPath, and it grew as a share every time
-   something else shrank. This is the largest lever after §0.1.
-5. **SIMD**, last, per §0.5 — and only behind a scalar fallback with a
-   differential test. Note §4.3 got 2.3x without any explicit SIMD, by removing
-   a dependency rather than by widening an instruction.
+4. ~~Laplacian convolution~~ — **done**, 3.54x in isolation and 3.69x in place,
+   from 20.6% of pipeline stage time to 6.4%, marker count unchanged and output
+   still bit-identical against ImageJ.
+
+   **It was the same defect as §4.3, in code written after §4.3 fixed it.**
+   ImageJ's `Convolver` accumulates one output pixel into a loop-carried
+   `double`, so nine taps ran as nine dependent adds. The tell was in the stage
+   table and was ignorable if you were not looking: a nine-tap stencil cost more
+   than the separable twenty-nine-tap blur ahead of it. **A stage that costs
+   more than a strictly larger stage is a stall, and that ratio is worth
+   checking for on every stage this list adds** — it is now the second time the
+   same dependency has been shipped.
+5. **The watershed is now about 40% of pipeline stage time** — down from 53% only
+   because a stage was added in front of it, not because it got faster. It
+   remains the largest lever after §0.1, and it is still far above the 29.4% the
+   JFR profile attributed to it in QuPath.
+6. **SIMD**, last, per §0.5 — and only behind a scalar fallback with a
+   differential test. Note §4.3 and §4.4 got 2.3x and 3.7x without any explicit
+   SIMD, by removing a dependency rather than by widening an instruction.
 
 ---
 
@@ -293,3 +375,23 @@ not hypothetical ones. Two of them were hit again this session.
   after it. The documented `record.sh && record-slide.sh` never reached the
   second command. `SlideRegion` is now skipped there, where it was always
   meant to be.
+- **Check *which* algorithm QuPath calls before porting one.** §1.4 said
+  `MaximumFinder` for two revisions of this file. `WatershedCellDetection` never
+  calls it; it calls `MorphologicalReconstruction.findRegionalMaxima`.
+  `MaximumFinder` is real and is used by three *other* QuPath detectors, which
+  is how it got in here — a plausible name from a neighbouring file, exactly
+  like the `EOSIN` constant that was the DAB vector. The port would have been a
+  correct implementation of something this pipeline never runs. Read the call
+  site, not the class that sounds right.
+- **A recorder must exit, not merely finish.** ImageJ's parallel filters leave a
+  cached pool of non-daemon workers alive, so `GaussianBlur`'s recorder wrote
+  its fixture and then hung in `DestroyJavaVM` forever, taking `record.sh` down
+  with it. Same shape as the entry above: one recorder stalling the whole
+  script. Every recorder now flushes and calls `System.exit(0)`, and the flush
+  is load-bearing — `System.exit` does not drain `System.out`, and a truncated
+  fixture is worse than a hang because it still looks like a recording.
+- **A stage that costs more than a strictly larger stage is a stall.** The
+  Laplacian's nine taps cost more than the separable twenty-nine-tap blur ahead
+  of it, because both had the same loop-carried accumulator — the second one
+  written after the first was fixed. The stage table shows this for free; read
+  it that way when a stage lands.
