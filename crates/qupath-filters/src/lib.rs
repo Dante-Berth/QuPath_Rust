@@ -44,9 +44,11 @@
 
 use rayon::prelude::*;
 
+mod gaussian;
 mod kernel;
 mod plan;
 
+pub use gaussian::{GaussianBlur, blur_gaussian, gaussian_kernel};
 pub use kernel::Kernel;
 
 use plan::Plan;

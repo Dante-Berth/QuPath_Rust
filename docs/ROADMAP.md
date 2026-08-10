@@ -12,19 +12,23 @@ build.
 | --- | --- | --- | --- |
 | `qupath-objects` | Columnar detection/measurement table | `MeasurementPrecision.json` | ~100x on scan/filter |
 | `qupath-watershed` | Marker-controlled flood, bucket queue | `WatershedFlood.json`, 3 cases | queue 20-32x vs heap; flood 1.40x vs previous |
-| `qupath-filters` | Circular-kernel MIN/MAX rank filter | `RankFilterMinMax.json`, 42 cases | 3.1-9.7x vs ImageJ |
+| `qupath-filters` | MIN/MAX rank filter, Gaussian blur | `RankFilterMinMax.json` 42 cases; `GaussianBlur.json` 10 kernels + 12 images | rank 3.1-9.7x vs ImageJ; blur bit-identical |
 | `qupath-slide` | Aperio SVS / tiled TIFF reader | `SlideRegion.json`, 5 regions | 4000x4000 region in 0.09 s |
-| `qupath-pipeline` | Streams tiles through the above | `ColourDeconvolution*.json` | 17.8 Mpx in 0.062 s, 53 MB peak |
+| `qupath-pipeline` | Streams tiles through the above | `ColourDeconvolution*.json` | 17.8 Mpx in 0.113 s, 53 MB peak |
 
 **The end-to-end number is still QuPath's 15.87 s**, because the pipeline is not
 `WatershedCellDetection`. It runs real slide pixels through the ported stages
 and nothing else. Do not compare the two figures until §1 below is done; the
-pipeline currently produces 211,728 basins where QuPath detects 25,757 cells.
+pipeline currently produces 42,966 basins where QuPath detects 25,757 cells.
 
-The pipeline's own figure moved from 0.114 s to 0.062 s when §1.1 was done, and
-**that is not a speedup of the same work**: the earlier run was deconvolving
-with the wrong stain vector, so it was computing something else. The parts of it
-that are comparable are in `docs/benchmarks/README.md`.
+**The pipeline's own figure is not a speedup series and must not be read as
+one.** It has moved 0.114 s -> 0.062 s -> 0.113 s, and neither step was the same
+work as the one before it: §1.1 corrected a wrong stain vector, and §1.2 added
+a stage that had been missing. A figure that goes up because a stage was added
+is the honest outcome; the counts moved with it, from 397,822 to 211,728 to
+42,966 basins against QuPath's 25,757 cells. The parts that *are* comparable —
+component A/B runs, interleaved, asserting identical output — are in
+`docs/benchmarks/README.md`.
 
 Reproduce everything:
 
@@ -78,21 +82,68 @@ Three smaller corrections came with it, all confirmed against the fixture:
 slide carrying its own estimate can be deconvolved the way QuPath would.
 `CMU-1.svs` carries none and falls back to the defaults, as QuPath does.
 
-### 1.2 Gaussian blur
+### 1.2 Gaussian blur — **done**
 
-2.4% of detection self time (`convolveLine`), and `Convolver.convolveFloat` a
-further 3.1%. Detection blurs before finding maxima; without it the maxima are
-noise-driven, which is part of why the current marker count is 15x too high.
+Pinned by `GaussianBlur.json`: 10 kernels straight from `makeGaussianKernel`,
+and 12 whole images through `FloatProcessor.blurGaussian` — the call detection
+makes. **Bit-identical** to ImageJ on every value of all twelve images and all
+ten kernels, which is stronger than the `1e-5` the tolerance allows; the test
+gates on the tolerance and reports any value that stops matching exactly,
+because the kernel goes through `exp`, `ln` and `sqrt` where a different libm
+is entitled to an ulp.
 
-- ImageJ's `GaussianBlur` is separable with a specific kernel construction and
-  edge handling — read `GaussianBlur.java`, do not assume a textbook kernel.
-- This is a float **accumulation**, unlike MIN/MAX. §5 applies: parallel
-  reduction must be deterministic, and the thread-count test is mandatory.
-- Expect 2-5x per §3. The separable structure is already vectorisation-friendly.
+The warning above was the right one — it is not a textbook kernel, in four ways
+that the source shows and a derivation does not:
 
-### 1.3 `MaximumFinder`
+- **The accuracy is 0.0002.** `blurGaussian` picks between `0.002` and
+  `0.0002` by processor type, and detection blurs a `FloatProcessor`, which
+  takes the tighter one. The other value sits in the same expression and
+  shortens every kernel by about a fifth.
+- **The tail is a parabola.** Past a break point the Gaussian values are
+  replaced by `(kRadius - r)²·slope²`, which reaches zero exactly at the first
+  sample outside the kernel, so truncation leaves no step.
+- **The break point is searched for**, by scanning inwards for the smallest
+  `sqrt(kernel[r])/(kRadius-r)` and stopping at the first value that fails to
+  improve. For sigma 3 that lands on a single tap: the other thirteen are the
+  plain Gaussian.
+- **Edges extend by replication through the tail sum**, not by clamping each
+  tap. `kernSum[i]` carries the mass beyond sample `i` *including what the
+  truncation dropped*, so the kernel behaves as though it were infinite.
 
-The missing piece that makes the marker count wrong. ImageJ's
+The large-sigma path is ported too. Above sigma 8.5 ImageJ downscales the line,
+convolves, and upscales, correcting sigma for the variance the two resamplings
+add. Detection does not reach it on defaults — 1.5 µm needs a pixel size under
+0.176 µm to cross 8.5, finer than a 40x scan — but sigma is a user-facing
+parameter and raising it is the documented remedy for fragmented nuclei, so the
+threshold is one dialog box away and skipping it would have been a silent
+divergence at a value nothing marks as special.
+
+§5's determinism requirement is met structurally: lines are independent within
+a pass and each output pixel is accumulated by one line in a fixed order.
+`blurring_is_independent_of_how_lines_are_split` asserts that against 1, 2, 3,
+5 and 8 bands rather than trusting it.
+
+**The marker count fell from 211,728 to 42,966**, against QuPath's 25,757 cells
+for this region — from 8.2x too many to 1.7x. That is the noise-driven maxima
+this item predicted, going away. It is not parity: §1.3's prominence test and
+the 3x3 Laplacian on the line after the blur are both still missing, and the
+remaining factor is where they live.
+
+The blur costs more than everything it follows. See §4.3.
+
+### 1.3 The Laplacian, then `MaximumFinder`
+
+Two things, in the order detection does them.
+
+The line after the blur is `fpLoG.convolve(new float[]{0,-1,0,-1,4,-1,0,-1,0},
+3, 3)`, which completes the Laplacian of Gaussian. It looks trivial and is not:
+ImageJ's `Convolver` normalises the kernel by its sum unless told otherwise —
+and this kernel sums to zero, which is its own branch — and has its own edge
+convention. Record `Convolver.convolveFloat` before porting it; the blur above
+is the second time in this repository that reading the source gave the wrong
+constant.
+
+Then `MaximumFinder`, the piece that makes the marker count wrong. ImageJ's
 `MaximumFinder.getMaxima` sorts candidate maxima by value, floods each with a
 tolerance, and discards maxima reachable from a higher one without descending
 below `value - tolerance`.
@@ -181,11 +232,18 @@ already ported.
    built removes the three multiplies as well as the three logarithms. The
    stage went from 0.768 s to 0.031 s summed across threads, 36.5% to under 4%.
    It is now the smallest stage in the pipeline and not worth revisiting.
-3. **The watershed is 48-49% of pipeline time**, far above the 29.4% the JFR
-   profile attributed to it in QuPath, and it grew as a share when
-   deconvolution shrank. Worth re-profiling in place rather than assuming the
-   old share still holds. This is now the largest lever after §0.1.
-4. **SIMD**, last, per §0.5 — and only behind a scalar fallback with a
+3. **The Gaussian blur is 31% of pipeline time**, the second-largest stage as
+   soon as it was added, and the y pass is why: it walks each column with a
+   stride of the tile width, so every tap of the kernel is a separate cache
+   line. ImageJ does the same and pays the same. The traversal is free to
+   change — each output pixel is accumulated by one line, in a fixed order —
+   so a blocked or transposed y pass can be **bit-identical** and is the first
+   thing to try. The kernel is also rebuilt per tile per direction, which is
+   small but pure waste.
+4. **The watershed is 43-48% of pipeline time**, far above the 29.4% the JFR
+   profile attributed to it in QuPath. Worth re-profiling in place rather than
+   assuming the old share still holds. This is the largest lever after §0.1.
+5. **SIMD**, last, per §0.5 — and only behind a scalar fallback with a
    differential test.
 
 ---

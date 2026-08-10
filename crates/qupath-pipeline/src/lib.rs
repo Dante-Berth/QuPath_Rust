@@ -31,7 +31,7 @@ mod stain;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use qupath_filters::{RankFilter, RankOp};
+use qupath_filters::{GaussianBlur, RankFilter, RankOp};
 use qupath_slide::{Slide, SlideError};
 use qupath_watershed::{Connectivity, Watershed};
 use rayon::prelude::*;
@@ -62,6 +62,14 @@ pub struct Params {
     /// parameters; this stands in for that until the detection front end is
     /// ported.
     pub open_radius: f64,
+    /// Gaussian blur sigma in pixels, or zero to skip the blur.
+    ///
+    /// QuPath asks for sigma in microns — 1.5 by default — and divides by the
+    /// slide's pixel size, so the pixel value depends on the slide. CMU-1
+    /// records `MPP = 0.4990`, which puts detection at 3.01 px on it.
+    /// [`Params::default`] uses that. Nothing reads the pixel size off the
+    /// slide yet, so a different slide needs this set by hand.
+    pub sigma: f64,
     /// Optical density below which a pixel is background and is never flooded.
     pub threshold: f32,
     /// Flood connectivity.
@@ -73,6 +81,9 @@ impl Default for Params {
         Self {
             level: 0,
             open_radius: 2.0,
+            // 1.5 microns at CMU-1's 0.4990 um/px, which is what QuPath would
+            // use on this slide with its own defaults.
+            sigma: 1.5 / 0.4990,
             // Haematoxylin OD of background glass is near zero; nuclei run well above
             // 0.1 on this slide. Chosen to make the flood do representative
             // work, not to match QuPath.
@@ -90,6 +101,7 @@ impl Default for Params {
 struct StageClocks {
     decode: AtomicU64,
     deconvolve: AtomicU64,
+    blur: AtomicU64,
     filter: AtomicU64,
     maxima: AtomicU64,
     flood: AtomicU64,
@@ -102,6 +114,8 @@ pub struct Stages {
     pub decode: f64,
     /// RGB to haematoxylin optical density.
     pub deconvolve: f64,
+    /// The Gaussian blur.
+    pub blur: f64,
     /// The rank-filter opening.
     pub filter: f64,
     /// Finding markers.
@@ -114,7 +128,7 @@ impl Stages {
     /// Total across every stage.
     #[must_use]
     pub fn total(&self) -> f64 {
-        self.decode + self.deconvolve + self.filter + self.maxima + self.flood
+        self.decode + self.deconvolve + self.blur + self.filter + self.maxima + self.flood
     }
 }
 
@@ -175,6 +189,7 @@ struct Scratch {
     labels: Vec<f32>,
     candidates: Vec<bool>,
     stack: Vec<u32>,
+    blur: GaussianBlur,
     filter: RankFilter,
     flooder: Watershed,
 }
@@ -188,6 +203,7 @@ impl Scratch {
             labels: Vec::new(),
             candidates: Vec::new(),
             stack: Vec::new(),
+            blur: GaussianBlur::new(),
             filter: RankFilter::new(),
             flooder: Watershed::new(),
         }
@@ -264,6 +280,16 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
             stains.haematoxylin_into(&scratch.rgb, &mut scratch.density);
             clocks.deconvolve.fetch_add(nanos(mark), Ordering::Relaxed);
 
+            // Where QuPath blurs: after deconvolution, before anything looks
+            // for maxima. Its next line is a 3x3 Laplacian, which is not ported
+            // yet, so this is the Gaussian half of QuPath's Laplacian of
+            // Gaussian and not the whole filter.
+            let mark = Instant::now();
+            if params.sigma > 0.0 {
+                scratch.blur.blur(&mut scratch.density, width, params.sigma);
+            }
+            clocks.blur.fetch_add(nanos(mark), Ordering::Relaxed);
+
             let mark = Instant::now();
             scratch.opened.clear();
             scratch.opened.resize(scratch.density.len(), 0.0);
@@ -325,6 +351,7 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
         stages: Stages {
             decode: seconds(&clocks.decode),
             deconvolve: seconds(&clocks.deconvolve),
+            blur: seconds(&clocks.blur),
             filter: seconds(&clocks.filter),
             maxima: seconds(&clocks.maxima),
             flood: seconds(&clocks.flood),

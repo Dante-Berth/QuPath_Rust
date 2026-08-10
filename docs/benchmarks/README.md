@@ -356,6 +356,44 @@ the reasons in the summary below. And it must not be read against the 0.114 s
 recorded for the pipeline before §1.1, because that run was deconvolving with
 the wrong stain vector and so was not doing the same work.
 
+## Gaussian blur
+
+No speed claim, and that is the point of recording it here.
+
+The blur was ported for parity, not performance: detection blurs before it looks
+for maxima, and the pipeline had been skipping that step entirely. Adding it
+made the pipeline **slower** and the result **better**:
+
+| | Before | After |
+| --- | ---: | ---: |
+| Pipeline wall clock | 0.062 s | 0.113 s |
+| Blur, summed across threads | — | 0.658 s (31.2%) |
+| Markers seeded | 211,728 | **42,966** |
+
+QuPath detects 25,757 cells in this region. The marker count went from 8.2x
+that to 1.7x, because the maxima the blur removed were noise. A wall clock that
+goes up when a missing stage is added is the honest outcome, and the two figures
+are not a before/after of the same work — nothing in this table is a speedup.
+
+Against ImageJ the port is **bit-identical**, on all 10 recorded kernels and all
+12 recorded images, including the downscale/upscale path above sigma 8.5. There
+is no accuracy trade here to report.
+
+### Why it costs what it costs
+
+The blur is the second-largest stage in the pipeline as of this session, and the
+y pass is the reason: it walks each column with a stride of the tile width, so
+every one of the 14 taps at sigma 3 touches a separate cache line. ImageJ's
+`blur1Direction` does exactly the same thing and pays exactly the same price —
+this is not a Rust deficit, it is the algorithm as written.
+
+That cost is addressable without changing a single arithmetic result. Each
+output pixel is accumulated by one line, in a fixed order, so the *traversal*
+is free: a blocked or transposed y pass computes the same sums in the same
+sequence. `docs/ROADMAP.md` §4.3 carries it, and — per the standing warning in
+this file — it will be measured interleaved and asserted bit-identical before
+any number is claimed for it.
+
 ## Where this leaves the pipeline
 
 Three components are now faster in isolation, and the profile says what each is

@@ -59,16 +59,17 @@ fn main() {
     for (name, seconds) in [
         ("decode", stages.decode),
         ("deconvolve", stages.deconvolve),
+        ("gaussian blur", stages.blur),
         ("rank filter", stages.filter),
         ("maxima", stages.maxima),
         ("watershed", stages.flood),
     ] {
         println!(
-            "  {name:<12} {seconds:7.3} s  {:5.1}%",
+            "  {name:<13} {seconds:7.3} s  {:5.1}%",
             100.0 * seconds / total
         );
     }
-    println!("  {:<12} {total:7.3} s", "total");
+    println!("  {:<13} {total:7.3} s", "total");
 
     println!(
         "\n{} markers seeded, {} pixels labelled ({:.1}% of the region)",
@@ -80,8 +81,9 @@ fn main() {
         println!("peak resident memory: {:.0} MB", bytes as f64 / 1e6);
     }
     println!(
-        "\nNote: basins, not cells. QuPath's MaximumFinder, Gaussian blur,\n\
-         morphological reconstruction and measurement stages are not ported,\n\
-         so this is not WatershedCellDetection and the counts are not comparable."
+        "\nNote: basins, not cells. The blur is ported and pinned against\n\
+         ImageJ, but the Laplacian that follows it, QuPath's MaximumFinder,\n\
+         morphological reconstruction and the measurement stages are not, so\n\
+         this is not WatershedCellDetection and the counts are not comparable."
     );
 }

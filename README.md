@@ -28,15 +28,17 @@ Five crates, each checked against fixtures recorded from a real QuPath build:
 | --- | --- | --- |
 | `qupath-objects` | Columnar detection/measurement table | recorded |
 | `qupath-watershed` | Marker-controlled flood, bucket queue | recorded |
-| `qupath-filters` | Circular-kernel MIN/MAX rank filter | recorded, 42 cases |
+| `qupath-filters` | MIN/MAX rank filter, ImageJ Gaussian blur | recorded, 42 + 22 cases |
 | `qupath-slide` | Aperio SVS / tiled TIFF reader, pure Rust | recorded, 5 regions |
 | `qupath-pipeline` | Streams slide tiles through the above | colour deconvolution |
 
 `qupath-pipeline` reads real slide pixels and runs the ported stages over them
-with bounded memory, but it is **not** `WatershedCellDetection`: Gaussian blur,
-`MaximumFinder`, morphological reconstruction, ROI tracing and measurement are
-not ported. Its output is flooded basins, not cells, and its runtime is
-therefore not comparable with QuPath's.
+with bounded memory, but it is **not** `WatershedCellDetection`: the 3x3
+Laplacian that follows the blur, `MaximumFinder`, morphological reconstruction,
+ROI tracing and measurement are not ported. Its output is flooded basins, not
+cells, and its runtime is therefore not comparable with QuPath's. Adding the
+Gaussian blur took it from 211,728 basins to 42,966, against QuPath's 25,757
+cells for the same region — closer, and still not the same thing.
 
 The deconvolution fixture is worth singling out, because it is the argument for
 this whole approach in miniature. It found that the port had been using the

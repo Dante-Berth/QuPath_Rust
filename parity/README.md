@@ -55,3 +55,10 @@ does.
 
 Never widen a tolerance to make a test pass. If parity cannot be reached,
 report the numbers.
+
+Where a port turns out to be **bit-identical** anyway — as the Gaussian blur is,
+on all 22 of its cases — the tolerance stays the gate and the exact agreement is
+*reported*, not asserted. A build whose `exp` or `sqrt` differs in the last ULP
+would still be correct, and a test that failed there would be measuring libm.
+The report is what makes a margin quietly eroding towards the limit visible
+before it fails.
