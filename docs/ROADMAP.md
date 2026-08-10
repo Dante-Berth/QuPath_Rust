@@ -11,25 +11,28 @@ build.
 | Crate | Does | Parity | Measured |
 | --- | --- | --- | --- |
 | `qupath-objects` | Columnar detection/measurement table | `MeasurementPrecision.json` | ~100x on scan/filter |
-| `qupath-watershed` | Marker-controlled flood, bucket queue, 4/8-connected labelling | `WatershedFlood.json`, 3 cases; `RegionalMaxima.json` labels, 13 surfaces | queue 20-32x vs heap; flood 1.40x vs previous; labelling identical |
+| `qupath-watershed` | Marker-controlled flood, bucket queue, 4/8-connected labelling, filled-region tracing | `WatershedFlood.json`, 3 cases; `RegionalMaxima.json` labels, 13 surfaces; `ObjectFilters.json` regions, 17 images | queue 20-32x vs heap; flood 1.40x vs previous; labelling and tracing identical |
 | `qupath-filters` | MIN/MAX rank filter, Gaussian blur, convolution, morphological reconstruction | `RankFilterMinMax.json` 42 cases; `GaussianBlur.json` 10 kernels + 12 images; `LaplacianConvolution.json` 5 scales + 17 images; `RegionalMaxima.json` 11 reconstructions + 13 surfaces | rank 3.1-9.7x vs ImageJ; blur, convolution and reconstruction bit-identical |
 | `qupath-slide` | Aperio SVS / tiled TIFF reader | `SlideRegion.json`, 5 regions | 4000x4000 region in 0.09 s |
-| `qupath-pipeline` | Streams tiles through the above | `ColourDeconvolution*.json` | 17.8 Mpx in 0.21 s, 60 MB peak |
+| `qupath-pipeline` | Streams tiles through the above, filters the candidates | `ColourDeconvolution*.json`; `ObjectFilters.json` statistics and decisions, 17 images | 17.8 Mpx in 0.215 s, 71 MB peak |
 
 **The end-to-end number is still QuPath's 15.87 s**, because the pipeline is not
 `WatershedCellDetection`. Every image-processing stage QuPath runs *before* its
-watershed is now ported and pinned; nothing it runs *after* is. Do not compare
-the two figures until §1.5 below is done; the pipeline currently produces 88,424
-basins where QuPath detects 25,757 cells.
+watershed is ported and pinned, and so are the first two things it does *after*
+— tracing basins to filled regions, and the intensity filter over them. What
+remains is the merge and shape split, the area filter that runs on the objects
+*that* produces, and the measurement tail. Do not compare the two figures until
+§1.5 below is done; the pipeline currently produces **66,739 candidates** where
+QuPath detects 25,757 cells.
 
 **The pipeline's own figure is not a speedup series and must not be read as
-one.** It has moved 0.114 s -> 0.062 s -> 0.091 s -> 0.114 s -> 0.21 s, and no
-step was the same work as the one before it: §1.1 corrected a wrong stain
-vector, and §1.2, §1.3 and §1.4 each added a stage that had been missing. A
-figure that goes up because a stage was added is the honest outcome.
+one.** It has moved 0.114 s -> 0.062 s -> 0.091 s -> 0.114 s -> 0.21 s -> 0.215
+s, and no step was the same work as the one before it: §1.1 corrected a wrong
+stain vector, and §1.2, §1.3, §1.4 and §1.5a each added a stage that had been
+missing. A figure that goes up because a stage was added is the honest outcome.
 
 **The counts are not a quality series either**: 397,822 -> 211,728 -> 42,966 ->
-91,957 -> 88,424 basins, against QuPath's 25,757 cells.
+91,957 -> 88,424 basins -> 66,739 candidates, against QuPath's 25,757 cells.
 
 ### The correction this file owes: §1.4 was not the stage that fixes the count
 
@@ -320,46 +323,109 @@ This stage now costs 52% of pipeline stage time, the largest by a wide margin �
 59% of it the radius-16 erosion, 40% the reconstruction. Both numbers are new
 and neither has been looked at; see §4.7.
 
-### 1.5 ROI tracing, the object filters, measurements — **the count gap**
+### 1.5a Region tracing and the intensity filter — **done**
 
-This is now the whole remaining gap, and §1.4's correction at the top of this
-file is the argument that it is. Everything QuPath does after the watershed, in
-order, with what each is worth on the profiled region:
+Pinned by `ObjectFilters.json`: 17 label images through
+`getFilledPolygonROIs(ipNucleusLabels, Wand.FOUR_CONNECTED)` and the filter loop
+that follows it, including two built by running the real chain — blur,
+Laplacian, regional maxima, labelling, flood — so the stage is checked on the
+input it actually meets. Region maps match pixel for pixel, areas and survival
+decisions match exactly, and **means match bit for bit**: this is a sum of `f32`
+widened to `f64`, so there is nothing transcendental to excuse a difference and
+the test asserts equality rather than a tolerance.
 
-| Stage | Measured effect on the 88,424 basins |
+**A previous plan for this item said the filters "need only per-label sums and
+counts over the label image — no tracing". That was wrong on both halves**, and
+reading the call site rather than the summary is what caught it:
+
+- **The Wand does not trace labels.** It is handed the threshold range
+  `[0.5, inf)`, so it outlines whatever run of *labelled* pixels it can reach.
+  Two basins meeting with no watershed line between them are **one** object.
+  Measured on the profiled region: 88,424 markers become 88,423 traced regions,
+  so it happens once here — but a port that iterates label values would pass
+  every synthetic case and be wrong in a way nothing downstream reports.
+- **The area filter cannot be applied here at all.** It runs on
+  `getFilledPolygonROIs(bp, ...)` *after* the merge and the shape split, on
+  those objects rather than these. Applying it to raw basins, as the earlier
+  estimate did, measures something QuPath never computes.
+
+Five conventions the call site does not show, each mutation-checked against a
+case that fails without it:
+
+- **Holes are filled**, so a ring-shaped basin is measured over its interior
+  too, including pixels carrying no label. `ring-with-hole` is a case where the
+  filled hole is exactly what drops the object.
+- **A basin enclosed by another is discarded outright**, not merged and not
+  kept: the *filled* polygon is marked completed, so its turn in the scan never
+  comes.
+- **Background is eight-connected**, dual to the four-connected regions, so a
+  hole is a run that cannot escape even diagonally. Four-connected background
+  fills too much and fails on `random-dense`.
+- **The mean test is `<=`**, so a candidate landing exactly on the threshold is
+  dropped. `mean-exactly-threshold` uses 0.5, which is exact in `f32` and `f64`,
+  because the default 0.1 is exact in neither and would prove nothing. Note the
+  *second* filter pass, after the merge, tests `<` on the same quantity.
+- **ImageJ's statistics skip non-finite pixels**, in `pixelCount` as well as in
+  the sum, so the area a later filter compares against 10–400 µm² is not the
+  region's size. This one was **not** pinned by the first recording — no case
+  had such a pixel and the mutation passed — so `non-finite-pixels` was added
+  and the fixture re-recorded rather than the convention left on trust.
+
+A sixth was tried and is **unobservable**: whether a filled hole overwrites
+another region's index or only claims unclaimed pixels. Both spellings pass
+every case, because an encloser's outline runs above whatever it encloses and is
+therefore always traced first. Recorded here so the next reader does not spend
+the same hour on it.
+
+The mean is measured on `ipToMeasure`, which is the background-subtracted
+optical density taken **before** the blur and Laplacian — not the LoG the
+watershed ran on, and not the raw density either. The tile scratch now carries
+that copy, and `subtract_background` clears its mask on every call rather than
+only when it rebuilds it: the filter reads that mask, and a previous tile's
+would reject candidates at coordinates meaningless in this one.
+
+Cost in place: tracing 14.0% of pipeline stage time, the filter 1.1%. The §4.4
+ratio check does not fire — tracing does about 1.1 image-equivalents of work
+(6.1 M labelled pixels flooded, plus 13.7 M bounding-box pixels for the hole
+test against a 17.8 M image), which is comparable to the watershed beside it at
+14.3%.
+
+### 1.5b What is left, and what it has to be worth
+
+The intensity filter dropped 24.5% — 88,423 candidates to **66,739** — which is
+within one object of the 66,740 the earlier estimate predicted for it. So that
+estimate was sound, and the conclusion it pointed at stands: **this was not the
+count fix either.** The gap to QuPath's 25,757 is still 2.6x, and it is now
+provably in what remains:
+
+| Stage | Effect on the profiled region |
 | --- | --- |
-| `getFilledPolygonROIs`, 4-connected, holes filled | not measured; changes object identity, not only count |
-| mean intensity `> 0.1` on the background-subtracted OD | 66,740 survive (25% dropped) |
-| `bp.filter(MAX)`, AND with the thresholded LoG | merges adjacent basins; not measured |
+| `getFilledPolygonROIs`, holes filled | 88,424 markers -> 88,423 regions, **measured** |
+| mean intensity `> 0.1` on `ipToMeasure` | 66,739 survive, 24.5% dropped, **measured** |
+| `bp.filter(MAX)`, AND with the thresholded LoG | merges adjacent candidates; not measured |
 | `watershedPostProcess`: EDM watershed, splits by shape | splits some back; not measured |
-| area outside 10–400 µm² (40.2–1606 px² here) | 64,826 survive (27% dropped) |
-| both filters together | **50,927** |
+| area outside 10–400 µm², *on the objects that produces* | not measurable before the two above |
+| tile seams (§2) | inflates every count here; not measured |
 | QuPath | **25,757** |
-
-The two filters that are cheap to estimate account for a little under half the
-gap. The remaining 2x has to be in the merge-and-split, the hole filling, or the
-tile seams of §2, and **which of those it is has not been established** — the
-estimates above were taken on raw basins, where QuPath measures traced,
-merged-and-resplit objects, so they are indicative and not a prediction.
 
 Order to port in, cheapest evidence first:
 
-1. **The mean-intensity and area filters**, which need only per-label sums and
-   counts over the label image — no tracing. Do these first: they are a
-   histogram pass, and they will say how much of the gap is really elsewhere.
-2. **Tile seams (§2)**, which are a correctness bug independent of all this and
-   inflate every count above.
-3. **ROI tracing.** The fiddly one: QuPath uses ImageJ's `Wand` with a specific
-   contour-following convention and fills interior holes, and the vertices must
-   match.
-4. **Merge and shape split**, which needs a Euclidean distance map and a second
-   watershed.
+1. **Tile seams (§2)**, which are a correctness bug independent of everything
+   else and inflate every count in the table. This is now the cheapest remaining
+   evidence and it moved up the list for that reason: a 4000x4000 region cut
+   into 272 tiles has a lot of boundary, and every nucleus crossing one is
+   counted twice.
+2. **Merge and shape split**, which needs a Euclidean distance map and a second
+   watershed. Both halves change object identity, not only count, so this is
+   where a Dice or IoU comparison first becomes meaningful.
+3. **The area filter**, which is a histogram pass over whatever step 2 leaves —
+   trivial once it has objects to run on, and meaningless before.
+4. **ROI vertices.** The masks match now; the polygons do not exist. QuPath's
+   `PathObject` geometry is the Wand's vertex list, so exporting objects needs
+   the contour itself and not just what it encloses.
 5. **Measurements**, into the columnar table `qupath-objects` already provides.
 
-A fixture for each, recorded the same way as everything above. Note that the
-mean-intensity test measures `ipToMeasure`, which is the background-subtracted
-optical density **before** the blur and Laplacian — not the LoG the watershed
-ran on, and not the raw density either.
+A fixture for each, recorded the same way as everything above.
 
 ### 1.6 The claim
 
@@ -451,10 +517,18 @@ already ported.
    more than a strictly larger stage is a stall, and that ratio is worth
    checking for on every stage this list adds** — it is now the second time the
    same dependency has been shipped.
-5. **The watershed is now about 17% of pipeline stage time** — down from 40%
-   only because §1.4b added a much larger stage in front of it, not because it
-   got faster. In absolute terms it is unchanged.
-6. **The background stage is now 52% of pipeline stage time**, which makes it
+5. **The watershed is now about 14% of pipeline stage time** — down from 40%
+   only because §1.4b and §1.5a added stages around it, not because it got
+   faster. In absolute terms it is unchanged.
+6. **Region tracing landed at 14.0%**, level with the watershed beside it. The
+   §4.4 ratio check does **not** fire: it floods 6.1 M labelled pixels
+   four-connected and then walks 13.7 M bounding-box pixels for the hole test,
+   against a 17.8 M image, so it does about 1.1 image-equivalents of scattered
+   work and costs what that implies. It has had no optimisation pass, and the
+   bounding-box half is the place to start if one is ever wanted — that figure
+   is the sum over regions, so it grows with the number of candidates rather
+   than with the image.
+7. **The background stage is now 45% of pipeline stage time**, which makes it
    the largest single lever and the first thing §4 should look at once §1 and §2
    are done. It splits 59% erosion / 40% reconstruction, and **neither half has
    been examined**:
@@ -474,7 +548,7 @@ already ported.
 
    Apply the §4.4 heuristic before believing any of this: measure in place, and
    check the ratio against the neighbouring stages.
-7. **SIMD**, last, per §0.5 — and only behind a scalar fallback with a
+8. **SIMD**, last, per §0.5 — and only behind a scalar fallback with a
    differential test. Note §4.3 and §4.4 got 2.3x and 3.7x without any explicit
    SIMD, by removing a dependency rather than by widening an instruction.
 
@@ -535,7 +609,25 @@ not hypothetical ones. Two of them were hit again this session.
   Laplacian's nine taps cost more than the separable twenty-nine-tap blur ahead
   of it, because both had the same loop-carried accumulator — the second one
   written after the first was fixed. The stage table shows this for free; read
-  it that way when a stage lands. Note the converse is not a clean bill of
+  it that way when a stage lands.
+- **This file's plan for a stage is not that stage's call site.** §1.5 said for
+  two revisions that the object filters "need only per-label sums and counts
+  over the label image — no tracing", and that the area filter could be
+  estimated on raw basins. Both are wrong: the Wand traces a *threshold range*
+  so touching basins merge into one object, and the area filter runs after the
+  merge and shape split on objects that do not exist yet. The plan was written
+  from a summary of the source; five minutes at the call site contradicted it.
+  Every remaining item here was written the same way and deserves the same
+  distrust — read the call site again when you pick one up, before writing code
+  against what this file says about it.
+- **A convention nothing exercises is not pinned, however carefully it is
+  written down.** §1.5a's port skipped non-finite pixels in the statistics, the
+  comment said so, and the mutation that removed it **passed** — no recorded
+  case had such a pixel. The fixture gained a case and was re-recorded. So:
+  mutate every convention you claim, and when the mutation passes, the fixture
+  is missing a case rather than the convention being unimportant. Two other
+  conventions were also caught this way and only one turned out to be genuinely
+  unobservable. Note the converse is not a clean bill of
   health: §1.4b's background stage is the most expensive in the pipeline and
   also has by far the largest kernel, so the heuristic says nothing about it
   either way.

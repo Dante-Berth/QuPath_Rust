@@ -515,32 +515,38 @@ cost and was 3% of the flood, and the incremental rank filter looked like 1.9x
 ahead of ImageJ and was behind it from radius 3.
 
 The largest remaining piece of work is not a further optimisation of these
-three. It is closing the detection pipeline — the Laplacian, the regional maxima
-and the background subtraction are now done; the object filters, ROI tracing and
-the measurement tail are not — after which §0.1, doing less work by way of the
-right pyramid level, the right ROI and early rejection, becomes available and
-outranks everything measured here.
+three. It is closing the detection pipeline — the Laplacian, the regional
+maxima, the background subtraction, the region tracing and the intensity filter
+are now done; the merge and shape split, the area filter and the measurement
+tail are not — after which §0.1, doing less work by way of the right pyramid
+level, the right ROI and early rejection, becomes available and outranks
+everything measured here.
 
 ### The stage table has moved, and every share below is now stale
 
-`findRegionalMaxima` and the background subtraction landed after the figures
-above were taken, and the second of them is expensive. Stage shares as they now
-stand, on the same 4000x4000 region:
+`findRegionalMaxima`, the background subtraction and the region tracing all
+landed after the figures above were taken, and the second of them is expensive.
+Stage shares as they now stand, on the same 4000x4000 region — raw output in
+`rust-pipeline-region.txt`, best wall clock of five runs on a machine that is
+not quiet:
 
 | Stage | Summed across threads | Share |
 | --- | ---: | ---: |
-| decode | 0.254 s | 5.8% |
-| deconvolve | 0.042 s | 1.0% |
-| **background** | **2.265 s** | **51.9%** |
-| gaussian blur | 0.369 s | 8.5% |
-| laplacian | 0.142 s | 3.3% |
-| maxima | 0.524 s | 12.0% |
-| labelling | 0.041 s | 0.9% |
-| watershed | 0.730 s | 16.7% |
+| decode | 0.188 s | 4.6% |
+| deconvolve | 0.031 s | 0.8% |
+| **background** | **1.824 s** | **44.6%** |
+| gaussian blur | 0.282 s | 6.9% |
+| laplacian | 0.085 s | 2.1% |
+| maxima | 0.440 s | 10.8% |
+| labelling | 0.033 s | 0.8% |
+| watershed | 0.584 s | 14.3% |
+| tracing | 0.573 s | 14.0% |
+| object filter | 0.046 s | 1.1% |
 
-The watershed's 40% above is now 16.7%, and **it did not get faster** — a stage
-three times its size was added in front of it. Absolute figures are what carry
-between these tables; shares are not.
+The watershed's 40% above is now 14.3%, and **it did not get faster** — stages
+were added around it. Absolute figures are what carry between these tables;
+shares are not, and five of the entries above are stages that did not exist when
+the earliest figures here were taken.
 
 The background stage splits 59% erosion (the MIN rank filter at radius 16.03)
 and 40% reconstruction. Neither has had an optimisation pass, and the rank
@@ -549,10 +555,15 @@ That is the next target rather than the watershed, but only after §1 and §2 of
 the roadmap — and per the entries above it will be an interleaved A/B with
 identical output asserted before any figure is claimed.
 
-Note that the watershed's *share* fell from 53% only because a stage was added
-in front of it, not because it got faster. Shares in this file move whenever the
-denominator does, and three of the entries above are stages that did not exist
-when the earliest figures here were taken.
+**Tracing landed level with the watershed and that is not a stall.** The §4.4
+heuristic — a stage costing more than a strictly larger stage — needs the two to
+be doing comparable work before it means anything, and here they are: tracing
+floods 6.1 M labelled pixels four-connected, then walks 13.7 M bounding-box
+pixels to decide which background runs are enclosed, against a 17.8 M image.
+That is about 1.1 image-equivalents of scattered access for 14.0%, beside the
+watershed's full-image priority-queue flood at 14.3%. The bounding-box figure is
+a sum over regions, so it scales with the candidate count rather than with the
+image, and it is the half to attack first if this ever needs to be faster.
 
 ## Environment
 

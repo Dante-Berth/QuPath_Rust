@@ -27,32 +27,40 @@ Five crates, each checked against fixtures recorded from a real QuPath build:
 | Crate | Does | Parity |
 | --- | --- | --- |
 | `qupath-objects` | Columnar detection/measurement table | recorded |
-| `qupath-watershed` | Marker-controlled flood, bucket queue, 4/8-connected labelling | recorded |
+| `qupath-watershed` | Marker-controlled flood, bucket queue, 4/8-connected labelling, filled-region tracing | recorded, 3 + 13 + 17 cases |
 | `qupath-filters` | MIN/MAX rank filter, ImageJ Gaussian blur, convolution, morphological reconstruction | recorded, 42 + 22 + 22 + 24 cases |
 | `qupath-slide` | Aperio SVS / tiled TIFF reader, pure Rust | recorded, 5 regions |
-| `qupath-pipeline` | Streams slide tiles through the above | colour deconvolution |
+| `qupath-pipeline` | Streams slide tiles through the above, filters the candidates | colour deconvolution; object filters, 17 images |
 
 Every image-processing stage `WatershedCellDetection` runs **before** its
-watershed is now ported and pinned against output recorded from QuPath itself —
+watershed is ported and pinned against output recorded from QuPath itself —
 deconvolution, background subtraction by reconstruction, the Laplacian of
-Gaussian, the regional maxima, the labelling and the flood. Nothing it runs
-**after** the watershed is: ROI tracing, the mean-intensity and area filters,
-the merge-and-split, and measurement are all absent. So the output is still
-flooded basins rather than cells, and the runtime is still not comparable with
-QuPath's.
+Gaussian, the regional maxima, the labelling and the flood — and so are the
+first two things it does **after**: tracing each basin to a hole-filled region,
+and the mean-intensity filter over it. What is still missing is the merge and
+shape split, the area filter that runs on *those* objects, and measurement. So
+the output is candidate nuclei rather than cells, and the runtime is still not
+comparable with QuPath's.
 
-The basin count is 88,424 against QuPath's 25,757 on the same region, and
-**the stage that was supposed to close that gap turned out not to**. The
-roadmap had said for two revisions that `findRegionalMaxima`'s prominence test
-was what would bring the count down. It is ported now, bit-identically, and it
-removes two markers — its threshold gates a maximum's *value*, not its
-prominence, and the prominence test itself only ever discards maxima sitting on
-an exact plateau, which a Laplacian of Gaussian of real pixels does not have.
-The gap is in the object-level filters that run after the watershed; the measured
-breakdown is in [docs/ROADMAP.md](docs/ROADMAP.md) §1.5.
+The count is 66,739 candidates against QuPath's 25,757 cells on the same region.
+**Neither of the last two stages was the fix the roadmap expected**, and both
+corrections are worth more than the code:
 
-Two bugs the fixtures caught this round, both of which had been producing
-entirely plausible images:
+- The roadmap said for two revisions that `findRegionalMaxima`'s prominence test
+  was what would bring the count down. It is ported now, bit-identically, and it
+  removes two markers — its threshold gates a maximum's *value*, not its
+  prominence, and the prominence test itself only ever discards maxima on an
+  exact plateau, which a Laplacian of Gaussian of real pixels does not have.
+- The roadmap then said the object filters "need only per-label sums and counts
+  — no tracing", and that the area filter could be estimated on raw basins. Both
+  are wrong at the call site: ImageJ's Wand traces a *threshold range*, so two
+  basins meeting with no watershed line between them are one object, and the
+  area filter runs after a merge-and-split on objects that do not exist yet. The
+  intensity filter alone removes 24.5%, which is within one object of what had
+  been predicted for it, leaving a 2.6x gap in stages still to come.
+
+Three bugs the fixtures caught, all of which had been producing entirely
+plausible images:
 
 - The pipeline ran a **morphological opening in place of a top hat**. QuPath
   estimates its background by opening by reconstruction and then *subtracts* it;
@@ -61,8 +69,13 @@ entirely plausible images:
   16), wrong direction.
 - Earlier, the port had been using the **DAB** stain vector under the name
   `EOSIN` — H-DAB deconvolution presented as H&E, a 52% error on the leading
-  coefficient. This is the argument for the whole approach in miniature: no test
-  that did not compare against QuPath's own numbers could have found either.
+  coefficient.
+- Aperio's JPEG tiles carry no Adobe APP14 marker, so a decoder following the
+  JFIF convention converts RGB as though it were YCbCr. The slide still looks
+  like plausible H&E.
+
+That is the argument for the whole approach in miniature: no test that did not
+compare against QuPath's own numbers could have found any of them.
 
 **End-to-end cell detection is unchanged at QuPath's 15.87 s**, and will stay
 that way until the stages above exist. Component speedups and what they are
