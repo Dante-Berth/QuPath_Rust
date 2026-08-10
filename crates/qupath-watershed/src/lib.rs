@@ -39,9 +39,11 @@
 
 mod label;
 mod queue;
+mod regions;
 
 pub use label::{Labeller, label_image};
 pub use queue::{HierarchicalQueue, LEVELS, PixelIndex};
+pub use regions::{RegionTracer, filled_regions};
 
 /// Neighbourhood used when propagating labels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
