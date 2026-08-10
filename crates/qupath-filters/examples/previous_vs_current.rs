@@ -1,12 +1,29 @@
-//! A/B probe: the previous (ImageJ-incremental) filter against the current
-//! (rectangle-decomposition) one, interleaved in one process.
+//! A/B probe: one output pixel in flight against eight, interleaved.
 //!
-//! This machine is not quiet — load average is around 3 — and criterion's
-//! medians move by up to 3x between runs at small radii as a result. Comparing
-//! a benchmark taken now against one taken earlier is therefore not sound.
-//! Interleaving the two implementations means both see the same machine, and
-//! reporting the *minimum* over many repetitions estimates the uncontended cost
-//! rather than the contended one.
+//! ImageJ's `convolveLine` accumulates one output pixel at a time, and the
+//! accumulator is a loop-carried dependency: each `result +=` waits on the
+//! previous one, so the interior runs at the latency of a multiply-add rather
+//! than its throughput, and nothing else can overlap with it.
+//!
+//! Carrying eight output pixels at once makes the lanes independent of one
+//! another. The taps they read overlap almost entirely, so this costs no extra
+//! loads — it only stops the chain.
+//!
+//! **The arithmetic is untouched.** Every lane accumulates exactly what the
+//! single-pixel loop would give that pixel: centre tap first, then k ascending,
+//! same kernel, same order. This is a rewrite, not a reassociation, so the two
+//! must agree **bit for bit** — and every timed iteration asserts it, so a
+//! version that got fast by computing something else fails here rather than
+//! reporting a speedup.
+//!
+//! Transposing the image so the column pass runs contiguously was tried first
+//! and was **slower** at every size — 0.82x to 0.98x. The column pass already
+//! copies each column into a contiguous buffer before convolving it, so only
+//! the copy-in and the store were strided, and two full transposes cost more
+//! than they saved. `docs/benchmarks/README.md` records it.
+//!
+//! Both run in one process on the same buffers, and the statistic is the
+//! minimum over many repetitions, because this machine is not quiet.
 //!
 //! Scratch tooling, not part of the library.
 #![allow(missing_docs, reason = "scratch probe")]
@@ -14,175 +31,88 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use qupath_filters::{Kernel, RankFilter, RankOp};
-use rayon::prelude::*;
+use qupath_filters::GaussianBlur;
 
-/// The implementation this change replaces, verbatim from commit aa7b9eb.
-mod previous {
-    use super::{Kernel, ParallelSliceMut};
-    use rayon::prelude::*;
-
-    pub fn rank(pixels: &mut [f32], width: usize, radius: f64) {
-        let height = pixels.len() / width;
-        let kernel = Kernel::new(radius);
-        let source = pixels.to_vec();
-        let scan = Scan {
-            source: &source,
-            width,
-            height,
-            kernel: &kernel,
-            sign: 1.0,
-        };
-        pixels
-            .par_chunks_mut(width)
-            .enumerate()
-            .for_each(|(y, row)| filter_row(&scan, row, y));
-    }
-
-    struct Scan<'a> {
-        source: &'a [f32],
-        width: usize,
-        height: usize,
-        kernel: &'a Kernel,
-        sign: f32,
-    }
-
-    fn filter_row(scan: &Scan<'_>, out: &mut [f32], y: usize) {
-        let mut running = f32::NEG_INFINITY;
-        let mut full_calculation = true;
-
-        for (x, out_pixel) in out.iter_mut().enumerate() {
-            if full_calculation {
-                running = scan.area_extremum(x, y, 0);
+/// A tile of plausible deconvolved optical density.
+///
+/// Runs negative over the background, as a real stain amount does now that the
+/// clamp at zero is gone. The blur's cost is data-independent — the same loads
+/// and arithmetic run whatever the values are — so this measures what a real
+/// tile would.
+fn tile(width: usize, height: usize) -> Vec<f32> {
+    (0..width * height)
+        .map(|i| {
+            let (x, y) = (i % width, i / width);
+            let nucleus = (x / 8) % 3 == 0 && (y / 8) % 3 == 0;
+            if nucleus {
+                1.4 + ((x + y) % 7) as f32 / 40.0
             } else {
-                let entering = scan.side_extremum(x, y, true);
-                if entering >= running {
-                    running = entering;
-                } else {
-                    let leaving = scan.side_extremum(x, y, false);
-                    if leaving >= running {
-                        running = scan.area_extremum(x, y, 1).max(entering);
-                    }
-                }
+                -0.2 + ((x * 7 + y * 13) % 23) as f32 / 200.0
             }
-            full_calculation = false;
-            *out_pixel = running * scan.sign;
-        }
-    }
-
-    impl Scan<'_> {
-        fn area_extremum(&self, x: usize, y: usize, ignore_right: i32) -> f32 {
-            let mut best = f32::NEG_INFINITY;
-            for dy in -self.kernel.radius_rows()..=self.kernel.radius_rows() {
-                let half = self.kernel.half_width(dy);
-                if half < 0 {
-                    continue;
-                }
-                let base = clamp_coord(y, dy, self.height) * self.width;
-                for dx in -half..=(half - ignore_right) {
-                    let value = self.source[base + clamp_coord(x, dx, self.width)] * self.sign;
-                    if value > best {
-                        best = value;
-                    }
-                }
-            }
-            best
-        }
-
-        fn side_extremum(&self, x: usize, y: usize, right: bool) -> f32 {
-            let mut best = f32::NEG_INFINITY;
-            for dy in -self.kernel.radius_rows()..=self.kernel.radius_rows() {
-                let half = self.kernel.half_width(dy);
-                if half < 0 {
-                    continue;
-                }
-                let base = clamp_coord(y, dy, self.height) * self.width;
-                let dx = if right { half } else { -half - 1 };
-                let value = self.source[base + clamp_coord(x, dx, self.width)] * self.sign;
-                if value > best {
-                    best = value;
-                }
-            }
-            best
-        }
-    }
-
-    #[inline]
-    fn clamp_coord(coord: usize, delta: i32, extent: usize) -> usize {
-        let shifted = coord as isize + delta as isize;
-        if shifted < 0 {
-            0
-        } else {
-            (shifted as usize).min(extent - 1)
-        }
-    }
+        })
+        .collect()
 }
 
 fn main() {
-    let width = 512;
-    let source: Vec<f32> = (0..width * width)
-        .map(|i| ((i * 37) % 251) as f32)
-        .collect();
     let reps = 200;
-
-    println!("512x512 f32 MAX, minimum of {reps} interleaved repetitions, microseconds\n");
     println!(
-        "{:>6}  {:>10}  {:>10}  {:>10}  {:>8}",
-        "radius", "previous", "in-place", "into", "speedup"
+        "ImageJ Gaussian blur, one output pixel in flight against eight, \
+         minimum of {reps} interleaved repetitions\n"
     );
     println!(
-        "{:>6}  {:>10}  {:>10}  {:>10}  {:>8}",
-        "", "(1 copy)", "(1 copy)", "(0 copies)", "in-place"
+        "{:>12}  {:>6}  {:>11}  {:>11}  {:>7}",
+        "tile", "sigma", "one", "eight", "gain"
     );
 
-    for radius in [1.0f64, 2.0, 3.0, 5.0, 8.0, 10.0, 20.0] {
-        let mut buf = source.clone();
-        let mut out = vec![0.0f32; source.len()];
-        let mut filter = RankFilter::new();
-        // Warm the reusable buffers so the first timed call is not the one that
-        // pays for them.
-        filter.apply(&mut buf, width, radius, RankOp::Max);
+    // 256x256 is the tile size CMU-1 stores and the pipeline processes; the
+    // others bracket it. Sigma 6 is there because the gain should grow with the
+    // kernel — a longer chain is a longer stall — and a single sigma would not
+    // show that.
+    let cases = [
+        (128usize, 3.0f64),
+        (256, 3.0),
+        (256, 6.0),
+        (512, 3.0),
+        (1024, 3.0),
+    ];
 
-        let (mut old_best, mut new_best, mut into_best) = (f64::MAX, f64::MAX, f64::MAX);
-        let mut expected: Option<Vec<f32>> = None;
+    let mut blur = GaussianBlur::new();
+    for (size, sigma) in cases {
+        let source = tile(size, size);
+        let (mut narrow, mut wide) = (source.clone(), source.clone());
+        let (mut narrow_best, mut wide_best) = (f64::MAX, f64::MAX);
 
         for _ in 0..reps {
-            buf.copy_from_slice(&source);
-            let start = Instant::now();
-            previous::rank(&mut buf, width, radius);
-            old_best = old_best.min(start.elapsed().as_secs_f64() * 1e6);
-            black_box(&buf);
-            let from_previous = buf.clone();
+            narrow.copy_from_slice(&source);
+            let mark = Instant::now();
+            blur.blur_narrow(black_box(&mut narrow), size, sigma);
+            narrow_best = narrow_best.min(mark.elapsed().as_secs_f64());
 
-            // In place, so one copy of the image happens inside the timed
-            // region — the same shape as ImageJ's harness, which clones the
-            // pixel array inside its own timed region.
-            buf.copy_from_slice(&source);
-            let start = Instant::now();
-            filter.apply(&mut buf, width, radius, RankOp::Max);
-            new_best = new_best.min(start.elapsed().as_secs_f64() * 1e6);
-            black_box(&buf);
+            wide.copy_from_slice(&source);
+            let mark = Instant::now();
+            blur.blur(black_box(&mut wide), size, sigma);
+            wide_best = wide_best.min(mark.elapsed().as_secs_f64());
 
-            // The two must agree exactly, or the timing is measuring different
-            // work. MIN/MAX select an input value, so this is not a tolerance.
-            assert_eq!(buf, from_previous, "implementations diverged at r={radius}");
-            expected.get_or_insert_with(|| buf.clone());
-
-            // Out of place: separate input and output tiles, nothing copied.
-            let start = Instant::now();
-            filter.apply_into(&source, &mut out, width, radius, RankOp::Max);
-            into_best = into_best.min(start.elapsed().as_secs_f64() * 1e6);
-            black_box(&out);
-            assert_eq!(
-                Some(&out),
-                expected.as_ref(),
-                "out-of-place diverged at r={radius}"
+            // Every iteration, not once at the end: a difference that appeared
+            // only on some runs would be a reuse bug in the scratch buffers,
+            // and checking once would miss it.
+            assert!(
+                narrow
+                    .iter()
+                    .zip(&wide)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "{size}x{size} sigma {sigma}: the two widths diverged"
             );
         }
 
         println!(
-            "{radius:>6}  {old_best:>10.1}  {new_best:>10.1}  {into_best:>10.1}  {:>7.2}x",
-            old_best / new_best
+            "{:>9}²  {sigma:>6}  {:>9.3} ms  {:>9.3} ms  {:>6.2}x",
+            size,
+            narrow_best * 1e3,
+            wide_best * 1e3,
+            narrow_best / wide_best
         );
     }
+
+    println!("\nOutput asserted bit-identical on every timed iteration.");
 }

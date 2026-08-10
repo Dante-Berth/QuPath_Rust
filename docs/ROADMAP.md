@@ -14,7 +14,7 @@ build.
 | `qupath-watershed` | Marker-controlled flood, bucket queue | `WatershedFlood.json`, 3 cases | queue 20-32x vs heap; flood 1.40x vs previous |
 | `qupath-filters` | MIN/MAX rank filter, Gaussian blur | `RankFilterMinMax.json` 42 cases; `GaussianBlur.json` 10 kernels + 12 images | rank 3.1-9.7x vs ImageJ; blur bit-identical |
 | `qupath-slide` | Aperio SVS / tiled TIFF reader | `SlideRegion.json`, 5 regions | 4000x4000 region in 0.09 s |
-| `qupath-pipeline` | Streams tiles through the above | `ColourDeconvolution*.json` | 17.8 Mpx in 0.113 s, 53 MB peak |
+| `qupath-pipeline` | Streams tiles through the above | `ColourDeconvolution*.json` | 17.8 Mpx in 0.091 s, 53 MB peak |
 
 **The end-to-end number is still QuPath's 15.87 s**, because the pipeline is not
 `WatershedCellDetection`. It runs real slide pixels through the ported stages
@@ -22,7 +22,7 @@ and nothing else. Do not compare the two figures until §1 below is done; the
 pipeline currently produces 42,966 basins where QuPath detects 25,757 cells.
 
 **The pipeline's own figure is not a speedup series and must not be read as
-one.** It has moved 0.114 s -> 0.062 s -> 0.113 s, and neither step was the same
+one.** It has moved 0.114 s -> 0.062 s -> 0.091 s, and no step was the same
 work as the one before it: §1.1 corrected a wrong stain vector, and §1.2 added
 a stage that had been missing. A figure that goes up because a stage was added
 is the honest outcome; the counts moved with it, from 397,822 to 211,728 to
@@ -129,7 +129,9 @@ this item predicted, going away. It is not parity: §1.3's prominence test and
 the 3x3 Laplacian on the line after the blur are both still missing, and the
 remaining factor is where they live.
 
-The blur costs more than everything it follows. See §4.3.
+The blur was 31% of pipeline stage time when it landed and is now 17%, after
+the change in §4.3. See `docs/benchmarks/README.md` for both, including the
+transpose that was tried first and was slower.
 
 ### 1.3 The Laplacian, then `MaximumFinder`
 
@@ -232,19 +234,26 @@ already ported.
    built removes the three multiplies as well as the three logarithms. The
    stage went from 0.768 s to 0.031 s summed across threads, 36.5% to under 4%.
    It is now the smallest stage in the pipeline and not worth revisiting.
-3. **The Gaussian blur is 31% of pipeline time**, the second-largest stage as
-   soon as it was added, and the y pass is why: it walks each column with a
-   stride of the tile width, so every tap of the kernel is a separate cache
-   line. ImageJ does the same and pays the same. The traversal is free to
-   change — each output pixel is accumulated by one line, in a fixed order —
-   so a blocked or transposed y pass can be **bit-identical** and is the first
-   thing to try. The kernel is also rebuilt per tile per direction, which is
-   small but pure waste.
-4. **The watershed is 43-48% of pipeline time**, far above the 29.4% the JFR
-   profile attributed to it in QuPath. Worth re-profiling in place rather than
-   assuming the old share still holds. This is the largest lever after §0.1.
+3. ~~Gaussian blur~~ — **done**, 2.31x in isolation and 2.30x in place, from
+   31.2% of pipeline stage time to 16.6%, with the marker count unchanged and
+   the output bit-identical. ImageJ's inner loop carries one output pixel, and
+   its accumulator is a loop-carried dependency, so the interior ran at the
+   latency of a multiply-add rather than its throughput; eight lanes at once
+   makes them independent and costs no extra loads, because they read almost
+   the same taps.
+
+   **Transposing the tile so the column pass ran contiguously was tried first
+   and was slower at every size** — 0.82x to 0.98x. The column pass already
+   copies each column into a contiguous buffer, so the taps were never strided;
+   only the copy-in and the store were, and two transposes cost more. The
+   profile share said "the y pass is expensive" and the reason was wrong. Worth
+   remembering before the next one.
+4. **The watershed is now 53% of pipeline stage time**, far above the 29.4% the
+   JFR profile attributed to it in QuPath, and it grew as a share every time
+   something else shrank. This is the largest lever after §0.1.
 5. **SIMD**, last, per §0.5 — and only behind a scalar fallback with a
-   differential test.
+   differential test. Note §4.3 got 2.3x without any explicit SIMD, by removing
+   a dependency rather than by widening an instruction.
 
 ---
 

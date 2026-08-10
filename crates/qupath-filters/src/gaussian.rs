@@ -54,6 +54,27 @@
 //! one line in a fixed order, so the result does not depend on how the work is
 //! divided. §5 requires that be tested rather than asserted, and
 //! `blurring_is_independent_of_how_lines_are_split` does.
+//!
+//! # Performance
+//!
+//! The interior of the convolution carries [`LANES`] output pixels at once
+//! rather than ImageJ's one. That is worth 2.3x, in isolation and in place,
+//! because ImageJ's `result +=` is a loop-carried dependency and the interior
+//! therefore ran at the latency of a multiply-add rather than its throughput.
+//! The lanes read almost the same taps, so independence is bought without extra
+//! loads.
+//!
+//! **It is not an approximation.** Every lane accumulates the taps a single
+//! accumulator would give that pixel, in the same order, so the output is
+//! bit-identical — `widening_the_interior_loop_changes_nothing` asserts it
+//! against [`GaussianBlur::blur_narrow`], and the parity fixture still matches
+//! ImageJ exactly.
+//!
+//! Transposing the tile so the column pass ran contiguously was tried first and
+//! was *slower* at every size. The column pass already copies each column into
+//! a contiguous buffer before convolving it, so the taps were never strided;
+//! only the copy-in and the store were, and two transposes cost more than they
+//! saved. `docs/benchmarks/README.md` records it.
 
 /// Accuracy `blurGaussian` uses for a `FloatProcessor`.
 ///
@@ -67,6 +88,52 @@ const UPSCALE_K_RADIUS: usize = 2;
 
 /// Smallest sigma ImageJ will convolve with after downscaling.
 const MIN_DOWNSCALED_SIGMA: f64 = 4.0;
+
+/// Output pixels carried at once through the interior of the convolution.
+///
+/// Eight `f32` is one AVX2 register. The value only has to be enough to hide
+/// the accumulator's latency and small enough that the lanes stay in registers;
+/// `docs/benchmarks/README.md` records what it was worth.
+const LANES: usize = 8;
+
+/// Which lines a pass walks, and how it steps along and between them.
+///
+/// ImageJ's `blur1Direction` derives these from an `xDirection` flag. Naming
+/// them keeps the two passes one body rather than two, and keeps the direction
+/// out of the convolution itself.
+#[derive(Debug, Clone, Copy)]
+struct Geometry {
+    /// Points per line.
+    length: usize,
+    /// Number of lines.
+    lines: usize,
+    /// Step between consecutive points of a line.
+    point_inc: usize,
+    /// Step between the starts of consecutive lines.
+    line_inc: usize,
+}
+
+impl Geometry {
+    /// Rows of a `width` x `height` image: contiguous, one line per row.
+    const fn rows(width: usize, height: usize) -> Self {
+        Self {
+            length: width,
+            lines: height,
+            point_inc: 1,
+            line_inc: width,
+        }
+    }
+
+    /// Columns of a `width` x `height` image, walked with a stride.
+    const fn columns(width: usize, height: usize) -> Self {
+        Self {
+            length: height,
+            lines: width,
+            point_inc: width,
+            line_inc: 1,
+        }
+    }
+}
 
 /// A reusable Gaussian blur.
 ///
@@ -135,28 +202,58 @@ impl GaussianBlur {
         }
 
         if sigma_x > 0.0 {
-            self.blur_one_direction(pixels, width, height, sigma_x, accuracy, true);
+            self.blur_lines::<LANES>(pixels, Geometry::rows(width, height), sigma_x, accuracy);
         }
         if sigma_y > 0.0 {
-            self.blur_one_direction(pixels, width, height, sigma_y, accuracy, false);
+            self.blur_lines::<LANES>(pixels, Geometry::columns(width, height), sigma_y, accuracy);
         }
     }
 
+    /// Blurs with one output pixel in flight at a time.
+    ///
+    /// The implementation this crate had before the interior loop was widened,
+    /// retained only so the A/B harness measures against the real previous
+    /// version rather than a reimplementation of it. Bit-identical to
+    /// [`Self::blur`] — `widening_the_interior_loop_changes_nothing` asserts
+    /// it, and the harness asserts it again on every timed iteration.
+    ///
+    /// # Panics
+    ///
+    /// If `width` is zero or does not divide `pixels.len()`.
+    #[doc(hidden)]
+    pub fn blur_narrow(&mut self, pixels: &mut [f32], width: usize, sigma: f64) {
+        assert!(width > 0, "width must be positive");
+        assert_eq!(pixels.len() % width, 0, "not a whole number of rows");
+        let height = pixels.len() / width;
+        if height == 0 || sigma <= 0.0 {
+            return;
+        }
+        self.blur_lines::<1>(pixels, Geometry::rows(width, height), sigma, FLOAT_ACCURACY);
+        self.blur_lines::<1>(
+            pixels,
+            Geometry::columns(width, height),
+            sigma,
+            FLOAT_ACCURACY,
+        );
+    }
+
     /// ImageJ's `blur1Direction`, without the ROI and progress reporting.
-    fn blur_one_direction(
+    ///
+    /// The direction is carried entirely by `geometry`, so the same body serves
+    /// rows, strided columns, and rows of a transposed image.
+    fn blur_lines<const LANES: usize>(
         &mut self,
         pixels: &mut [f32],
-        width: usize,
-        height: usize,
+        geometry: Geometry,
         sigma: f64,
         accuracy: f64,
-        x_direction: bool,
     ) {
-        // A "line" is a row when blurring in x and a column when blurring in y.
-        let length = if x_direction { width } else { height };
-        let point_inc = if x_direction { 1 } else { width };
-        let line_inc = if x_direction { width } else { 1 };
-        let lines = if x_direction { height } else { width };
+        let Geometry {
+            length,
+            lines,
+            point_inc,
+            line_inc,
+        } = geometry;
 
         let downscaling = sigma > 2.0 * MIN_DOWNSCALED_SIGMA + 0.5;
         let reduce_by = if downscaling {
@@ -210,6 +307,7 @@ impl GaussianBlur {
             cache2,
             downscale_kernel,
             upscale_kernel,
+            ..
         } = self;
 
         cache1.clear();
@@ -234,7 +332,7 @@ impl GaussianBlur {
                 // The convolution runs in downscaled coordinates, writing to a
                 // separate cache; the outermost sample each side is padding for
                 // the upscale and is not written.
-                convolve_line(cache1, cache2, taps, 1, line_length - 1, 0, 1);
+                convolve_line::<LANES>(cache1, cache2, taps, 1, line_length - 1, 0, 1);
                 upscale_line(cache2, pixels, upscale_kernel, line, length);
             } else {
                 // Copied out because the convolution writes back over the line
@@ -242,7 +340,7 @@ impl GaussianBlur {
                 for (i, slot) in cache1.iter_mut().enumerate() {
                     *slot = pixels[line.start + i * point_inc];
                 }
-                convolve_line(cache1, pixels, taps, 0, length, line.start, point_inc);
+                convolve_line::<LANES>(cache1, pixels, taps, 0, length, line.start, point_inc);
             }
         }
     }
@@ -399,7 +497,7 @@ struct Line {
 ///
 /// `readFrom` and `readTo` are absent because ImageJ's body never uses them;
 /// they only document which part of `input` the caller must have filled.
-fn convolve_line(
+fn convolve_line<const LANES: usize>(
     input: &[f32],
     output: &mut [f32],
     (kernel, kern_sum): (&[f32], &[f32]),
@@ -445,7 +543,37 @@ fn convolve_line(
     // fail immediately; saturating at zero does the same, since `i` is never
     // negative.
     let end_inside = length.saturating_sub(k_radius).min(write_to);
-    // The easy case: every tap is inside the line.
+
+    // The easy case: every tap is inside the line, so there are no bounds
+    // decisions and the taps can be read straight through.
+    //
+    // `LANES` output pixels are carried at once. Each one accumulates exactly
+    // the sequence the single-pixel loop below would give it — centre tap
+    // first, then k ascending — so this is a bit-identical rewrite and not a
+    // reassociation. What it buys is that the lanes are independent of each
+    // other, which the single accumulator is not: `result` feeds the next
+    // multiply-add, so the loop runs at the latency of an FMA rather than its
+    // throughput, and the strided store cannot overlap with anything either.
+    while i + LANES <= end_inside {
+        let mut acc = [0.0f32; LANES];
+        for (lane, slot) in acc.iter_mut().enumerate() {
+            *slot = input[i + lane] * kern0;
+        }
+        for k in 1..k_radius {
+            let tap = kernel[k];
+            let (low, high) = (&input[i - k..i - k + LANES], &input[i + k..i + k + LANES]);
+            for (lane, slot) in acc.iter_mut().enumerate() {
+                *slot += tap * (low[lane] + high[lane]);
+            }
+        }
+        for (lane, &value) in acc.iter().enumerate() {
+            output[p + lane * point_inc] = value;
+        }
+        i += LANES;
+        p += LANES * point_inc;
+    }
+
+    // The remainder, and the whole interior when LANES is 1.
     while i < end_inside {
         let mut result = input[i] * kern0;
         for k in 1..k_radius {
@@ -814,6 +942,46 @@ mod tests {
                 split.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                 whole.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                 "{bands} bands gave a different x pass"
+            );
+        }
+    }
+
+    #[test]
+    fn widening_the_interior_loop_changes_nothing() {
+        // Carrying eight output pixels at once is an optimisation that must not
+        // be an approximation: each lane accumulates the same taps in the same
+        // order, so the claim is identical, not close. Sizes that are not
+        // multiples of eight are the ones a mishandled remainder gets wrong,
+        // and short lines skip the widened loop altogether.
+        let cases = [
+            (64usize, 64usize, 3.0f64),
+            (37, 23, 1.5),
+            (23, 37, 1.5),
+            (11, 9, 4.0),
+            (1, 40, 2.0),
+            (40, 1, 2.0),
+            (8, 8, 0.5),
+            (9, 17, 0.5),
+            (33, 32, 0.5),
+            (64, 64, 9.0),
+            (65, 31, 12.0),
+        ];
+
+        let mut blur = GaussianBlur::new();
+        for (width, height, sigma) in cases {
+            let pixels: Vec<f32> = (0..width * height)
+                .map(|i| ((i * 2654435761usize) % 1000) as f32 / 400.0 - 0.5)
+                .collect();
+
+            let mut wide = pixels.clone();
+            blur.blur(&mut wide, width, sigma);
+            let mut narrow = pixels;
+            blur.blur_narrow(&mut narrow, width, sigma);
+
+            assert_eq!(
+                wide.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                narrow.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "{width}x{height} sigma {sigma}: the two widths disagree"
             );
         }
     }

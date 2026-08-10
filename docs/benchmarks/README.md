@@ -14,6 +14,8 @@ RUSTFLAGS="-C target-cpu=x86-64-v3" \
     cargo run --release -p qupath-watershed --example previous_vs_current
 RUSTFLAGS="-C target-cpu=x86-64-v3" \
     cargo run --release -p qupath-pipeline  --example previous_vs_current
+RUSTFLAGS="-C target-cpu=x86-64-v3" \
+    cargo run --release -p qupath-pipeline  --example region
 ```
 
 `bench.sh` needs JDK 25+ on `PATH`, or `JAVA_HOME` pointing at one — see
@@ -366,8 +368,8 @@ made the pipeline **slower** and the result **better**:
 
 | | Before | After |
 | --- | ---: | ---: |
-| Pipeline wall clock | 0.062 s | 0.113 s |
-| Blur, summed across threads | — | 0.658 s (31.2%) |
+| Pipeline wall clock | 0.062 s | 0.091 s |
+| Blur, summed across threads | — | 0.286 s (16.6%) |
 | Markers seeded | 211,728 | **42,966** |
 
 QuPath detects 25,757 cells in this region. The marker count went from 8.2x
@@ -379,20 +381,63 @@ Against ImageJ the port is **bit-identical**, on all 10 recorded kernels and all
 12 recorded images, including the downscale/upscale path above sigma 8.5. There
 is no accuracy trade here to report.
 
-### Why it costs what it costs
+### The transpose that did not work
 
-The blur is the second-largest stage in the pipeline as of this session, and the
-y pass is the reason: it walks each column with a stride of the tile width, so
-every one of the 14 taps at sigma 3 touches a separate cache line. ImageJ's
-`blur1Direction` does exactly the same thing and pays exactly the same price —
-this is not a Rust deficit, it is the algorithm as written.
+The blur landed as the second-largest stage, and the obvious suspect was the y
+pass: it walks each column with a stride of the tile width. The obvious fix was
+to transpose the tile, run the identical row pass, and transpose back.
 
-That cost is addressable without changing a single arithmetic result. Each
-output pixel is accumulated by one line, in a fixed order, so the *traversal*
-is free: a blocked or transposed y pass computes the same sums in the same
-sequence. `docs/ROADMAP.md` §4.3 carries it, and — per the standing warning in
-this file — it will be measured interleaved and asserted bit-identical before
-any number is claimed for it.
+It was **slower at every size**: 0.98x at 128², 0.95x at 256², 0.82x at 512².
+
+The reason is visible in `convolveLine` once you look: the column pass already
+copies each column into a contiguous cache buffer before convolving it, so the
+taps were never strided. Only the copy-in and the store were, and two full
+transposes cost more than they saved. The measurement is what said so — the
+reasoning that motivated it was wrong, and no amount of staring at the profile
+share would have shown that.
+
+### What did work: eight output pixels instead of one
+
+The real cost was a dependency, not a cache miss. ImageJ's inner loop is
+
+```java
+float result = input[i]*kern0;
+for (int k=1; k<kRadius; k++)
+    result += kern[k] * (input[i-k] + input[i+k]);
+```
+
+where every `+=` waits on the one before it, so the interior runs at the
+*latency* of a multiply-add rather than its throughput. Carrying eight output
+pixels at once makes the lanes independent; they read almost the same taps, so
+it costs no extra loads.
+
+| Tile | Sigma | One | Eight | Gain |
+| --- | ---: | ---: | ---: | ---: |
+| 128² | 3 | 0.242 ms | 0.130 ms | 1.85x |
+| 256² | 3 | 0.949 ms | 0.411 ms | **2.31x** |
+| 256² | 6 | 1.722 ms | 0.862 ms | 2.00x |
+| 512² | 3 | 3.762 ms | 1.428 ms | 2.63x |
+| 1024² | 3 | 17.043 ms | 7.374 ms | 2.31x |
+
+Raw output in `rust-gaussian-ab.txt`. Every timed iteration asserts the two are
+**bit-identical**: each lane accumulates the same taps in the same order, so
+this is a rewrite and not a reassociation, and "close" would mean a bug.
+
+### And it carried over
+
+| | Before | After |
+| --- | ---: | ---: |
+| Blur, summed across threads | 0.658 s | **0.286 s** |
+| Share of pipeline stage time | 31.2% | **16.6%** |
+| Markers seeded | 42,966 | 42,966 |
+
+2.30x in place against 2.31x in isolation at the pipeline's own 256² tile size.
+That is the third time a component figure has been checked in place and the
+second time it carried: like the deconvolution table, this removes work rather
+than overhead. The unchanged marker count is the check that it removed only
+that.
+
+The watershed is now 53% of stage time and the clear next target.
 
 ## Where this leaves the pipeline
 
@@ -418,10 +463,15 @@ cost and was 3% of the flood, and the incremental rank filter looked like 1.9x
 ahead of ImageJ and was behind it from radius 3.
 
 The largest remaining piece of work is not a further optimisation of these
-three. It is wiring any of them into a pipeline that reads a slide, at which
-point §0.1 — doing less work, by way of the right pyramid level, the right ROI
-and early rejection — becomes available, and it outranks everything measured
-here.
+three. It is closing the detection pipeline — the Laplacian, `MaximumFinder`,
+morphological reconstruction and the measurement tail — after which §0.1, doing
+less work by way of the right pyramid level, the right ROI and early rejection,
+becomes available and outranks everything measured here.
+
+Within the pipeline as it stands, the watershed is 53% of stage time and the
+deconvolution and blur together are 18%. The next optimisation to look at is
+the watershed, and per the two entries above it will be an interleaved A/B with
+identical output asserted before any figure is claimed.
 
 ## Environment
 
