@@ -60,6 +60,8 @@ fn main() {
         ("decode", stages.decode),
         ("deconvolve", stages.deconvolve),
         ("background", stages.background),
+        ("  erode", stages.erode),
+        ("  regrow", stages.regrow),
         ("gaussian blur", stages.blur),
         ("laplacian", stages.laplacian),
         ("maxima", stages.maxima),
@@ -84,8 +86,13 @@ fn main() {
     println!(
         "{} basins traced to candidates, {} passed the intensity filter ({:.1}% dropped)",
         outcome.regions,
-        outcome.objects,
-        100.0 * (outcome.regions - outcome.objects) as f64 / outcome.regions as f64
+        outcome.objects + outcome.duplicates,
+        100.0 * (outcome.regions - outcome.objects - outcome.duplicates) as f64
+            / outcome.regions as f64
+    );
+    println!(
+        "{} of those were a neighbouring tile's copy of the same nucleus, leaving {}",
+        outcome.duplicates, outcome.objects
     );
     if let Some(bytes) = outcome.peak_resident_bytes {
         println!("peak resident memory: {:.0} MB", bytes as f64 / 1e6);

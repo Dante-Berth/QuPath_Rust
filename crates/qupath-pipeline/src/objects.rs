@@ -44,6 +44,28 @@
 //!
 //! All three are pinned by `parity/fixtures/ObjectFilters.json`.
 
+/// Where one traced region sits, and how many pixels it fills.
+///
+/// Distinct from [`RegionStats`] in the one way that matters: [`Extent::area`]
+/// counts **every** pixel of the filled region, where `RegionStats::area` is
+/// ImageJ's `pixelCount` and skips non-finite ones. Overlap resolution compares
+/// `geometry.getArea()`, which is the polygon's own area and so is the former —
+/// for a polygon traced around pixels the two agree exactly, and a region
+/// carrying an infinity is where they part company.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Extent {
+    /// Left edge of the bounding box.
+    pub x: u32,
+    /// Top edge of the bounding box.
+    pub y: u32,
+    /// Width of the bounding box; zero if the region has no pixels.
+    pub width: u32,
+    /// Height of the bounding box.
+    pub height: u32,
+    /// Pixels the filled region covers.
+    pub area: u32,
+}
+
 /// Area and mean of one traced region, as ImageJ's `ImageStatistics` reports
 /// them for a `FloatProcessor` with that region's mask set.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -171,6 +193,68 @@ impl ObjectFilter {
     #[must_use]
     pub fn stats(&self) -> &[RegionStats] {
         &self.stats
+    }
+
+    /// Bounding box and filled area of every region, indexed from zero for
+    /// region 1.
+    ///
+    /// Only needed when a region is tiled, since it is what
+    /// [`crate::resolve_overlaps`] compares across a seam; a single-tile run
+    /// never calls it and pays nothing for it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `width` does not divide the region map.
+    pub fn extents_into(&self, regions: &[u32], width: usize, count: u32, out: &mut Vec<Extent>) {
+        assert!(width > 0, "width must be non-zero");
+        assert_eq!(regions.len() % width, 0, "width must divide the region map");
+
+        out.clear();
+        out.resize(
+            count as usize,
+            Extent {
+                x: u32::MAX,
+                y: u32::MAX,
+                width: 0,
+                height: 0,
+                area: 0,
+            },
+        );
+
+        for (at, &region) in regions.iter().enumerate() {
+            if region == 0 {
+                continue;
+            }
+            let extent = &mut out[region as usize - 1];
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a tile's pixel count fits u32; the tracer asserts it"
+            )]
+            let (x, y) = ((at % width) as u32, (at / width) as u32);
+            // `width` and `height` hold the exclusive far edge until the pass
+            // ends, then become extents; a region's first pixel in raster order
+            // fixes `y`, so only `x` needs a running minimum.
+            extent.x = extent.x.min(x);
+            extent.y = extent.y.min(y);
+            extent.width = extent.width.max(x + 1);
+            extent.height = extent.height.max(y + 1);
+            extent.area += 1;
+        }
+
+        for extent in out.iter_mut() {
+            if extent.area == 0 {
+                *extent = Extent {
+                    x: 0,
+                    y: 0,
+                    width: 0,
+                    height: 0,
+                    area: 0,
+                };
+            } else {
+                extent.width -= extent.x;
+                extent.height -= extent.y;
+            }
+        }
     }
 
     /// Writes QuPath's `bp` — 255 inside a surviving region, 0 elsewhere.

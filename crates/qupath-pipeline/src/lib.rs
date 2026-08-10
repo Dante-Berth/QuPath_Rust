@@ -42,7 +42,9 @@
 //! so that a test can assert it, as §6 requires.
 
 mod objects;
+mod overlaps;
 mod stain;
+mod tiles;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -52,8 +54,10 @@ use qupath_slide::{Slide, SlideError};
 use qupath_watershed::{Connectivity, Labeller, RegionTracer, Watershed};
 use rayon::prelude::*;
 
-pub use objects::{ObjectFilter, RegionStats};
+pub use objects::{Extent, ObjectFilter, RegionStats};
+pub use overlaps::{Candidate, resolve_overlaps};
 pub use stain::Stains;
+pub use tiles::{MAX_TILE_SIZE, PREFERRED_TILE_SIZE, Tile, tile_grid, tile_overlap};
 
 /// A rectangle of a pyramid level, in that level's pixel coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +131,27 @@ pub struct Params {
     pub intensity_threshold: f64,
     /// Flood connectivity.
     pub connectivity: Connectivity,
+    /// Preferred side of a processing tile, in pixels.
+    ///
+    /// `AbstractTileableDetectionPlugin.PREFERRED_TILE_SIZE * downsampleFactor`.
+    /// **This is not the slide's TIFF tile size**, which on CMU-1 is 240 px:
+    /// detection tiles are its own grid, an order of magnitude larger, and
+    /// processing the TIFF's tiles instead puts a seam every 240 px where QuPath
+    /// has one every 2000.
+    pub tile_preferred: u32,
+    /// Largest region processed in one pass, in pixels.
+    ///
+    /// `MAX_TILE_SIZE * downsampleFactor`. A region no larger than this in both
+    /// directions is **not tiled at all** — `computeTiledROIs` hands back the
+    /// parent ROI itself — so it has no seam and no halo.
+    pub tile_max: u32,
+    /// Halo read around every processing tile, in pixels.
+    ///
+    /// `WatershedCellDetection.getTileOverlap`, which is
+    /// `(10 µm + cellExpansion) / pixelSize * 2` — 60 px on CMU-1. It is derived
+    /// from the cell expansion, **not** from any filter's kernel radius, and the
+    /// tile is grown by it on all four sides rather than offset by it.
+    pub tile_overlap: u32,
 }
 
 impl Default for Params {
@@ -154,6 +179,12 @@ impl Default for Params {
             // `false` is `conn8`. Four, not eight, and not the same as the
             // 8-connected neighbourhood the maxima test uses one line earlier.
             connectivity: Connectivity::Four,
+            // 2048 and 3072 at CMU-1's downsample of 0.5/0.4990 = 1.00200,
+            // truncated as Java's `(int)` cast does.
+            tile_preferred: 2052,
+            tile_max: 3078,
+            // (10 + 5) / 0.4990 * 2 = 60.12, truncated.
+            tile_overlap: 60,
         }
     }
 }
@@ -175,6 +206,11 @@ struct StageClocks {
     decode: AtomicU64,
     deconvolve: AtomicU64,
     background: AtomicU64,
+    /// The radius-16 erosion inside the background stage, which is rayon-parallel
+    /// over rows.
+    erode: AtomicU64,
+    /// The geodesic dilation inside the background stage, which is not.
+    regrow: AtomicU64,
     blur: AtomicU64,
     laplacian: AtomicU64,
     maxima: AtomicU64,
@@ -193,6 +229,12 @@ pub struct Stages {
     pub deconvolve: f64,
     /// Estimating and subtracting the background.
     pub background: f64,
+    /// The erosion within [`Stages::background`]. Parallel over rows, so this
+    /// is wall time with the row work already spread across threads.
+    pub erode: f64,
+    /// The geodesic dilation within [`Stages::background`]. Strictly sequential:
+    /// each raster pass reads the neighbour it just wrote.
+    pub regrow: f64,
     /// The Gaussian blur.
     pub blur: f64,
     /// The 3x3 Laplacian that completes the Laplacian of Gaussian.
@@ -242,11 +284,15 @@ pub struct Outcome {
     /// Lower than [`Outcome::markers`] wherever two basins met with no
     /// watershed line between them, or one enclosed another.
     pub regions: u64,
-    /// Candidates surviving the mean-intensity and background-mask tests.
+    /// Candidates surviving the mean-intensity and background-mask tests, after
+    /// duplicates across tile seams have been resolved.
     ///
     /// **Still not QuPath's cell count.** The merge, the shape split and the
     /// area filter all come after this and all of them change it.
     pub objects: u64,
+    /// Candidates a neighbouring tile had a better copy of, removed by
+    /// [`resolve_overlaps`]. Zero when the region fits in one tile.
+    pub duplicates: u64,
     /// Wall-clock seconds for the whole run.
     pub elapsed: f64,
     /// Per-stage totals, summed across threads.
@@ -288,6 +334,9 @@ pub enum PipelineError {
 /// that job handles. Allocation in the tile loop is a defect under §6.
 struct Scratch {
     rgb: Vec<u8>,
+    /// One decoded TIFF tile, reused while assembling `rgb`. A processing tile
+    /// spans many of them and does not line up with their grid.
+    decoded: Vec<u8>,
     /// Haematoxylin optical density, then the same buffer with the background
     /// subtracted and the blur applied in place.
     density: Vec<f32>,
@@ -310,6 +359,9 @@ struct Scratch {
     labels: Vec<f32>,
     /// Which traced candidate each pixel belongs to, holes included.
     regions: Vec<u32>,
+    /// Bounding box and filled area of each traced candidate. Populated only
+    /// when the region is tiled, since only a seam can need it.
+    extents: Vec<Extent>,
     blur: GaussianBlur,
     filter: RankFilter,
     convolver: Convolver,
@@ -320,10 +372,26 @@ struct Scratch {
     objects: ObjectFilter,
 }
 
+thread_local! {
+    /// One scratch per worker thread, reused across every tile that thread ever
+    /// handles and across runs.
+    ///
+    /// **Not `map_init`**, which is what this used to be. `map_init` calls its
+    /// initialiser once per rayon *job*, not once per thread, and rayon splits
+    /// into more jobs when there are more items — so peak memory grew with the
+    /// number of tiles rather than with the thread count. That was invisible
+    /// while a tile was 256x256 and 2 MB of scratch; at QuPath's 2048 px tiles
+    /// each one is ~45 MB and it is the difference between a bounded pipeline
+    /// and an unbounded one. A thread-local is one per OS thread by
+    /// construction, which is exactly the bound §6 asks for.
+    static SCRATCH: std::cell::RefCell<Scratch> = std::cell::RefCell::new(Scratch::new());
+}
+
 impl Scratch {
     fn new() -> Self {
         Self {
             rgb: Vec::new(),
+            decoded: Vec::new(),
             density: Vec::new(),
             background: Vec::new(),
             background_mask: Vec::new(),
@@ -332,9 +400,14 @@ impl Scratch {
             prominence: Vec::new(),
             labels: Vec::new(),
             regions: Vec::new(),
+            extents: Vec::new(),
             blur: GaussianBlur::new(),
-            filter: RankFilter::new(),
-            convolver: Convolver::new(),
+            // Sequential rows: this scratch is already inside one rayon job per
+            // tile, and §6 forbids nesting. Nesting here also re-enters the
+            // thread-local scratch above, because rayon is free to resume
+            // another tile's job on this thread while the inner filter blocks.
+            filter: RankFilter::new().with_parallel_rows(false),
+            convolver: Convolver::new().with_parallel_rows(false),
             reconstructor: Reconstructor::new(),
             labeller: Labeller::new(),
             flooder: Watershed::new(),
@@ -388,151 +461,187 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
         });
     }
 
-    // Every tile the region touches. Tiles are the unit of parallelism and the
-    // unit of memory.
-    let first_column = region.x / level.tile_width;
-    let last_column = (region.x + region.width - 1) / level.tile_width;
-    let first_row = region.y / level.tile_height;
-    let last_row = (region.y + region.height - 1) / level.tile_height;
-
-    let tiles: Vec<(u32, u32)> = (first_row..=last_row)
-        .flat_map(|row| (first_column..=last_column).map(move |column| (column, row)))
-        .collect();
+    // The detection grid, which is **not** the slide's TIFF tile grid: QuPath
+    // tiles at 2048 px and pads by the cell expansion, where the TIFF stores
+    // 240 px tiles. Processing the storage grid put a seam every 240 px and is
+    // what ROADMAP §2 is about.
+    let tiles = tile_grid(
+        region,
+        params.tile_preferred,
+        params.tile_max,
+        params.tile_overlap,
+    );
 
     let clocks = StageClocks::default();
     let markers = AtomicU64::new(0);
     let labelled = AtomicU64::new(0);
     let regions = AtomicU64::new(0);
     let objects = AtomicU64::new(0);
-    let width = level.tile_width as usize;
+    let pixels = AtomicU64::new(0);
 
     // CMU-1 carries no stain estimate of its own, so QuPath falls back to these
     // defaults and this matches it. A slide that does carry one would need
     // `Stains::from_two` with the values from its metadata.
     let stains = Stains::h_and_e();
 
+    // The padded rectangles, so a worker can tell whether one of its candidates
+    // reaches a seam without knowing anything else about the grid.
+    let padded: Vec<Region> = tiles.iter().map(|tile| tile.padded).collect();
+
     let started = Instant::now();
-    let outcomes: Result<Vec<()>, PipelineError> = tiles
+    let outcomes: Result<Vec<Vec<Candidate>>, PipelineError> = tiles
         .par_iter()
-        .map_init(Scratch::new, |scratch, &(column, row)| {
-            let mark = Instant::now();
-            slide.read_tile_into(params.level, column, row, &mut scratch.rgb)?;
-            clocks.decode.fetch_add(nanos(mark), Ordering::Relaxed);
+        .enumerate()
+        .map(|(index, tile)| {
+            SCRATCH.with_borrow_mut(|scratch| {
+                let rect = tile.padded;
+                let width = rect.width as usize;
+                pixels.fetch_add(
+                    u64::from(rect.width) * u64::from(rect.height),
+                    Ordering::Relaxed,
+                );
 
-            let mark = Instant::now();
-            stains.haematoxylin_into(&scratch.rgb, &mut scratch.density);
-            clocks.deconvolve.fetch_add(nanos(mark), Ordering::Relaxed);
+                let mark = Instant::now();
+                slide.read_region_into(
+                    params.level,
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    rect.height,
+                    &mut scratch.rgb,
+                    &mut scratch.decoded,
+                )?;
+                clocks.decode.fetch_add(nanos(mark), Ordering::Relaxed);
 
-            // Stage order follows `WatershedCellDetection`: the background is
-            // estimated and subtracted from the detection image *before* the
-            // Laplacian of Gaussian, not after it.
-            let mark = Instant::now();
-            let mut background_masked = false;
-            if params.background_radius > 0.0 {
-                background_masked = subtract_background(scratch, width, params);
-            }
-            // `ipToMeasure = fpLoG.duplicate()` when a background was
-            // subtracted, and `ipToMeasure = fpDetection` when none was. Taking
-            // the copy here covers both: `density` is the subtracted image in
-            // the first case and the untouched optical density in the second.
-            // Timed with the stage that produced it; it is one tile memcpy.
-            scratch.to_measure.clear();
-            scratch.to_measure.extend_from_slice(&scratch.density);
-            clocks.background.fetch_add(nanos(mark), Ordering::Relaxed);
+                let mark = Instant::now();
+                stains.haematoxylin_into(&scratch.rgb, &mut scratch.density);
+                clocks.deconvolve.fetch_add(nanos(mark), Ordering::Relaxed);
 
-            let mark = Instant::now();
-            if params.sigma > 0.0 {
-                scratch.blur.blur(&mut scratch.density, width, params.sigma);
-            }
-            clocks.blur.fetch_add(nanos(mark), Ordering::Relaxed);
+                // Stage order follows `WatershedCellDetection`: the background is
+                // estimated and subtracted from the detection image *before* the
+                // Laplacian of Gaussian, not after it.
+                let mark = Instant::now();
+                let mut background_masked = false;
+                if params.background_radius > 0.0 {
+                    background_masked = subtract_background(scratch, width, params, &clocks);
+                }
+                // `ipToMeasure = fpLoG.duplicate()` when a background was
+                // subtracted, and `ipToMeasure = fpDetection` when none was. Taking
+                // the copy here covers both: `density` is the subtracted image in
+                // the first case and the untouched optical density in the second.
+                // Timed with the stage that produced it; it is one tile memcpy.
+                scratch.to_measure.clear();
+                scratch.to_measure.extend_from_slice(&scratch.density);
+                clocks.background.fetch_add(nanos(mark), Ordering::Relaxed);
 
-            // The line after the blur in QuPath, completing the Laplacian of
-            // Gaussian. Written into its own buffer rather than in place: the
-            // convolution reads a 3x3 neighbourhood and cannot overwrite what
-            // it is still reading, and `apply_into` then copies nothing.
-            let mark = Instant::now();
-            scratch.log.clear();
-            scratch.log.resize(scratch.density.len(), 0.0);
-            scratch.convolver.apply_into(
-                &scratch.density,
-                &mut scratch.log,
-                width,
-                &LAPLACIAN,
-                3,
-                3,
-            );
-            clocks.laplacian.fetch_add(nanos(mark), Ordering::Relaxed);
+                let mark = Instant::now();
+                if params.sigma > 0.0 {
+                    scratch.blur.blur(&mut scratch.density, width, params.sigma);
+                }
+                clocks.blur.fetch_add(nanos(mark), Ordering::Relaxed);
 
-            let mut labels = std::mem::take(&mut scratch.labels);
-            let seeded = seed_markers(scratch, &mut labels, width, &clocks);
-            markers.fetch_add(u64::from(seeded), Ordering::Relaxed);
-            scratch.labels = labels;
+                // The line after the blur in QuPath, completing the Laplacian of
+                // Gaussian. Written into its own buffer rather than in place: the
+                // convolution reads a 3x3 neighbourhood and cannot overwrite what
+                // it is still reading, and `apply_into` then copies nothing.
+                let mark = Instant::now();
+                scratch.log.clear();
+                scratch.log.resize(scratch.density.len(), 0.0);
+                scratch.convolver.apply_into(
+                    &scratch.density,
+                    &mut scratch.log,
+                    width,
+                    &LAPLACIAN,
+                    3,
+                    3,
+                );
+                clocks.laplacian.fetch_add(nanos(mark), Ordering::Relaxed);
 
-            let mark = Instant::now();
-            scratch.flooder.flood(
-                &scratch.log,
-                &mut scratch.labels,
-                width,
-                params.threshold,
-                params.connectivity,
-            );
-            clocks.flood.fetch_add(nanos(mark), Ordering::Relaxed);
+                let mut labels = std::mem::take(&mut scratch.labels);
+                let seeded = seed_markers(scratch, &mut labels, width, &clocks);
+                markers.fetch_add(u64::from(seeded), Ordering::Relaxed);
+                scratch.labels = labels;
 
-            labelled.fetch_add(
-                scratch.labels.iter().filter(|&&l| l != 0.0).count() as u64,
-                Ordering::Relaxed,
-            );
+                let mark = Instant::now();
+                scratch.flooder.flood(
+                    &scratch.log,
+                    &mut scratch.labels,
+                    width,
+                    params.threshold,
+                    params.connectivity,
+                );
+                clocks.flood.fetch_add(nanos(mark), Ordering::Relaxed);
 
-            // `getFilledPolygonROIs(ipNucleusLabels, Wand.FOUR_CONNECTED)`
-            // against a threshold of 0.5: basins become candidate objects, with
-            // their holes filled and anything they enclose absorbed.
-            let mark = Instant::now();
-            scratch.regions.clear();
-            scratch.regions.resize(scratch.labels.len(), 0);
-            let traced = scratch.tracer.trace_into(
-                &scratch.labels,
-                &mut scratch.regions,
-                width,
-                0.5,
-                f32::INFINITY,
-            );
-            clocks.trace.fetch_add(nanos(mark), Ordering::Relaxed);
-            regions.fetch_add(u64::from(traced), Ordering::Relaxed);
+                labelled.fetch_add(
+                    scratch.labels.iter().filter(|&&l| l != 0.0).count() as u64,
+                    Ordering::Relaxed,
+                );
 
-            let mark = Instant::now();
-            let background = if background_masked {
-                Some(scratch.background_mask.as_slice())
-            } else {
-                None
-            };
-            let kept = scratch.objects.apply(
-                &scratch.to_measure,
-                &scratch.regions,
-                traced,
-                params.intensity_threshold,
-                background,
-            );
-            clocks.filter.fetch_add(nanos(mark), Ordering::Relaxed);
-            objects.fetch_add(u64::from(kept), Ordering::Relaxed);
-            Ok(())
+                // `getFilledPolygonROIs(ipNucleusLabels, Wand.FOUR_CONNECTED)`
+                // against a threshold of 0.5: basins become candidate objects, with
+                // their holes filled and anything they enclose absorbed.
+                let mark = Instant::now();
+                scratch.regions.clear();
+                scratch.regions.resize(scratch.labels.len(), 0);
+                let traced = scratch.tracer.trace_into(
+                    &scratch.labels,
+                    &mut scratch.regions,
+                    width,
+                    0.5,
+                    f32::INFINITY,
+                );
+                clocks.trace.fetch_add(nanos(mark), Ordering::Relaxed);
+                regions.fetch_add(u64::from(traced), Ordering::Relaxed);
+
+                let mark = Instant::now();
+                let background = if background_masked {
+                    Some(scratch.background_mask.as_slice())
+                } else {
+                    None
+                };
+                let kept = scratch.objects.apply(
+                    &scratch.to_measure,
+                    &scratch.regions,
+                    traced,
+                    params.intensity_threshold,
+                    background,
+                );
+                clocks.filter.fetch_add(nanos(mark), Ordering::Relaxed);
+                objects.fetch_add(u64::from(kept), Ordering::Relaxed);
+
+                // Everything above is per-tile and final. What is left is the one
+                // thing a tile cannot decide alone: whether a neighbour found the
+                // same nucleus. Only candidates reaching another tile's rectangle
+                // can, so only those get a mask built for them.
+                let seam = collect_seam_candidates(scratch, index, tile, &padded, width);
+                Ok(seam)
+            })
         })
         .collect();
-    outcomes?;
+    let seam_candidates = outcomes?;
+
+    // `ParallelDetectionTileManager.postprocess`: every tile is done, so the
+    // duplicates in the overlap bands can now be resolved.
+    let mut seam_candidates: Vec<Candidate> = seam_candidates.into_iter().flatten().collect();
+    let duplicates = resolve_overlaps(&padded, &mut seam_candidates);
 
     let elapsed = started.elapsed().as_secs_f64();
 
     Ok(Outcome {
         tiles: tiles.len(),
-        pixels: tiles.len() as u64 * (width * level.tile_height as usize) as u64,
+        pixels: pixels.load(Ordering::Relaxed),
         markers: markers.load(Ordering::Relaxed),
         labelled: labelled.load(Ordering::Relaxed),
         regions: regions.load(Ordering::Relaxed),
-        objects: objects.load(Ordering::Relaxed),
+        objects: objects.load(Ordering::Relaxed) - u64::from(duplicates),
+        duplicates: u64::from(duplicates),
         elapsed,
         stages: Stages {
             decode: seconds(&clocks.decode),
             deconvolve: seconds(&clocks.deconvolve),
             background: seconds(&clocks.background),
+            erode: seconds(&clocks.erode),
+            regrow: seconds(&clocks.regrow),
             blur: seconds(&clocks.blur),
             laplacian: seconds(&clocks.laplacian),
             maxima: seconds(&clocks.maxima),
@@ -600,6 +709,66 @@ fn seed_markers(
     found
 }
 
+/// Builds the candidates of one tile that another tile could also have found.
+///
+/// A candidate matters to [`resolve_overlaps`] only if its bounding box reaches
+/// some other tile's rectangle. On this grid the overlap bands are 60 px of a
+/// 2000 px core, so this keeps a few percent of the objects and leaves the rest
+/// without a mask — which is the difference between carrying pixel sets for
+/// every detection in the region and carrying them for the seams.
+///
+/// Returns nothing at all for a single-tile run, where there is no seam.
+fn collect_seam_candidates(
+    scratch: &mut Scratch,
+    index: usize,
+    tile: &Tile,
+    padded: &[Region],
+    width: usize,
+) -> Vec<Candidate> {
+    if padded.len() < 2 {
+        return Vec::new();
+    }
+
+    let mut extents = std::mem::take(&mut scratch.extents);
+    let count = u32::try_from(scratch.objects.kept().len()).expect("region count fits u32");
+    scratch
+        .objects
+        .extents_into(&scratch.regions, width, count, &mut extents);
+
+    let origin = (tile.padded.x, tile.padded.y);
+    let mut seam = Vec::new();
+    for (at, extent) in extents.iter().enumerate() {
+        if !scratch.objects.kept()[at] || extent.area == 0 {
+            continue;
+        }
+        let bounds = Region {
+            x: origin.0 + extent.x,
+            y: origin.1 + extent.y,
+            width: extent.width,
+            height: extent.height,
+        };
+        let reaches_a_seam = padded
+            .iter()
+            .enumerate()
+            .any(|(other, rect)| other != index && overlaps::intersect(bounds, *rect).is_some());
+        if !reaches_a_seam {
+            continue;
+        }
+        let region_index = u32::try_from(at + 1).expect("region count fits u32");
+        seam.push(Candidate::new(
+            u32::try_from(index).expect("tile count fits u32"),
+            region_index,
+            *extent,
+            &scratch.regions,
+            width,
+            origin,
+        ));
+    }
+
+    scratch.extents = extents;
+    seam
+}
+
 /// Estimates the background and subtracts it from `scratch.density`, in place.
 ///
 /// This is `estimateBackground` followed by `Blitter.SUBTRACT`, which together
@@ -627,10 +796,16 @@ fn seed_markers(
 /// cleared on every call rather than only when it is rebuilt: leaving a
 /// previous tile's mask behind would reject this tile's candidates at
 /// coordinates that mean nothing here.
-fn subtract_background(scratch: &mut Scratch, width: usize, params: Params) -> bool {
+fn subtract_background(
+    scratch: &mut Scratch,
+    width: usize,
+    params: Params,
+    clocks: &StageClocks,
+) -> bool {
     let radius = params.background_radius;
     scratch.background_mask.clear();
 
+    let mark = Instant::now();
     scratch.background.clear();
     scratch.background.resize(scratch.density.len(), 0.0);
     scratch.filter.apply_into(
@@ -640,6 +815,7 @@ fn subtract_background(scratch: &mut Scratch, width: usize, params: Params) -> b
         radius,
         RankOp::Min,
     );
+    clocks.erode.fetch_add(nanos(mark), Ordering::Relaxed);
 
     // Regions too dark to be background at all. QuPath only allocates the mask
     // if some pixel exceeds the limit, and on tissue that is usually never, so
@@ -669,9 +845,11 @@ fn subtract_background(scratch: &mut Scratch, width: usize, params: Params) -> b
         }
     }
 
+    let mark = Instant::now();
     scratch
         .reconstructor
         .reconstruct(&mut scratch.background, &scratch.density, width);
+    clocks.regrow.fetch_add(nanos(mark), Ordering::Relaxed);
 
     for (value, &estimate) in scratch.density.iter_mut().zip(&scratch.background) {
         *value -= estimate;
@@ -799,7 +977,7 @@ mod tests {
             ..Params::default()
         };
         let before = scratch.density.clone();
-        subtract_background(&mut scratch, width, params);
+        subtract_background(&mut scratch, width, params, &StageClocks::default());
 
         assert!(
             scratch.density[20 * width + 20] > 0.9,
