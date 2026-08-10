@@ -47,18 +47,48 @@
 
 use std::collections::VecDeque;
 
+/// QuPath's own repeat condition: keep going while a raster pass still moves
+/// more than a tenth of the image.
+const DEFAULT_REPEAT_FRACTION: usize = 10;
+
 /// A reconstruction that owns its working buffers, for repeated use.
 ///
 /// A tile pipeline reconstructs once per tile, and the queue can hold a
 /// meaningful fraction of the image; rebuilding it per tile is allocation in
 /// the tile loop, a defect under §6 of the project guidelines. Holding it here
 /// turns that into a clear.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Reconstructor {
     /// FIFO, matching QuPath's `IntDequeue`. Order does not decide the fixed
     /// point — see the module note — but it does decide how quickly it is
     /// reached.
     queue: VecDeque<u32>,
+    /// Raster passes the last [`Reconstructor::reconstruct`] needed.
+    passes: u32,
+    /// Pixels the last [`Reconstructor::reconstruct`] pushed onto the queue.
+    queued: u64,
+    /// Repeat another raster pair while a pass still moves more than
+    /// `1 / repeat_fraction` of the image. Zero runs no repeats at all.
+    ///
+    /// Purely a speed knob: the fixed point is the same whatever it is, so this
+    /// trades raster work against queue work and nothing else. See
+    /// [`Reconstructor::with_repeat_fraction`].
+    repeat_fraction: usize,
+}
+
+impl Default for Reconstructor {
+    /// Written out rather than derived: a derived `Default` would zero the
+    /// repeat fraction, which silently turns off the raster repeats and leaves
+    /// the whole reconstruction to the queue — twice as slow on a real tile, as
+    /// `reconstruct_previous_vs_current` measures.
+    fn default() -> Self {
+        Self {
+            queue: VecDeque::new(),
+            passes: 0,
+            queued: 0,
+            repeat_fraction: DEFAULT_REPEAT_FRACTION,
+        }
+    }
 }
 
 impl Reconstructor {
@@ -66,6 +96,18 @@ impl Reconstructor {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Overrides how long the raster passes repeat before the queue takes over.
+    ///
+    /// The reconstruction has a unique fixed point and reaches it whatever the
+    /// traversal, so this cannot change the result — only how long it takes.
+    /// Provided so the trade-off can be measured rather than assumed; the
+    /// A/B harness asserts the output is bit-identical across settings.
+    #[must_use]
+    pub fn with_repeat_fraction(mut self, fraction: usize) -> Self {
+        self.repeat_fraction = fraction;
+        self
     }
 
     /// Raises `marker` towards `mask` by geodesic dilation, in place.
@@ -90,16 +132,37 @@ impl Reconstructor {
         // justification: the queue is correct on its own but slow, so it is
         // worth repeating the cheap pass while it is doing bulk work.
         let mut changes = dilate_and_compare(marker, mask, width, height, false, None);
-        while changes * 10 > pixels {
+        self.passes = 1;
+        while self.repeat_fraction > 0 && changes * self.repeat_fraction > pixels {
             dilate_and_compare(marker, mask, width, height, true, None);
             changes = dilate_and_compare(marker, mask, width, height, false, None);
+            self.passes += 2;
         }
 
         // The backward pass that fills the queue with the pixels the raster
         // scans could not settle, then the queue itself.
         self.queue.clear();
         dilate_and_compare(marker, mask, width, height, true, Some(&mut self.queue));
+        self.passes += 1;
+        self.queued = self.queue.len() as u64;
         process_queue(marker, mask, width, height, &mut self.queue);
+    }
+
+    /// Raster passes the last [`Reconstructor::reconstruct`] needed.
+    ///
+    /// Diagnostic: the pass count is what makes this stage's cost scale with the
+    /// tile rather than with the pixel count, since a geodesic dilation has to
+    /// propagate across the whole tile and a raster pass carries it only as far
+    /// as a monotone path reaches.
+    #[must_use]
+    pub fn last_passes(&self) -> u32 {
+        self.passes
+    }
+
+    /// Pixels the last [`Reconstructor::reconstruct`] left for the queue.
+    #[must_use]
+    pub fn last_queued(&self) -> u64 {
+        self.queued
     }
 
     /// Writes the prominence of every pixel of `image` into `out`.

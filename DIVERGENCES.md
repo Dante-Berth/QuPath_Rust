@@ -193,3 +193,40 @@ establish it for itself.
 
 **Status:** deliberate bug-for-bug parity. Adding the clamp would be correct in
 general and wrong here.
+
+## D-007 — Tiled runs do not reproduce a seamless run, and neither does QuPath's
+
+**QuPath:** `AbstractTileableDetectionPlugin` breaks a region into ~2048 px
+tiles, grows each by `getTileOverlap` (60 px on CMU-1) on all four sides, detects
+independently in each, and then deletes whichever of two overlapping detections
+is smaller when the intersection exceeds 10% of it
+(`ParallelTileObject.resolveOverlaps`).
+
+**Here:** reproduced, in `qupath-pipeline`'s `tiles` and `overlaps` modules —
+same grid arithmetic, same 60 px halo, same keep-the-larger rule at the same
+strict 10% threshold.
+
+**The divergence is not against QuPath — it is that neither implementation's
+tiled result equals its own untiled one.** Two stages of the chain are
+morphological reconstructions, and a geodesic dilation propagates without bound,
+so a tile boundary changes pixel values arbitrarily far from it. No finite halo
+can fix that; it is a property of the algorithm QuPath chose.
+
+**Measured** on the profiled 4000x4000 region, changing only the grid:
+
+| Grid | Candidates |
+| --- | ---: |
+| storage-sized, 256 px, no halo | 62,102 |
+| QuPath's, 60 px halo, overlaps resolved | 48,045 |
+| one tile, no seam | 46,772 |
+
+So QuPath's own grid sits **2.7% above** a seamless run of the same code, and a
+storage-sized grid sat 33% above it.
+
+**Consequence:** the §1.6 comparison must be run at the same region size on both
+sides, because the tile count is part of the answer. A Dice or IoU comparison
+against a QuPath run on a *differently sized* region is not measuring the port.
+
+**Status:** deliberate. Matching QuPath means matching its seams, including the
+ones that cost it accuracy. The seamless figure is recorded here as the
+reference, not as the target.

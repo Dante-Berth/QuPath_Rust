@@ -14,16 +14,47 @@ build.
 | `qupath-watershed` | Marker-controlled flood, bucket queue, 4/8-connected labelling, filled-region tracing | `WatershedFlood.json`, 3 cases; `RegionalMaxima.json` labels, 13 surfaces; `ObjectFilters.json` regions, 17 images | queue 20-32x vs heap; flood 1.40x vs previous; labelling and tracing identical |
 | `qupath-filters` | MIN/MAX rank filter, Gaussian blur, convolution, morphological reconstruction | `RankFilterMinMax.json` 42 cases; `GaussianBlur.json` 10 kernels + 12 images; `LaplacianConvolution.json` 5 scales + 17 images; `RegionalMaxima.json` 11 reconstructions + 13 surfaces | rank 3.1-9.7x vs ImageJ; blur, convolution and reconstruction bit-identical |
 | `qupath-slide` | Aperio SVS / tiled TIFF reader | `SlideRegion.json`, 5 regions | 4000x4000 region in 0.09 s |
-| `qupath-pipeline` | Streams tiles through the above, filters the candidates | `ColourDeconvolution*.json`; `ObjectFilters.json` statistics and decisions, 17 images | 17.8 Mpx in 0.215 s, 71 MB peak |
+| `qupath-pipeline` | Tiles a region QuPath's way, streams each tile through the above, filters and de-duplicates the candidates | `ColourDeconvolution*.json`; `ObjectFilters.json` statistics and decisions, 17 images | 42.5 Mpx/s on a saturated grid; 48,045 candidates against QuPath's 25,757 cells |
 
 **The end-to-end number is still QuPath's 15.87 s**, because the pipeline is not
 `WatershedCellDetection`. Every image-processing stage QuPath runs *before* its
 watershed is ported and pinned, and so are the first two things it does *after*
-— tracing basins to filled regions, and the intensity filter over them. What
-remains is the merge and shape split, the area filter that runs on the objects
-*that* produces, and the measurement tail. Do not compare the two figures until
-§1.5 below is done; the pipeline currently produces **66,739 candidates** where
-QuPath detects 25,757 cells.
+— tracing basins to filled regions, and the intensity filter over them — and, as
+of §2, so is the tile grid all of it runs on. What remains is the merge and
+shape split, the area filter that runs on the objects *that* produces, and the
+measurement tail. Do not compare the two figures until §1.5 below is done; the
+pipeline currently produces **48,045 candidates** where QuPath detects 25,757
+cells.
+
+### The correction this file owes: §2's plan was wrong in the same way §1.5's was
+
+§2 said to "read tiles with a halo of at least the largest kernel radius plus
+the maximum expected object radius ... and keep only objects whose centroid
+falls in the unpadded core". **Every clause of that is a different algorithm
+from the one QuPath runs**, and five minutes at the call site said so:
+
+- **The halo is not derived from a kernel radius.** `getTileOverlap` is
+  `(10 µm + cellExpansion) / pixelSize * 2` — 60 px here — and no filter's
+  radius appears in it. The background erosion's radius is 16 px and its mask
+  dilation's is 32; neither is what QuPath pads by.
+- **Objects are not owned by a core.** `ParallelTileObject.resolveOverlaps`
+  keeps the **larger** of two overlapping detections whenever the intersection
+  exceeds 10% of the smaller. Centroid ownership discards the copy that saw the
+  whole nucleus whenever its centroid happens to land outside the core, which is
+  the opposite of what the halo is for.
+- **The tiles are not the slide's tiles.** This is the part that mattered most
+  and that no plan mentioned at all: detection tiles at
+  `PREFERRED_TILE_SIZE = 2048`, and a region under `MAX_TILE_SIZE = 3072` is not
+  tiled at all. The pipeline was processing the **TIFF's 256 px storage tiles**,
+  so it had a seam every 256 px where QuPath has one every 2000.
+
+That last point is the whole of the §2 bug, and it was never a halo problem.
+Measured on the profiled region, changing only the grid: **62,102 candidates on
+a storage-sized grid against 46,772 with no seam at all**, a 1.33x inflation.
+
+The lesson is the one the previous session already wrote down and this file
+still had to learn again: **this file's plan for a stage is not that stage's
+call site.** Both remaining plans in §1.5b were written the same way.
 
 **The pipeline's own figure is not a speedup series and must not be read as
 one.** It has moved 0.114 s -> 0.062 s -> 0.091 s -> 0.114 s -> 0.21 s -> 0.215
@@ -32,7 +63,15 @@ stain vector, and §1.2, §1.3, §1.4 and §1.5a each added a stage that had bee
 missing. A figure that goes up because a stage was added is the honest outcome.
 
 **The counts are not a quality series either**: 397,822 -> 211,728 -> 42,966 ->
-91,957 -> 88,424 basins -> 66,739 candidates, against QuPath's 25,757 cells.
+91,957 -> 88,424 basins -> 66,739 candidates -> 48,045 after §2 put the tiles on
+QuPath's grid, against QuPath's 25,757 cells.
+
+**Nor is the throughput figure.** It has moved 0.215 s -> 0.95 s on the profiled
+4000x4000 region, and that is not a regression: the region is smaller than one
+of QuPath's grid steps, so it is now 4 tiles on 20 threads where it used to be
+272. Per pixel the work fell 30% (0.253 to 0.178 s/Mpx summed across threads).
+On a region large enough to fill the pool the pipeline does **42.5 Mpx/s**.
+Quote that one, or quote both with the tile counts attached.
 
 ### The correction this file owes: §1.4 was not the stage that fixes the count
 
@@ -83,6 +122,11 @@ Reproduce everything:
 cargo test --workspace
 RUSTFLAGS="-C target-cpu=x86-64-v3" cargo bench --workspace
 RUSTFLAGS="-C target-cpu=x86-64-v3" cargo run --release -p qupath-pipeline --example region
+RUSTFLAGS="-C target-cpu=x86-64-v3" cargo run --release -p qupath-pipeline --example tile_seams
+RUSTFLAGS="-C target-cpu=x86-64-v3" \
+    cargo run --release -p qupath-pipeline --example reconstruct_cost
+RUSTFLAGS="-C target-cpu=x86-64-v3" \
+    cargo run --release -p qupath-pipeline --example reconstruct_previous_vs_current
 RUSTFLAGS="-C target-cpu=x86-64-v3" \
     cargo run --release -p qupath-pipeline --example previous_vs_current
 ./parity/record.sh && ./parity/record-slide.sh && ./parity/bench.sh   # needs JDK 25
@@ -405,24 +449,24 @@ provably in what remains:
 | `bp.filter(MAX)`, AND with the thresholded LoG | merges adjacent candidates; not measured |
 | `watershedPostProcess`: EDM watershed, splits by shape | splits some back; not measured |
 | area outside 10–400 µm², *on the objects that produces* | not measurable before the two above |
-| tile seams (§2) | inflates every count here; not measured |
+| tile seams (§2) | 66,739 -> **48,045**, 28% dropped, **measured** |
 | QuPath | **25,757** |
 
 Order to port in, cheapest evidence first:
 
-1. **Tile seams (§2)**, which are a correctness bug independent of everything
-   else and inflate every count in the table. This is now the cheapest remaining
-   evidence and it moved up the list for that reason: a 4000x4000 region cut
-   into 272 tiles has a lot of boundary, and every nucleus crossing one is
-   counted twice.
+1. ~~**Tile seams (§2)**~~ — **done**, and it was worth 1.33x of the gap. See §2.
 2. **Merge and shape split**, which needs a Euclidean distance map and a second
    watershed. Both halves change object identity, not only count, so this is
-   where a Dice or IoU comparison first becomes meaningful.
+   where a Dice or IoU comparison first becomes meaningful. **Read the call site
+   before writing anything**: this list has now been wrong about three stages in
+   a row, and this entry was written from the same summary that produced the
+   §1.5 and §2 errors.
 3. **The area filter**, which is a histogram pass over whatever step 2 leaves —
    trivial once it has objects to run on, and meaningless before.
 4. **ROI vertices.** The masks match now; the polygons do not exist. QuPath's
    `PathObject` geometry is the Wand's vertex list, so exporting objects needs
-   the contour itself and not just what it encloses.
+   the contour itself and not just what it encloses. Note §2 already needs a
+   pixel mask per seam candidate, so the two overlap.
 5. **Measurements**, into the columnar table `qupath-objects` already provides.
 
 A fixture for each, recorded the same way as everything above.
@@ -436,19 +480,54 @@ on the object masks per §5, and a cell count within a documented margin.
 
 ---
 
-## 2. Tile seams — a correctness bug the current pipeline has
+## 2. Tile seams — **done**, and the plan for it was wrong
 
-Tiles are processed independently, so an object straddling a tile boundary is
-detected twice, once truncated on each side. QuPath handles this with overlap
-and object merging.
+Ported in `crates/qupath-pipeline/src/tiles.rs` and `overlaps.rs`. See the
+correction at the top of this file for what the plan said and what the call site
+said instead. What landed:
 
-This is not visible in the timings and does not affect them, but it makes the
-object counts wrong in a way that will not show up until 1.6 compares them.
+- **The grid**, from `addRunnableTasks` and `RoiTools.computeTiledROIs`: cores of
+  `ceil(width / ceil(width / 2052))`, centred on the region, each grown by 60 px
+  on every side and intersected with the region. The profiled 4000x4000 region
+  becomes **4 tiles of 2000 with a 60 px halo**, where it used to be 272 storage
+  tiles of 256 with none.
+- **The resolution**, from `ParallelTileObject.resolveOverlaps`: keep the larger
+  of any two detections from different tiles whose intersection exceeds 10% of
+  the smaller. Pixel masks stand in for JTS geometry, exactly rather than
+  approximately — the Wand's polygon encloses whole pixels, so its area *is* the
+  filled pixel count.
 
-- Read tiles with a halo of at least the largest kernel radius plus the maximum
-  expected object radius, process the padded tile, and keep only objects whose
-  centroid falls in the unpadded core.
-- Add a test that an object placed exactly on a boundary is detected once.
+Measured on the profiled region, changing only the grid:
+
+| Grid | Tiles | Markers | Regions | Duplicates | Candidates |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| storage-sized, 240 px, no halo | 289 | 79,399 | 79,398 | 0 | 62,102 |
+| **QuPath's, 2052/3078, 60 px halo** | 4 | 80,763 | 80,762 | 3,107 | **48,045** |
+| one tile, no seam | 1 | 75,736 | 75,735 | 0 | 46,772 |
+
+Reproduce with `cargo run --release -p qupath-pipeline --example tile_seams`.
+
+Three things worth keeping from this:
+
+- **A halo cannot make tiling exact, and is not meant to.** Both reconstructions
+  in this pipeline are geodesic dilations, which propagate without bound, so no
+  finite halo reproduces a single-tile run. QuPath has the same property: its own
+  4-tile run lands at 48,045 against a seamless 46,772, a 2.7% difference that is
+  inherent to tiling rather than a defect. **The target is matching QuPath's
+  grid, not choosing a better one.**
+- **The count fell 28%**, 66,739 to 48,045, and the gap to QuPath's 25,757 went
+  from 2.6x to **1.87x**. This is the first stage in three that removed anything
+  like what a plan predicted — and it is the one whose prediction nobody wrote
+  down, because the item was filed as a correctness bug rather than a count fix.
+- **The intensity filter now drops 36.7% where it dropped 24.5%.** Not because
+  the filter changed but because the background estimate did: an opening by
+  reconstruction on a 256 px tile is a different image from one on a 2000 px
+  tile, and the smaller one was wrong.
+
+Still open here: an object placed exactly on a boundary is covered by
+`overlaps::tests`, on hand-built candidates rather than through the pipeline. A
+fixture recorded from QuPath's own `resolveOverlaps` would be stronger and does
+not exist.
 
 ---
 
@@ -528,27 +607,77 @@ already ported.
    bounding-box half is the place to start if one is ever wanted — that figure
    is the sum over regions, so it grows with the number of candidates rather
    than with the image.
-7. **The background stage is now 45% of pipeline stage time**, which makes it
-   the largest single lever and the first thing §4 should look at once §1 and §2
-   are done. It splits 59% erosion / 40% reconstruction, and **neither half has
-   been examined**:
+7. **The background stage is 59% of pipeline stage time** and is the largest
+   single lever. **The 59% erosion / 40% reconstruction split this file used to
+   record was measured on 256 px tiles and does not survive §2.** At the tile
+   size QuPath actually uses it is:
 
-   - The erosion is the existing rank filter at radius 16.03, where every
-     measurement in `docs/benchmarks/README.md` was taken at radius 10 or below.
-     Its rectangle decomposition should make cost roughly independent of radius;
-     that it is now the single most expensive thing in the pipeline says the
-     assumption is worth re-testing at this radius rather than assumed.
-   - The reconstruction is fresh code and has had no optimisation pass at all.
-     Its raster halves are the same shape as the loop-carried accumulator that
-     §4.3 and §4.4 each found, but the dependency here is genuine — each pixel
-     reads the neighbour the pass just wrote — so the fix that worked twice does
-     not apply, and the §4.4 heuristic below would mislead here. The queue phase
-     is a different matter and is order-independent (§1.4), so it is free to be
-     restructured.
+   | | 256 px tiles (old) | 2120 px tiles (measured) |
+   | --- | ---: | ---: |
+   | erosion | 59% | **12%** |
+   | reconstruction | 40% | **86%** |
 
-   Apply the §4.4 heuristic before believing any of this: measure in place, and
-   check the ratio against the neighbouring stages.
-8. **SIMD**, last, per §0.5 — and only behind a scalar fallback with a
+   So the erosion — the half this file pointed the next optimisation pass at —
+   is not the problem, and its rectangle decomposition holds up at radius 16
+   after all. Reproduce with
+   `cargo run --release -p qupath-pipeline --example reconstruct_cost`.
+
+   The reconstruction is 46.5% of pipeline stage time on its own, and the
+   regional maxima add another 6.5% of the same code. Two things have now been
+   ruled out rather than assumed:
+
+   - **The repeat heuristic is already optimal.** `morphologicalReconstruction`
+     alternates raster passes while one still moves a tenth of the image, and
+     because the fixed point is traversal-independent (§1.4) that fraction can be
+     changed freely. Measured on a real tile, interleaved, asserting bit-identical
+     output at every setting: the textbook one-forward-one-backward hybrid is
+     **2x slower**, 1/4 is within noise of 1/10, and 1/50 is 16% slower. QuPath's
+     tenth is the right number. `reconstruct_previous_vs_current`.
+   - **It does not scale superlinearly with tile size.** Cost per megapixel is
+     flat from 256 px to 2120 px (0.055 to 0.063 s/Mpx); the pass count rises
+     from 6 to 14 and then plateaus. The stage got expensive because tiles got
+     70x bigger, not because it degrades.
+
+   What is left, and has *not* been tried: the raster pass is a transliteration
+   of QuPath's index arithmetic — `isize` strides, a runtime `Option` for the
+   queue checked per pixel, and `first_row`/`first_column` branches inside the
+   inner loop. At 14 cycles per pixel for a max-of-five-and-clamp it is doing
+   several times the work the arithmetic implies. Specialising forward and
+   backward, and the queue and no-queue cases, is the obvious next pass, and
+   `RegionalMaxima.json` is there to catch it if it changes an answer.
+
+8. **The pipeline is now memory-bandwidth-bound, and that is new.** Parallel
+   efficiency on a saturated grid, 90 Mpx region, measured:
+
+   | Threads | Mpx/s | Peak | Efficiency |
+   | ---: | ---: | ---: | ---: |
+   | 2 | 13.4 | 358 MB | 96% |
+   | 8 | 30.6 | 1371 MB | 74% |
+   | 12 | 36.1 | 1737 MB | 69% |
+   | 20 | 42.5 | 3297 MB | 61% |
+
+   Going from 12 to 20 threads buys 3% for 30% more memory. The cause is §2's
+   tile size: at 256 px a tile's working set was ~2 MB and sat in L2, and at
+   2120 px it is ~145 MB and streams from DRAM. **This is the single biggest
+   remaining speed lever and it did not exist before §2.** The honest options are
+   cache-blocking the separable stages within a tile, or accepting it; what is
+   *not* available is going back to small tiles, because that is the §2 bug.
+
+   Two things already came out of this and are done:
+
+   - **The nested `par_iter` is gone.** The rank filter and the convolver were
+     rayon-parallel over rows *inside* a rayon job per tile — a §6 violation that
+     had been there since the tile loop was written. Removing it is worth **+14%
+     at saturation** (37.2 to 42.5 Mpx/s), because the inner level was only
+     contending for cores the outer level already had. It costs the few-tile case,
+     where the region is smaller than one grid step and 16 of 20 cores now idle;
+     `RankFilter::with_parallel_rows(true)` is still there for that.
+   - **Per-worker scratch is a thread-local, not `map_init`.** `map_init` builds
+     its state once per rayon *job*, and rayon makes more jobs when there are more
+     items, so peak memory grew with the tile count rather than the thread count.
+     At 2 MB a tile nobody noticed; at 145 MB it is the difference between bounded
+     and unbounded. `bounded_memory` asserts the property directly now.
+9. **SIMD**, last, per §0.5 — and only behind a scalar fallback with a
    differential test. Note §4.3 and §4.4 got 2.3x and 3.7x without any explicit
    SIMD, by removing a dependency rather than by widening an instruction.
 
@@ -557,7 +686,8 @@ already ported.
 ## 5. Standing constraints
 
 Carried forward because they are the observed failure modes in this repository,
-not hypothetical ones. Two of them were hit again this session.
+not hypothetical ones. The plan-versus-call-site one was hit again, on §2, for
+the third stage running.
 
 - **Never weaken a test to make it pass.** No widened tolerances, no `#[ignore]`,
   no edited fixtures.
@@ -645,3 +775,32 @@ not hypothetical ones. Two of them were hit again this session.
   then *subtracts* it. Same family of operation, opposite result: one keeps the
   background, the other keeps the nuclei. It had been there through three
   count changes, all of which were attributed to other stages.
+- **The unit a stage runs on is part of the stage.** For five items this file
+  treated tiling as plumbing — a detail of how pixels reach the ported code,
+  outside the parity story. It is not: QuPath detects on a 2048 px grid of its
+  own and this pipeline was detecting on the TIFF's 256 px storage grid, so every
+  stage ran on a different image from QuPath's and every count was inflated 1.33x.
+  Nothing in a per-stage fixture can catch that, because each stage was
+  bit-identical on the tile it was given. **Ask what QuPath's stage is called
+  with, not only what it computes.**
+- **A ratio measured at one size is not a ratio.** §4.7 recorded the background
+  stage as 59% erosion / 40% reconstruction and pointed the next optimisation
+  pass at the erosion. Measured at the tile size QuPath actually uses it is 12%
+  and 86% — the reverse — because the two halves scale differently and the
+  figures had been taken on 256 px tiles. A profile share carries the conditions
+  it was taken under; record them beside it, and re-measure when they change.
+- **A synthetic input can pick the wrong optimisation.** The repeat-fraction
+  A/B was written first against a smooth generated surface, where the
+  reconstruction settles in 4 raster passes and dropping the repeat loop looked
+  like a free 1.47x. On a real tile it takes 14 passes and dropping the loop is
+  **2x slower**. The synthetic case was not merely less representative; it
+  reversed the sign of the answer.
+- **`map_init` is not per thread.** Rayon calls it once per *job* and splits into
+  more jobs when there are more items, so per-worker scratch held under it scales
+  with the item count. Invisible while tiles were 2 MB; unbounded once they were
+  145 MB.
+- **Do not nest `par_iter`, and this repository had for months.** The rank filter
+  and the convolver parallelised rows inside a per-tile rayon job. It cost 14% at
+  saturation, and it made a thread-local scratch unsound — rayon resumes another
+  tile's job on the blocked thread, which re-enters whatever the outer job was
+  holding. §6 says not to; the reason is both of those.
