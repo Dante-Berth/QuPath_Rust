@@ -47,11 +47,13 @@ use rayon::prelude::*;
 mod convolve;
 mod gaussian;
 mod kernel;
+mod morphology;
 mod plan;
 
 pub use convolve::{Convolver, convolve, kernel_scale};
 pub use gaussian::{GaussianBlur, blur_gaussian, gaussian_kernel};
 pub use kernel::Kernel;
+pub use morphology::{Reconstructor, find_regional_maxima, morphological_reconstruction};
 
 use plan::Plan;
 

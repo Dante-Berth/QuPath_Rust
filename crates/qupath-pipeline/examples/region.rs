@@ -59,10 +59,11 @@ fn main() {
     for (name, seconds) in [
         ("decode", stages.decode),
         ("deconvolve", stages.deconvolve),
-        ("rank filter", stages.filter),
+        ("background", stages.background),
         ("gaussian blur", stages.blur),
         ("laplacian", stages.laplacian),
         ("maxima", stages.maxima),
+        ("labelling", stages.label),
         ("watershed", stages.flood),
     ] {
         println!(
@@ -82,11 +83,11 @@ fn main() {
         println!("peak resident memory: {:.0} MB", bytes as f64 / 1e6);
     }
     println!(
-        "\nNote: basins, not cells. The Laplacian of Gaussian is complete and\n\
-         pinned bit-identical against ImageJ, but the marker rule is still a\n\
-         plain regional maximum: QuPath's findRegionalMaxima applies a\n\
-         prominence test this does not, and the ROI and measurement stages are\n\
-         absent, so this is not WatershedCellDetection and the counts are not\n\
-         comparable."
+        "\nNote: basins, not cells. Every image stage QuPath runs before its\n\
+         watershed is now here and pinned against QuPath's own output, but\n\
+         everything it runs after — ROI tracing, the mean-intensity test, the\n\
+         area filter, the merge and shape split — is not. All four of those\n\
+         only ever remove objects, so this count is an upper bound on QuPath's\n\
+         and the two are still not comparable."
     );
 }

@@ -9,23 +9,30 @@
 //! # What this is not
 //!
 //! **It is not `WatershedCellDetection`, and its output is not detections.**
-//! The stages QuPath runs that are not yet ported — `findRegionalMaxima`,
-//! thresholding, ROI tracing and measurement — are absent, and the marker rule
-//! here is a plain regional-maximum test with no prominence filter at all, so
-//! it over-segments. The counts below are flooded basins, not cells, and no
-//! fixture pins them.
+//! Every image-processing stage QuPath runs before the watershed is now here
+//! and pinned against QuPath's own output — background subtraction by
+//! reconstruction, the Laplacian of Gaussian, the regional maxima, the
+//! labelling and the flood. What is absent is everything QuPath does *after*
+//! the flood, which is where a basin becomes a cell:
 //!
-//! The Laplacian of Gaussian *is* complete as of the Laplacian port: both the
-//! blur and the 3x3 convolution that follows it are pinned bit-identical
-//! against ImageJ. What remains between here and detections is how the maxima
-//! are chosen — QuPath uses
-//! `MorphologicalReconstruction.findRegionalMaxima(fpLoG, 0.001f, false)`
-//! followed by a 4-connected `labelImage`, which is an h-maxima transform, and
-//! that prominence test is exactly what this pipeline lacks.
+//! - **ROI tracing.** QuPath converts the label image to polygons with
+//!   `getFilledPolygonROIs`, which fills interior holes. A basin with a hole is
+//!   one object there and an annulus here.
+//! - **The mean-intensity test.** Every candidate whose mean over the
+//!   background-subtracted image is `<= threshold` (0.1 by default) is dropped.
+//! - **The area filter.** Objects outside 10–400 µm² are dropped.
+//! - **Merging and the shape split.** The survivors are dilated, intersected
+//!   with the thresholded Laplacian, and split again by a distance-transform
+//!   watershed.
+//! - **Cell expansion and measurement.**
 //!
-//! What it does establish is the path: real pixels, real decode, the ported
-//! filter and flood, at tile granularity, with memory that does not grow with
-//! the region. `docs/ROADMAP.md` lists what each remaining stage needs.
+//! Those five are why the count here is not QuPath's count, and all of them cut
+//! it. The counts below are basins that passed no object-level test, and no
+//! fixture pins them. `docs/ROADMAP.md` §1.5 is where they get ported.
+//!
+//! What this does establish is the path: real pixels, real decode, every ported
+//! stage in QuPath's own order, at tile granularity, with memory that does not
+//! grow with the region.
 //!
 //! # Memory
 //!
@@ -39,9 +46,9 @@ mod stain;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use qupath_filters::{Convolver, GaussianBlur, RankFilter, RankOp};
+use qupath_filters::{Convolver, GaussianBlur, RankFilter, RankOp, Reconstructor};
 use qupath_slide::{Slide, SlideError};
-use qupath_watershed::{Connectivity, Watershed};
+use qupath_watershed::{Connectivity, Labeller, Watershed};
 use rayon::prelude::*;
 
 pub use stain::Stains;
@@ -64,14 +71,30 @@ pub struct Region {
 pub struct Params {
     /// Pyramid level to read.
     pub level: usize,
-    /// Radius of the morphological opening applied before the blur, in pixels.
+    /// Radius of the background estimate, in pixels, or zero to skip it.
     ///
-    /// QuPath derives its rank-filter radii from the user's cell-size
-    /// parameters; this stands in for that until the detection front end is
-    /// ported. It sits where QuPath's median filter sits — before the Laplacian
-    /// of Gaussian, not after it — so that the maxima are found on a clean
-    /// second derivative rather than on a smeared one.
-    pub open_radius: f64,
+    /// The background is an **opening by reconstruction** — erode by this
+    /// radius, then let the result grow back under the original image — and it
+    /// is *subtracted* from the optical density rather than replacing it. That
+    /// is `estimateBackground` followed by `Blitter.SUBTRACT`, and the shape it
+    /// gives is a top hat: everything smaller than the kernel survives at full
+    /// contrast and everything larger is flattened away.
+    ///
+    /// QuPath asks for 8 µm and divides by the pixel size. CMU-1 records
+    /// `MPP = 0.4990`, which puts it at 16.03 px; [`Params::default`] uses that.
+    pub background_radius: f64,
+    /// Background level above which a region is masked out of the estimate.
+    ///
+    /// `estimateBackground` finds pixels whose *eroded* value exceeds this,
+    /// dilates that mask by twice the radius, and sets the background estimate
+    /// to negative infinity there so the reconstruction refills it from its
+    /// surroundings. QuPath's brightfield default is 2.0, which on H&E is
+    /// darker than tissue gets except on folds and ink.
+    ///
+    /// QuPath also uses the same mask to *discard* nuclei sitting on it. That
+    /// half is an object-level test and belongs with the others in §1.5; only
+    /// the effect on the image is here.
+    pub max_background: f32,
     /// Gaussian blur sigma in pixels, or zero to skip the blur.
     ///
     /// QuPath asks for sigma in microns — 1.5 by default — and divides by the
@@ -97,18 +120,35 @@ impl Default for Params {
     fn default() -> Self {
         Self {
             level: 0,
-            open_radius: 2.0,
-            // 1.5 microns at CMU-1's 0.4990 um/px, which is what QuPath would
-            // use on this slide with its own defaults.
+            // QuPath's defaults in microns, at CMU-1's 0.4990 um/px.
+            //
+            // QuPath's own numbers are 16.0 and 3.0 rather than 16.03 and
+            // 3.006, because it resamples to `requestedPixelSizeMicrons` (0.5)
+            // before measuring anything. This pipeline reads level 0 as it is,
+            // so it converts against the pixel size it actually has — see
+            // DIVERGENCES.md D-005.
+            background_radius: 8.0 / 0.4990,
+            max_background: 2.0,
             sigma: 1.5 / 0.4990,
             // What QuPath thresholds its own LoG at. A nucleus is a positive
             // peak of the Laplacian and its surroundings are negative, so zero
             // is where the object boundary falls rather than a tuned constant.
             threshold: 0.0,
-            connectivity: Connectivity::Eight,
+            // `Watershed.doWatershed(fpLoG, ipNucleusLabels, 0, false)` — the
+            // `false` is `conn8`. Four, not eight, and not the same as the
+            // 8-connected neighbourhood the maxima test uses one line earlier.
+            connectivity: Connectivity::Four,
         }
     }
 }
+
+/// The value below which a pixel of the Laplacian of Gaussian cannot be a
+/// regional maximum at all: `findRegionalMaxima(fpLoG, 0.001f, false)`.
+///
+/// Distinct from [`Params::threshold`], which gates the flood, and from the
+/// zero that gates the labelling. All three are separate numbers in QuPath and
+/// a port that shares one between them passes most tests.
+const MAXIMA_THRESHOLD: f32 = 0.001;
 
 /// Wall-clock nanoseconds attributed to each stage, summed over all tiles.
 ///
@@ -118,10 +158,11 @@ impl Default for Params {
 struct StageClocks {
     decode: AtomicU64,
     deconvolve: AtomicU64,
-    filter: AtomicU64,
+    background: AtomicU64,
     blur: AtomicU64,
     laplacian: AtomicU64,
     maxima: AtomicU64,
+    label: AtomicU64,
     flood: AtomicU64,
 }
 
@@ -132,14 +173,16 @@ pub struct Stages {
     pub decode: f64,
     /// RGB to haematoxylin optical density.
     pub deconvolve: f64,
-    /// The rank-filter opening.
-    pub filter: f64,
+    /// Estimating and subtracting the background.
+    pub background: f64,
     /// The Gaussian blur.
     pub blur: f64,
     /// The 3x3 Laplacian that completes the Laplacian of Gaussian.
     pub laplacian: f64,
-    /// Finding markers.
+    /// The regional-maximum transform, which is the prominence of every pixel.
     pub maxima: f64,
+    /// Labelling the surviving maxima into markers.
+    pub label: f64,
     /// The watershed flood.
     pub flood: f64,
 }
@@ -150,10 +193,11 @@ impl Stages {
     pub fn total(&self) -> f64 {
         self.decode
             + self.deconvolve
-            + self.filter
+            + self.background
             + self.blur
             + self.laplacian
             + self.maxima
+            + self.label
             + self.flood
     }
 }
@@ -210,18 +254,26 @@ pub enum PipelineError {
 /// that job handles. Allocation in the tile loop is a defect under §6.
 struct Scratch {
     rgb: Vec<u8>,
+    /// Haematoxylin optical density, then the same buffer with the background
+    /// subtracted and the blur applied in place.
     density: Vec<f32>,
-    opened: Vec<f32>,
-    /// The Laplacian of Gaussian: written from `opened`, and the image every
+    /// The background estimate: an erosion of `density` grown back under it.
+    background: Vec<f32>,
+    /// Non-empty only where a region exceeded [`Params::max_background`], which
+    /// on most tiles is never, so it usually stays at zero capacity.
+    background_mask: Vec<f32>,
+    /// The Laplacian of Gaussian: written from `density`, and the image every
     /// stage after it reads. Separate because the convolution reads a
     /// neighbourhood and so cannot write over what it is still reading.
     log: Vec<f32>,
+    /// How far each pixel of `log` stands above the saddle that reaches it.
+    prominence: Vec<f32>,
     labels: Vec<f32>,
-    candidates: Vec<bool>,
-    stack: Vec<u32>,
     blur: GaussianBlur,
     filter: RankFilter,
     convolver: Convolver,
+    reconstructor: Reconstructor,
+    labeller: Labeller,
     flooder: Watershed,
 }
 
@@ -230,14 +282,16 @@ impl Scratch {
         Self {
             rgb: Vec::new(),
             density: Vec::new(),
-            opened: Vec::new(),
+            background: Vec::new(),
+            background_mask: Vec::new(),
             log: Vec::new(),
+            prominence: Vec::new(),
             labels: Vec::new(),
-            candidates: Vec::new(),
-            stack: Vec::new(),
             blur: GaussianBlur::new(),
             filter: RankFilter::new(),
             convolver: Convolver::new(),
+            reconstructor: Reconstructor::new(),
+            labeller: Labeller::new(),
             flooder: Watershed::new(),
         }
     }
@@ -320,29 +374,18 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
             stains.haematoxylin_into(&scratch.rgb, &mut scratch.density);
             clocks.deconvolve.fetch_add(nanos(mark), Ordering::Relaxed);
 
-            // Stage order follows `WatershedCellDetection`: its rank filter runs
-            // on the detection image *before* the Laplacian of Gaussian, not
-            // after it, so the maxima are found on a clean second derivative.
+            // Stage order follows `WatershedCellDetection`: the background is
+            // estimated and subtracted from the detection image *before* the
+            // Laplacian of Gaussian, not after it.
             let mark = Instant::now();
-            scratch.opened.clear();
-            scratch.opened.resize(scratch.density.len(), 0.0);
-            // Morphological opening: erode then dilate, which removes specks
-            // smaller than the kernel while leaving nuclei intact.
-            scratch.filter.apply_into(
-                &scratch.density,
-                &mut scratch.opened,
-                width,
-                params.open_radius,
-                RankOp::Min,
-            );
-            scratch
-                .filter
-                .apply(&mut scratch.opened, width, params.open_radius, RankOp::Max);
-            clocks.filter.fetch_add(nanos(mark), Ordering::Relaxed);
+            if params.background_radius > 0.0 {
+                subtract_background(scratch, width, params);
+            }
+            clocks.background.fetch_add(nanos(mark), Ordering::Relaxed);
 
             let mark = Instant::now();
             if params.sigma > 0.0 {
-                scratch.blur.blur(&mut scratch.opened, width, params.sigma);
+                scratch.blur.blur(&mut scratch.density, width, params.sigma);
             }
             clocks.blur.fetch_add(nanos(mark), Ordering::Relaxed);
 
@@ -352,9 +395,9 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
             // it is still reading, and `apply_into` then copies nothing.
             let mark = Instant::now();
             scratch.log.clear();
-            scratch.log.resize(scratch.opened.len(), 0.0);
+            scratch.log.resize(scratch.density.len(), 0.0);
             scratch.convolver.apply_into(
-                &scratch.opened,
+                &scratch.density,
                 &mut scratch.log,
                 width,
                 &LAPLACIAN,
@@ -363,19 +406,10 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
             );
             clocks.laplacian.fetch_add(nanos(mark), Ordering::Relaxed);
 
-            let mark = Instant::now();
-            scratch.labels.clear();
-            scratch.labels.resize(scratch.log.len(), 0.0);
-            let seeded = seed_maxima(
-                &scratch.log,
-                &mut scratch.labels,
-                width,
-                params.threshold,
-                &mut scratch.candidates,
-                &mut scratch.stack,
-            );
-            clocks.maxima.fetch_add(nanos(mark), Ordering::Relaxed);
-            markers.fetch_add(seeded, Ordering::Relaxed);
+            let mut labels = std::mem::take(&mut scratch.labels);
+            let seeded = seed_markers(scratch, &mut labels, width, &clocks);
+            markers.fetch_add(u64::from(seeded), Ordering::Relaxed);
+            scratch.labels = labels;
 
             let mark = Instant::now();
             scratch.flooder.flood(
@@ -407,10 +441,11 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
         stages: Stages {
             decode: seconds(&clocks.decode),
             deconvolve: seconds(&clocks.deconvolve),
-            filter: seconds(&clocks.filter),
+            background: seconds(&clocks.background),
             blur: seconds(&clocks.blur),
             laplacian: seconds(&clocks.laplacian),
             maxima: seconds(&clocks.maxima),
+            label: seconds(&clocks.label),
             flood: seconds(&clocks.flood),
         },
         peak_resident_bytes: peak_resident_bytes(),
@@ -429,114 +464,120 @@ fn seconds(counter: &AtomicU64) -> f64 {
     counter.load(Ordering::Relaxed) as f64 / 1e9
 }
 
-/// Labels regional maxima above `threshold`, returning how many were found.
+/// Turns the Laplacian of Gaussian in `scratch.log` into markers in `labels`,
+/// returning how many there are.
 ///
-/// A pixel is a candidate when no neighbour is strictly greater; candidates are
-/// then grouped into 8-connected components, and each component seeds one
-/// marker. Grouping is the whole point. A *strict* local-maximum test — every
-/// neighbour strictly smaller — finds **nothing at all** on this data, because
-/// the morphological opening upstream creates plateaus by construction: on one
-/// tissue tile it gives 0 strict maxima against 15,751 candidates. Seeding per
-/// candidate instead would give thousands of basins per nucleus.
+/// The pair of calls detection makes:
 ///
-/// **This is not what QuPath does.** `WatershedCellDetection` calls
-/// `MorphologicalReconstruction.findRegionalMaxima(fpLoG, 0.001f, false)` and
-/// then `RoiLabeling.labelImage(ipTemp, 0, false)`. That is an h-maxima
-/// transform: it removes the candidate maxima, fills the holes back in by
-/// geodesic dilation under the original image, and keeps only those whose
-/// *prominence* — how far they stand above the highest saddle reaching them —
-/// is above zero. That prominence test is what stops one nucleus producing
-/// several markers, and this function has no equivalent, so it over-segments.
+/// ```java
+/// ImageProcessor ipTemp = MorphologicalReconstruction.findRegionalMaxima(fpLoG, 0.001f, false);
+/// ImageProcessor ipNucleusLabels = RoiLabeling.labelImage(ipTemp, 0, false);
+/// ```
 ///
-/// Two differences to carry over when it is ported: QuPath labels the survivors
-/// **4-connected**, where the grouping below is 8-connected; and it runs the
-/// whole transform inside the processor's ROI, where the Laplacian on the line
-/// before it runs over the whole image.
+/// The first is a prominence: zero everywhere except at a maximum that stands
+/// above the highest saddle reaching it. The second keeps the pixels where that
+/// is strictly positive and numbers their 4-connected components.
 ///
-/// The counts this produces are therefore basins, not cells, and nothing pins
-/// them against QuPath — see the crate documentation and `docs/ROADMAP.md`.
-fn seed_maxima(
-    values: &[f32],
-    labels: &mut [f32],
+/// Three thresholds appear in two lines and none of them is the same number:
+/// `0.001` gates which pixels may be maxima, `0` gates which survive, and
+/// [`Params::threshold`] gates the flood afterwards.
+fn seed_markers(
+    scratch: &mut Scratch,
+    labels: &mut Vec<f32>,
     width: usize,
-    threshold: f32,
-    candidates: &mut Vec<bool>,
-    stack: &mut Vec<u32>,
-) -> u64 {
-    let height = values.len() / width;
-    if width < 3 || height < 3 {
-        return 0;
-    }
+    clocks: &StageClocks,
+) -> u32 {
+    let mark = Instant::now();
+    scratch.reconstructor.regional_maxima_into(
+        &scratch.log,
+        &mut scratch.prominence,
+        width,
+        MAXIMA_THRESHOLD,
+    );
+    clocks.maxima.fetch_add(nanos(mark), Ordering::Relaxed);
 
-    candidates.clear();
-    candidates.resize(values.len(), false);
-
-    for y in 1..height - 1 {
-        for x in 1..width - 1 {
-            let index = y * width + x;
-            let centre = values[index];
-            if centre <= threshold {
-                continue;
-            }
-            let dominant = NEIGHBOURS.iter().all(|&(dx, dy)| {
-                let neighbour = index
-                    .wrapping_add_signed(dy * width as isize)
-                    .wrapping_add_signed(dx);
-                values[neighbour] <= centre
-            });
-            candidates[index] = dominant;
-        }
-    }
-
-    // One marker per connected component of candidates.
-    let mut next_label = 1.0f32;
-    let mut found = 0u64;
-    for start in 0..values.len() {
-        if !candidates[start] {
-            continue;
-        }
-
-        stack.clear();
-        stack.push(u32::try_from(start).unwrap_or(u32::MAX));
-        candidates[start] = false;
-        labels[start] = next_label;
-
-        while let Some(index) = stack.pop() {
-            let index = index as usize;
-            let (x, y) = (index % width, index / width);
-            if x == 0 || y == 0 || x + 1 == width || y + 1 == height {
-                continue;
-            }
-            for &(dx, dy) in &NEIGHBOURS {
-                let neighbour = index
-                    .wrapping_add_signed(dy * width as isize)
-                    .wrapping_add_signed(dx);
-                if candidates[neighbour] {
-                    candidates[neighbour] = false;
-                    labels[neighbour] = next_label;
-                    stack.push(u32::try_from(neighbour).unwrap_or(u32::MAX));
-                }
-            }
-        }
-
-        next_label += 1.0;
-        found += 1;
-    }
-
+    let mark = Instant::now();
+    labels.clear();
+    labels.resize(scratch.log.len(), 0.0);
+    let found =
+        scratch
+            .labeller
+            .label_into(&scratch.prominence, labels, width, 0.0, Connectivity::Four);
+    clocks.label.fetch_add(nanos(mark), Ordering::Relaxed);
     found
 }
 
-/// The eight neighbours, as `(dx, dy)`.
-const NEIGHBOURS: [(isize, isize); 8] = [
-    (-1, -1),
-    (0, -1),
-    (1, -1),
-    (-1, 0),
-    (1, 0),
-    (-1, 1),
-    (0, 1),
-    (1, 1),
-];
+/// Estimates the background and subtracts it from `scratch.density`, in place.
+///
+/// This is `estimateBackground` followed by `Blitter.SUBTRACT`, which together
+/// are a top hat by reconstruction:
+///
+/// 1. erode the optical density by `background_radius`;
+/// 2. where the *eroded* image exceeds `max_background`, dilate that mask by
+///    twice the radius and drop the estimate to negative infinity there;
+/// 3. let the estimate grow back under the original image by geodesic dilation;
+/// 4. subtract.
+///
+/// Step 3 is what makes it an opening *by reconstruction* rather than a plain
+/// opening: a nucleus that the erosion removed does not come back, but the
+/// slowly varying tissue around it returns to its exact original level instead
+/// of to the dilation's approximation of it. QuPath made this optional in
+/// v0.4.0 and left it on by default.
+///
+/// **The subtraction is the part that is easy to get wrong.** Replacing the
+/// image with its opening — which is what a morphological opening reads like —
+/// keeps the background and discards the nuclei. The subtraction keeps exactly
+/// what the opening threw away, which is the nuclei.
+fn subtract_background(scratch: &mut Scratch, width: usize, params: Params) {
+    let radius = params.background_radius;
+
+    scratch.background.clear();
+    scratch.background.resize(scratch.density.len(), 0.0);
+    scratch.filter.apply_into(
+        &scratch.density,
+        &mut scratch.background,
+        width,
+        radius,
+        RankOp::Min,
+    );
+
+    // Regions too dark to be background at all. QuPath only allocates the mask
+    // if some pixel exceeds the limit, and on tissue that is usually never, so
+    // the common path is this scan and nothing else.
+    if params.max_background > 0.0
+        && scratch
+            .background
+            .iter()
+            .any(|&value| value > params.max_background)
+    {
+        scratch.background_mask.clear();
+        scratch.background_mask.extend(
+            scratch
+                .background
+                .iter()
+                .map(|&value| f32::from(u8::from(value > params.max_background))),
+        );
+        scratch.filter.apply(
+            &mut scratch.background_mask,
+            width,
+            radius * 2.0,
+            RankOp::Max,
+        );
+        for (estimate, &masked) in scratch.background.iter_mut().zip(&scratch.background_mask) {
+            if masked != 0.0 {
+                *estimate = f32::NEG_INFINITY;
+            }
+        }
+    }
+
+    scratch
+        .reconstructor
+        .reconstruct(&mut scratch.background, &scratch.density, width);
+
+    for (value, &estimate) in scratch.density.iter_mut().zip(&scratch.background) {
+        *value -= estimate;
+    }
+}
 
 /// Process high-water resident set size, from `/proc/self/status`.
 ///
@@ -554,32 +595,30 @@ pub fn peak_resident_bytes() -> Option<u64> {
 mod tests {
     use super::*;
 
+    /// Runs the marker chain the tile loop runs, on a hand-built surface.
+    fn markers(values: &[f32], width: usize) -> (u32, Vec<f32>) {
+        let mut scratch = Scratch::new();
+        scratch.log.extend_from_slice(values);
+        let mut labels = vec![0.0f32; values.len()];
+        let found = seed_markers(&mut scratch, &mut labels, width, &StageClocks::default());
+        (found, labels)
+    }
+
     #[test]
     fn a_single_peak_seeds_one_marker() {
         let width = 9;
         let mut values = vec![0.0f32; width * 9];
         values[4 * width + 4] = 1.0;
-        let mut labels = vec![0.0f32; values.len()];
-        let (mut candidates, mut stack) = (Vec::new(), Vec::new());
-        assert_eq!(
-            seed_maxima(
-                &values,
-                &mut labels,
-                width,
-                0.1,
-                &mut candidates,
-                &mut stack
-            ),
-            1
-        );
+        let (found, labels) = markers(&values, width);
+        assert_eq!(found, 1);
         assert_eq!(labels[4 * width + 4], 1.0);
     }
 
     #[test]
     fn a_plateau_seeds_exactly_one_marker() {
-        // The failure this replaced: a strict local-maximum test finds nothing
-        // on a plateau, and the morphological opening upstream produces
-        // plateaus everywhere. Seeding per candidate pixel would give 25.
+        // A strict local-maximum test finds nothing on a plateau, and the
+        // stages upstream produce plateaus by construction. Seeding per
+        // candidate pixel instead would give 25 markers for this one object.
         let width = 9;
         let mut values = vec![0.0f32; width * 9];
         for y in 2..7 {
@@ -587,21 +626,35 @@ mod tests {
                 values[y * width + x] = 1.0;
             }
         }
-        let mut labels = vec![0.0f32; values.len()];
-        let (mut candidates, mut stack) = (Vec::new(), Vec::new());
-        assert_eq!(
-            seed_maxima(
-                &values,
-                &mut labels,
-                width,
-                0.1,
-                &mut candidates,
-                &mut stack
-            ),
-            1,
-            "a plateau is one maximum, not one per pixel"
-        );
+        let (found, labels) = markers(&values, width);
+        assert_eq!(found, 1, "a plateau is one maximum, not one per pixel");
         assert_eq!(labels.iter().filter(|&&l| l != 0.0).count(), 25);
+    }
+
+    #[test]
+    fn a_terrace_seeds_no_marker_at_all() {
+        // The regression this stage exists to prevent, and the one the pipeline
+        // had before it was ported: a shelf on the side of a taller block is
+        // `>=` all its neighbours over its whole interior, so a plain maximum
+        // test — however it groups the candidates — reports a second marker on
+        // the same object. Prominence is what tells the two apart.
+        let (width, height) = (21, 11);
+        let mut values = vec![0.0f32; width * height];
+        for y in 2..height - 2 {
+            for x in 2..width / 2 {
+                values[y * width + x] = 0.5;
+            }
+            for x in width / 2..width - 2 {
+                values[y * width + x] = 1.0;
+            }
+        }
+        let (found, labels) = markers(&values, width);
+        assert_eq!(
+            found, 1,
+            "the block is a maximum; the terrace beside it is not"
+        );
+        assert_eq!(labels[5 * width + 4], 0.0, "no marker on the terrace");
+        assert_eq!(labels[5 * width + 14], 1.0, "one on the block");
     }
 
     #[test]
@@ -610,38 +663,57 @@ mod tests {
         let mut values = vec![0.0f32; width * 5];
         values[2 * width + 2] = 1.0;
         values[2 * width + 8] = 1.0;
-        let mut labels = vec![0.0f32; values.len()];
-        let (mut candidates, mut stack) = (Vec::new(), Vec::new());
-        assert_eq!(
-            seed_maxima(
-                &values,
-                &mut labels,
-                width,
-                0.1,
-                &mut candidates,
-                &mut stack
-            ),
-            2
-        );
+        assert_eq!(markers(&values, width).0, 2);
     }
 
     #[test]
     fn background_below_the_threshold_seeds_nothing() {
+        // `findRegionalMaxima(fpLoG, 0.001f, ...)`: below that, not a candidate.
         let width = 9;
         let mut values = vec![0.0f32; width * 9];
-        values[4 * width + 4] = 0.05;
-        let mut labels = vec![0.0f32; values.len()];
-        let (mut candidates, mut stack) = (Vec::new(), Vec::new());
-        assert_eq!(
-            seed_maxima(
-                &values,
-                &mut labels,
-                width,
-                0.1,
-                &mut candidates,
-                &mut stack
-            ),
-            0
+        values[4 * width + 4] = 0.0005;
+        assert_eq!(markers(&values, width).0, 0);
+    }
+
+    #[test]
+    fn a_top_hat_keeps_what_the_opening_discards() {
+        // The other half of this change. A nucleus narrower than the background
+        // radius survives the subtraction at full contrast, while the slowly
+        // varying tissue it sits on is flattened to zero. Replacing the image
+        // with its opening — rather than subtracting it — does exactly the
+        // opposite, and looks entirely plausible while doing so.
+        let (width, height) = (41, 41);
+        let mut scratch = Scratch::new();
+        scratch.density = (0..width * height)
+            .map(|i| {
+                let (x, y) = (i % width, i / width);
+                // A broad ramp of tissue, plus one small dark nucleus.
+                let tissue = 0.2 + 0.002 * (x + y) as f32;
+                let nucleus = usize::abs_diff(x, 20) < 3 && usize::abs_diff(y, 20) < 3;
+                if nucleus { tissue + 1.0 } else { tissue }
+            })
+            .collect();
+
+        let params = Params {
+            background_radius: 8.0,
+            ..Params::default()
+        };
+        let before = scratch.density.clone();
+        subtract_background(&mut scratch, width, params);
+
+        assert!(
+            scratch.density[20 * width + 20] > 0.9,
+            "the nucleus keeps its contrast: {}",
+            scratch.density[20 * width + 20]
+        );
+        assert!(
+            scratch.density[5 * width + 5].abs() < 1e-6,
+            "the tissue ramp is flattened: {}",
+            scratch.density[5 * width + 5]
+        );
+        assert!(
+            before[5 * width + 5] > 0.2,
+            "and it was not flat to begin with"
         );
     }
 

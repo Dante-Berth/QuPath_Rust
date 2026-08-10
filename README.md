@@ -27,31 +27,42 @@ Five crates, each checked against fixtures recorded from a real QuPath build:
 | Crate | Does | Parity |
 | --- | --- | --- |
 | `qupath-objects` | Columnar detection/measurement table | recorded |
-| `qupath-watershed` | Marker-controlled flood, bucket queue | recorded |
-| `qupath-filters` | MIN/MAX rank filter, ImageJ Gaussian blur and convolution | recorded, 42 + 22 + 22 cases |
+| `qupath-watershed` | Marker-controlled flood, bucket queue, 4/8-connected labelling | recorded |
+| `qupath-filters` | MIN/MAX rank filter, ImageJ Gaussian blur, convolution, morphological reconstruction | recorded, 42 + 22 + 22 + 24 cases |
 | `qupath-slide` | Aperio SVS / tiled TIFF reader, pure Rust | recorded, 5 regions |
 | `qupath-pipeline` | Streams slide tiles through the above | colour deconvolution |
 
-`qupath-pipeline` reads real slide pixels and runs the ported stages over them
-with bounded memory, but it is **not** `WatershedCellDetection`: the maximum
-finding, ROI tracing and measurement are not ported. Its output is flooded
-basins, not cells, and its runtime is therefore not comparable with QuPath's.
+Every image-processing stage `WatershedCellDetection` runs **before** its
+watershed is now ported and pinned against output recorded from QuPath itself —
+deconvolution, background subtraction by reconstruction, the Laplacian of
+Gaussian, the regional maxima, the labelling and the flood. Nothing it runs
+**after** the watershed is: ROI tracing, the mean-intensity and area filters,
+the merge-and-split, and measurement are all absent. So the output is still
+flooded basins rather than cells, and the runtime is still not comparable with
+QuPath's.
 
-The Laplacian of Gaussian is now complete — blur and 3x3 convolution, both
-bit-identical to ImageJ — and **the basin count went up when it landed**, from
-42,966 to 91,957 against QuPath's 25,757 cells. That is the honest direction: a
-Laplacian is a second derivative, so it creates local maxima wherever the
-blurred image has structure, and the stage that discards them is the one still
-missing. QuPath uses `MorphologicalReconstruction.findRegionalMaxima`, an
-h-maxima transform whose whole job is to merge maxima not separated by a real
-descent. The count is not a score until that exists.
+The basin count is 88,424 against QuPath's 25,757 on the same region, and
+**the stage that was supposed to close that gap turned out not to**. The
+roadmap had said for two revisions that `findRegionalMaxima`'s prominence test
+was what would bring the count down. It is ported now, bit-identically, and it
+removes two markers — its threshold gates a maximum's *value*, not its
+prominence, and the prominence test itself only ever discards maxima sitting on
+an exact plateau, which a Laplacian of Gaussian of real pixels does not have.
+The gap is in the object-level filters that run after the watershed; the measured
+breakdown is in [docs/ROADMAP.md](docs/ROADMAP.md) §1.5.
 
-The deconvolution fixture is worth singling out, because it is the argument for
-this whole approach in miniature. It found that the port had been using the
-**DAB** stain vector under the name `EOSIN` — H-DAB deconvolution presented as
-H&E, a 52% error on the leading coefficient — and it had been producing a
-smooth, entirely plausible image the whole time. No test that did not compare
-against QuPath's own numbers could have found it.
+Two bugs the fixtures caught this round, both of which had been producing
+entirely plausible images:
+
+- The pipeline ran a **morphological opening in place of a top hat**. QuPath
+  estimates its background by opening by reconstruction and then *subtracts* it;
+  replacing the image with its opening keeps the background and discards the
+  nuclei, which is the opposite. Wrong operation, wrong radius (2 px against
+  16), wrong direction.
+- Earlier, the port had been using the **DAB** stain vector under the name
+  `EOSIN` — H-DAB deconvolution presented as H&E, a 52% error on the leading
+  coefficient. This is the argument for the whole approach in miniature: no test
+  that did not compare against QuPath's own numbers could have found either.
 
 **End-to-end cell detection is unchanged at QuPath's 15.87 s**, and will stay
 that way until the stages above exist. Component speedups and what they are
