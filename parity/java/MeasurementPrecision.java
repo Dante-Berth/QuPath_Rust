@@ -78,5 +78,9 @@ public class MeasurementPrecision {
         }
 
         System.out.print(out);
+        // See GaussianBlur.java. The flush must precede the exit; System.exit
+        // does not drain System.out's buffer.
+        System.out.flush();
+        System.exit(0);
     }
 }

@@ -100,6 +100,12 @@ public class GaussianBlur {
         out.append("\n  ]\n}\n");
         System.out.print(out);
         System.out.flush();
+        // ImageJ's parallel filters leave a cached pool of non-daemon workers
+        // behind — one per core — and never shut it down, so the JVM hangs here
+        // with the fixture already fully written. `record.sh` runs the
+        // recorders under `set -e` in sequence, so that hang stalled the whole
+        // script and nothing after this file was ever recorded.
+        System.exit(0);
     }
 
     /** Records one kernel and its running tail sum. */

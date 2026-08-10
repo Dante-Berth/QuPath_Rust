@@ -70,6 +70,11 @@ public class WatershedFlood {
         out.setLength(out.length() - 2);
         out.append("\n  ]\n}\n");
         System.out.print(out);
+        // See GaussianBlur.java. The flush is not optional once System.exit is
+        // here: exiting does not drain System.out's buffer, and a truncated
+        // fixture is worse than a hang because it looks like a recording.
+        System.out.flush();
+        System.exit(0);
     }
 
     private static float[] flat(int n, float v) {
