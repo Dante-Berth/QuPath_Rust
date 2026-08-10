@@ -44,10 +44,12 @@
 
 use rayon::prelude::*;
 
+mod convolve;
 mod gaussian;
 mod kernel;
 mod plan;
 
+pub use convolve::{Convolver, convolve, kernel_scale};
 pub use gaussian::{GaussianBlur, blur_gaussian, gaussian_kernel};
 pub use kernel::Kernel;
 
