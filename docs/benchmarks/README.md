@@ -12,6 +12,8 @@ RUSTFLAGS="-C target-cpu=x86-64-v3" \
     cargo run --release -p qupath-filters   --example previous_vs_current
 RUSTFLAGS="-C target-cpu=x86-64-v3" \
     cargo run --release -p qupath-watershed --example previous_vs_current
+RUSTFLAGS="-C target-cpu=x86-64-v3" \
+    cargo run --release -p qupath-pipeline  --example previous_vs_current
 ```
 
 `bench.sh` needs JDK 25+ on `PATH`, or `JAVA_HOME` pointing at one — see
@@ -299,6 +301,60 @@ is not decoration.
 
 **And it remains 11.6% of one stage.** End-to-end detection time is unchanged;
 see the summary below.
+
+## Colour deconvolution
+
+Recorded after the parity fixture in `ROADMAP.md` §1.1 corrected the stain
+vectors, so the figures below are for code that agrees with QuPath to 5.9e-8.
+Raw output in `rust-deconvolve-ab.txt` and `rust-pipeline-region.txt`.
+
+Matching QuPath meant accumulating in `f64` and narrowing to `f32` once, as
+`ColorTransformer.deconvolve` does, where the port had used `f32` throughout.
+That is a real cost: deconvolution went from 24-27% of pipeline time to
+**36.5%**, briefly making it the second-largest stage.
+
+The fix is the one this file's predecessor predicted, and it is also what QuPath
+does. `ColorDeconvolutionHelper.makeODLUT` builds a 256-entry optical-density
+table per channel, because the deconvolved value depends on the three channel
+bytes and nothing else. Folding each stain row's coefficient into the table as
+it is built removes the three multiplies as well as the three `log10` calls,
+leaving three loads and two adds per pixel over 6 KB of L1-resident table.
+
+Interleaved A/B, minimum of 200 repetitions, `target-cpu=x86-64-v3`, single
+thread, both output buffers allocated outside the timed region.
+
+| Tile | Per-pixel | Lookup table | Speedup | Throughput |
+| --- | ---: | ---: | ---: | ---: |
+| 256² | 0.953 ms | **0.036 ms** | **26.5x** | 1825 Mpx/s |
+| 512² | 3.808 ms | **0.131 ms** | **29.1x** | 2004 Mpx/s |
+| 1024² | 15.267 ms | **0.511 ms** | **29.9x** | 2053 Mpx/s |
+
+**The harness asserts bit equality, not a tolerance.** The folded table holds
+the same products, formed by the same multiply and summed in the same order, so
+the two paths must agree exactly; anything else would mean the fold had changed
+the arithmetic rather than just precomputing it.
+
+### This one did carry over
+
+The standing warning in this file is that a component measurement overstates
+what it is worth in place, and it has been right twice. Here it was not:
+
+| | Before | After |
+| --- | ---: | ---: |
+| Deconvolve, summed across threads | 0.768 s | **0.031 s** |
+| Share of pipeline stage time | 36.5% | **2.7%** |
+| Markers seeded | 211,728 | 211,728 |
+
+The 24.8x in place matches the 26-30x measured in isolation, because unlike
+buffer reuse this removes work rather than overhead, and the work removed was
+the whole stage. The identical marker count is the check that it removed only
+that: a deconvolution that got fast by computing something else would move it.
+
+Two things this does **not** say. It is not an end-to-end speedup — the
+pipeline's wall clock is not QuPath's 15.87 s and is not comparable with it, for
+the reasons in the summary below. And it must not be read against the 0.114 s
+recorded for the pipeline before §1.1, because that run was deconvolving with
+the wrong stain vector and so was not doing the same work.
 
 ## Where this leaves the pipeline
 

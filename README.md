@@ -22,8 +22,7 @@ to reproduce its behaviour, which makes it a derivative work.
 
 ## Status
 
-Five crates, four of them checked against fixtures recorded from a real QuPath
-build:
+Five crates, each checked against fixtures recorded from a real QuPath build:
 
 | Crate | Does | Parity |
 | --- | --- | --- |
@@ -31,13 +30,20 @@ build:
 | `qupath-watershed` | Marker-controlled flood, bucket queue | recorded |
 | `qupath-filters` | Circular-kernel MIN/MAX rank filter | recorded, 42 cases |
 | `qupath-slide` | Aperio SVS / tiled TIFF reader, pure Rust | recorded, 5 regions |
-| `qupath-pipeline` | Streams slide tiles through the above | **none yet** |
+| `qupath-pipeline` | Streams slide tiles through the above | colour deconvolution |
 
 `qupath-pipeline` reads real slide pixels and runs the ported stages over them
 with bounded memory, but it is **not** `WatershedCellDetection`: Gaussian blur,
 `MaximumFinder`, morphological reconstruction, ROI tracing and measurement are
 not ported. Its output is flooded basins, not cells, and its runtime is
 therefore not comparable with QuPath's.
+
+The deconvolution fixture is worth singling out, because it is the argument for
+this whole approach in miniature. It found that the port had been using the
+**DAB** stain vector under the name `EOSIN` — H-DAB deconvolution presented as
+H&E, a 52% error on the leading coefficient — and it had been producing a
+smooth, entirely plausible image the whole time. No test that did not compare
+against QuPath's own numbers could have found it.
 
 **End-to-end cell detection is unchanged at QuPath's 15.87 s**, and will stay
 that way until the stages above exist. Component speedups and what they are

@@ -15,8 +15,17 @@ Needs JDK 25+ and a built `qupath-core`. From the repository root:
 ./parity/record.sh
 ```
 
-That is enough when `java` on `PATH` is already 25 or newer. Otherwise point
-`JAVA_HOME` at a JDK 25 installation, which takes precedence:
+That records everything that needs no slide. The two recorders that do — the
+slide reader's own fixture, and the colour-deconvolution tile — need
+`qupath-extension-bioformats` on the classpath as well, and have their own
+script:
+
+```bash
+./parity/record-slide.sh            # defaults to data/CMU-1.svs
+```
+
+`record.sh` is enough when `java` on `PATH` is already 25 or newer. Otherwise
+point `JAVA_HOME` at a JDK 25 installation, which takes precedence:
 
 ```bash
 JAVA_HOME=/path/to/jdk-25 ./parity/record.sh
@@ -28,6 +37,12 @@ start — so the JDK must be installed before the first run. On Debian/Ubuntu,
 
 The script builds `qupath-core` if needed, resolves its runtime classpath from
 Gradle, runs each recorder in `java/`, and writes `fixtures/<name>.json`.
+
+A recorder that needs a slide must be excluded from `record.sh` and driven from
+`record-slide.sh` instead. `record.sh` truncates its target fixture before
+invoking a recorder, so running one there that cannot start does not merely
+fail — it empties a committed fixture and, under `set -e`, takes every recorder
+after it down too.
 
 ## Tolerances
 

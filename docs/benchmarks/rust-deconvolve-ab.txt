@@ -1,0 +1,6 @@
+H&E deconvolution, haematoxylin channel, minimum of 200 interleaved repetitions
+
+       tile     per-pixel  lookup table    speedup    throughput
+     256²      0.953 ms      0.036 ms     26.52x      1825 Mpx/s
+     512²      3.808 ms      0.131 ms     29.12x      2004 Mpx/s
+    1024²     15.267 ms      0.511 ms     29.89x      2053 Mpx/s

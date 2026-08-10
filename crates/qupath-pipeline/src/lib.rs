@@ -247,12 +247,15 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
     let labelled = AtomicU64::new(0);
     let width = level.tile_width as usize;
 
+    // CMU-1 carries no stain estimate of its own, so QuPath falls back to these
+    // defaults and this matches it. A slide that does carry one would need
+    // `Stains::from_two` with the values from its metadata.
+    let stains = Stains::h_and_e();
+
     let started = Instant::now();
     let outcomes: Result<Vec<()>, PipelineError> = tiles
         .par_iter()
         .map_init(Scratch::new, |scratch, &(column, row)| {
-            let stains = Stains::h_and_e();
-
             let mark = Instant::now();
             slide.read_tile_into(params.level, column, row, &mut scratch.rgb)?;
             clocks.decode.fetch_add(nanos(mark), Ordering::Relaxed);

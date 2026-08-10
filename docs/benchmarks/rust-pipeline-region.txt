@@ -1,17 +1,17 @@
 data/CMU-1.svs  level 0  region 27776,5952 4000x4000
 272 tiles, 17.8 Mpx, 20 threads
 
-wall clock: 0.157 s  (113.3 Mpx/s)
+wall clock: 0.062 s  (289.6 Mpx/s)
 
 stage totals, summed across threads:
-  decode         0.295 s   10.0%
-  deconvolve     0.707 s   23.9%
-  rank filter    0.302 s   10.2%
-  maxima         0.321 s   10.8%
-  watershed      1.334 s   45.1%
-  total          2.960 s
+  decode         0.185 s   16.5%
+  deconvolve     0.041 s    3.7%
+  rank filter    0.195 s   17.4%
+  maxima         0.163 s   14.5%
+  watershed      0.539 s   47.9%
+  total          1.124 s
 
-397822 markers seeded, 9028489 pixels labelled (50.6% of the region)
+211728 markers seeded, 5103096 pixels labelled (28.6% of the region)
 peak resident memory: 53 MB
 
 Note: basins, not cells. QuPath's MaximumFinder, Gaussian blur,

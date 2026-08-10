@@ -5,8 +5,8 @@ it can claim anything. Written to be picked up cold.
 
 ## State of play
 
-Five crates. Four have parity fixtures recorded from a real QuPath build; one
-does not and says so.
+Five crates, all five now with parity fixtures recorded from a real QuPath
+build.
 
 | Crate | Does | Parity | Measured |
 | --- | --- | --- | --- |
@@ -14,12 +14,17 @@ does not and says so.
 | `qupath-watershed` | Marker-controlled flood, bucket queue | `WatershedFlood.json`, 3 cases | queue 20-32x vs heap; flood 1.40x vs previous |
 | `qupath-filters` | Circular-kernel MIN/MAX rank filter | `RankFilterMinMax.json`, 42 cases | 3.1-9.7x vs ImageJ |
 | `qupath-slide` | Aperio SVS / tiled TIFF reader | `SlideRegion.json`, 5 regions | 4000x4000 region in 0.09 s |
-| `qupath-pipeline` | Streams tiles through the above | **none** | 17.8 Mpx in 0.114 s, 53 MB peak |
+| `qupath-pipeline` | Streams tiles through the above | `ColourDeconvolution*.json` | 17.8 Mpx in 0.062 s, 53 MB peak |
 
 **The end-to-end number is still QuPath's 15.87 s**, because the pipeline is not
 `WatershedCellDetection`. It runs real slide pixels through the ported stages
 and nothing else. Do not compare the two figures until §1 below is done; the
-pipeline currently produces 397,822 basins where QuPath detects 25,757 cells.
+pipeline currently produces 211,728 basins where QuPath detects 25,757 cells.
+
+The pipeline's own figure moved from 0.114 s to 0.062 s when §1.1 was done, and
+**that is not a speedup of the same work**: the earlier run was deconvolving
+with the wrong stain vector, so it was computing something else. The parts of it
+that are comparable are in `docs/benchmarks/README.md`.
 
 Reproduce everything:
 
@@ -27,6 +32,8 @@ Reproduce everything:
 cargo test --workspace
 RUSTFLAGS="-C target-cpu=x86-64-v3" cargo bench --workspace
 RUSTFLAGS="-C target-cpu=x86-64-v3" cargo run --release -p qupath-pipeline --example region
+RUSTFLAGS="-C target-cpu=x86-64-v3" \
+    cargo run --release -p qupath-pipeline --example previous_vs_current
 ./parity/record.sh && ./parity/record-slide.sh && ./parity/bench.sh   # needs JDK 25
 ```
 
@@ -38,19 +45,38 @@ Everything else on this list is optimisation of things that already work. This
 is the item that makes an end-to-end claim possible at all. In dependency
 order:
 
-### 1.1 Colour deconvolution parity
+### 1.1 Colour deconvolution parity — **done**
 
-`qupath-pipeline::Stains` implements Ruifrok–Johnston with QuPath's default H&E
-vectors, read from source. **No fixture pins it.** That is the only stage in
-the workspace making an unverified numerical claim.
+Pinned by `ColourDeconvolution.json` (1000 RGB values x 2 stain sets, no slide
+needed) and `ColourDeconvolutionTile.json` (a real 64x64 tile), recorded from
+`ColorTransformer.getTransformedPixels` — the call `IJTools.colorDeconvolve`
+makes for `WatershedCellDetection`. Worst relative difference **5.9e-8**,
+against a `1e-5` tolerance.
 
-- Record `ColorDeconvolutionStains` output for a set of RGB values, and for a
-  real tile, via a new `parity/java/ColourDeconvolution.java`.
-- Tolerance: relative `1e-5` per §5. Both sides are `f32` arithmetic on `f64`
-  constants, so this should be close to exact.
-- Watch for: QuPath reads per-image stain vectors from the image metadata when
-  present, and only falls back to defaults otherwise. `CMU-1.svs` has none, but
-  the API should take stains rather than assume them.
+**The fixture found a real bug on its first run.** The `EOSIN` constant was the
+**DAB** vector, so the pipeline had been running H-DAB deconvolution and calling
+it H&E. QuPath's eosin is `[0.2159, 0.8012, 0.5581]` from AMIDA13, not Ruifrok
+and Johnston's `[0.07, 0.99, 0.11]`, and not the DAB vector that sits three
+lines away from it in `StainVector.java`. The error was 52% on the leading
+haematoxylin coefficient — 1.2078 against QuPath's 1.8383 — and produced a
+smooth, plausible single-channel image the entire time. Nothing downstream could
+have caught it. The marker count fell from 397,822 to 211,728 when it was fixed.
+
+Three smaller corrections came with it, all confirmed against the fixture:
+
+- Constants are QuPath's **raw** vectors, normalised at run time. They had been
+  stored pre-normalised and rounded to three decimals, which is a ~1e-4 error
+  and would not have met the tolerance on its own.
+- The result is **no longer clamped** at zero. QuPath's `deconvolve` does not
+  clamp, and a stain amount is legitimately negative over most of a slide's
+  background; clamping flattened that to a plateau of zeros, which is exactly
+  the sort of thing the maximum finder in §1.3 will be sensitive to.
+- Arithmetic is `f64` accumulated and narrowed to `f32` once, which is what
+  QuPath does. It had been `f32` throughout.
+
+`Stains::from_two` now takes stain vectors and a per-channel white point, so a
+slide carrying its own estimate can be deconvolved the way QuPath would.
+`CMU-1.svs` carries none and falls back to the defaults, as QuPath does.
 
 ### 1.2 Gaussian blur
 
@@ -148,15 +174,17 @@ already ported.
    coarser pyramid level where the analysis permits, tissue detection to skip
    background tiles entirely (the profiled region is 99% tissue; a whole slide
    is mostly glass), and early rejection before the expensive stages.
-2. **Deconvolution is now the second-largest stage** at 24-27% of pipeline
-   time, above the rank filter. It is a per-pixel 3x3 matrix multiply plus
-   three `log10` calls. A lookup table over the 256 possible byte values would
-   remove the logarithms entirely — 768 entries, L1-resident. This is the
-   cheapest real win currently visible, and it was not visible before the
-   pipeline existed.
-3. **The watershed is 43-45% of pipeline time**, far above the 29.4% the JFR
-   profile attributed to it in QuPath. Worth re-profiling in place rather than
-   assuming the old share still holds.
+2. ~~Deconvolution~~ — **done**, alongside §1.1, because matching QuPath's
+   `f64` accumulation had pushed the stage to 36.5% of pipeline time. The
+   lookup table this list predicted is what QuPath itself does
+   (`makeODLUT`), and folding each row's coefficient into the table as it is
+   built removes the three multiplies as well as the three logarithms. The
+   stage went from 0.768 s to 0.031 s summed across threads, 36.5% to under 4%.
+   It is now the smallest stage in the pipeline and not worth revisiting.
+3. **The watershed is 48-49% of pipeline time**, far above the 29.4% the JFR
+   profile attributed to it in QuPath, and it grew as a share when
+   deconvolution shrank. Worth re-profiling in place rather than assuming the
+   old share still holds. This is now the largest lever after §0.1.
 4. **SIMD**, last, per §0.5 — and only behind a scalar fallback with a
    differential test.
 
@@ -180,8 +208,21 @@ not hypothetical ones. Two of them were hit again this session.
   interleaved in one process, take the minimum, and assert both produce
   identical output on every timed iteration. See the `previous_vs_current`
   examples.
-- **Plausible wrong output is the real risk.** Both bugs found this session —
-  the transposed stain matrix and the strict maximum test — produced output
-  that looked entirely reasonable. The colour bug was caught only by comparing
-  against QuPath's own decode; the maxima bug only by counting what was found.
-  Assert on counts and on recorded output, never on appearance.
+- **Plausible wrong output is the real risk.** Three bugs now — the transposed
+  stain matrix, the strict maximum test, and the DAB vector stored under the
+  name `EOSIN` — produced output that looked entirely reasonable. Every one was
+  caught by comparing against something QuPath recorded, or by counting what
+  was found; none was visible in the image. Assert on counts and on recorded
+  output, never on appearance.
+- **Reading the source is not recording a run.** §1.1's constants came from
+  QuPath's source and were still wrong, because the file holds three similar
+  triples and the port took the wrong one. Every remaining item in §1 is
+  another set of constants and conventions read the same way. Record the
+  fixture before believing the port, not after it looks right.
+- **A recorder that needs a slide must not run without one.** `record.sh`
+  truncated its target fixture before invoking each recorder, then ran
+  `SlideRegion` — which needs Bio-Formats and a slide — with neither, so under
+  `set -e` it emptied a committed fixture and aborted before the recorders
+  after it. The documented `record.sh && record-slide.sh` never reached the
+  second command. `SlideRegion` is now skipped there, where it was always
+  meant to be.
