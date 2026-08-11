@@ -13,17 +13,24 @@
 //!     bp.fill(r);
 //! ```
 //!
-//! Needs no slide. The fixture also carries the `edm`, `maxima` and `segmented`
-//! checkpoints, which belong to `toWatershed` and are checked once that lands;
-//! this file asserts the `merged` one.
+//! followed by `new EDM().toWatershed(bp)`. Needs no slide.
 //!
-//! Masks are compared pixel for pixel, and the region count alongside them: a
-//! merge that agrees everywhere except on whether two blobs touch produces a
-//! mask off by one pixel and an object count off by one, and the count is the
-//! number the whole stage exists to change.
+//! Four checkpoints are asserted, not one, because each is a separable piece of
+//! work and a single end-to-end mask would say only that something disagrees:
+//!
+//! - `merged` — after the dilation, the AND and the hole fill;
+//! - `edm` — the float distance map, compared **by its bits**;
+//! - `maxima` — the segmentation `MaximumFinder` derives from it;
+//! - `segmented` — the mask `toWatershed` leaves behind.
+//!
+//! Masks are compared pixel for pixel, and two counts are asserted alongside
+//! them: the merged region count, and the object count after the split. The
+//! second is the number the whole stage exists to change, and a mask can agree
+//! everywhere and still trace to a different number of objects if one pixel of
+//! a segmentation line is misplaced.
 
 use qupath_pipeline::{FOREGROUND, Merger};
-use qupath_watershed::{DistanceMap, RegionTracer};
+use qupath_watershed::{DistanceMap, RegionTracer, Segmenter};
 
 fn fixture() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -90,25 +97,27 @@ fn matches_qupath_merge() {
 
     let mut count = 0usize;
     let mut merged_seen = 0u32;
+    let mut objects_seen = 0u32;
     let mut at = 0usize;
     // One merger and one tracer across every case: buffers left dirty by a
     // previous case would show up here and nowhere else.
     let mut merger = Merger::new();
     let mut tracer = RegionTracer::new();
     let mut distances = DistanceMap::new();
+    let mut segmenter = Segmenter::new();
     while let Some(start) = cases[at..].find("{\"name\": \"") {
         let from = at + start;
         let (name, next) = between(cases, "\"name\": \"", "\"", from);
         let (width, next) = scalar(cases, "width", next);
         let (height, next) = scalar(cases, "height", next);
         let (expected_merged, next) = scalar(cases, "mergedCount", next);
-        let (_, next) = scalar(cases, "objects", next);
+        let (expected_objects, next) = scalar(cases, "objects", next);
         let (binary_text, next) = between(cases, "\"binary\": [", "]", next);
         let (log_text, next) = between(cases, "\"logMask\": [", "]", next);
         let (merged_text, next) = between(cases, "\"merged\": [", "]", next);
         let (edm_text, next) = between(cases, "\"edm\": [", "]", next);
-        let (_, next) = between(cases, "\"maxima\": [", "]", next);
-        let (_, next) = between(cases, "\"segmented\": [", "]", next);
+        let (maxima_text, next) = between(cases, "\"maxima\": [", "]", next);
+        let (segmented_text, next) = between(cases, "\"segmented\": [", "]", next);
         at = next;
 
         let (width, height) = (index(width), index(height));
@@ -166,6 +175,60 @@ fn matches_qupath_merge() {
             );
         }
 
+        // The segmentation MaximumFinder derives from that distance map, and
+        // then the mask toWatershed leaves. Both, because the first is where a
+        // disagreement is legible and the second is what detection consumes.
+        let their_maxima = ints(maxima_text);
+        let their_segmented = ints(segmented_text);
+        assert_eq!(
+            their_maxima.len(),
+            width * height,
+            "{name}: recorded maxima"
+        );
+        assert_eq!(
+            their_segmented.len(),
+            width * height,
+            "{name}: recorded segmentation"
+        );
+
+        segmenter.find_maxima(&ours, width);
+        for (at, (&theirs, &mine)) in their_maxima
+            .iter()
+            .zip(segmenter.segmentation())
+            .enumerate()
+        {
+            assert_eq!(
+                u32::from(mine),
+                theirs,
+                "{name}: pixel ({}, {}) segments to {mine}, QuPath has {theirs}",
+                at % width,
+                at / width
+            );
+        }
+
+        segmenter.segment(&ours, &mut binary, width);
+        for (at, (&theirs, &mine)) in their_segmented.iter().zip(&binary).enumerate() {
+            assert_eq!(
+                u32::from(mine),
+                theirs,
+                "{name}: pixel ({}, {}) splits to {mine}, QuPath has {theirs}",
+                at % width,
+                at / width
+            );
+        }
+
+        // The number the whole stage exists to change. A mask can match
+        // everywhere and still be traced into a different number of objects if
+        // a single line pixel is misplaced, so this is asserted separately.
+        let mut split_regions = vec![0u32; binary.len()];
+        let objects = tracer.trace_mask_into(&binary, &mut split_regions, width);
+        assert_eq!(
+            u64::from(objects),
+            index(expected_objects) as u64,
+            "{name}: objects after the split"
+        );
+        objects_seen += objects;
+
         count += 1;
         merged_seen += found;
     }
@@ -174,5 +237,12 @@ fn matches_qupath_merge() {
     assert!(
         merged_seen > 30,
         "the fixture should merge a few dozen regions in total, not {merged_seen}"
+    );
+    // The split must do real work across the fixture as a whole: it separates
+    // 35 merged regions into 92 objects. A port that split nothing would pass
+    // every per-case mask comparison on the cases that are single blobs.
+    assert!(
+        objects_seen > merged_seen * 2,
+        "the split should roughly double the object count, {merged_seen} -> {objects_seen}"
     );
 }
