@@ -92,28 +92,66 @@ impl RegionTracer {
             regions.len(),
             "values and regions must describe the same image"
         );
+        self.trace_selected(regions, width, |at| selected(values[at], lower, upper))
+    }
+
+    /// Traces the filled regions of the non-zero pixels of `mask` into
+    /// `regions`, returning how many were found.
+    ///
+    /// Detection reaches this on its *second* call to `getFilledPolygonROIs`,
+    /// the one that fills the holes of the merged binary before the shape split:
+    ///
+    /// ```java
+    /// bp.setThreshold(127, Double.POSITIVE_INFINITY, ImageProcessor.NO_LUT_UPDATE);
+    /// List<PolygonRoi> rois2 = RoiLabeling.getFilledPolygonROIs(bp, Wand.FOUR_CONNECTED);
+    /// ```
+    ///
+    /// `[127, inf)` over a mask holding only 0 and 255 is exactly "non-zero", so
+    /// this is the same trace as [`RegionTracer::trace_into`] against a cheaper
+    /// image — and it is the same code, because the two differing by a
+    /// hand-written flood is how the pair drifts apart.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the same conditions as [`RegionTracer::trace_into`].
+    pub fn trace_mask_into(&mut self, mask: &[u8], regions: &mut [u32], width: usize) -> u32 {
+        assert_eq!(
+            mask.len(),
+            regions.len(),
+            "the mask and regions must describe the same image"
+        );
+        self.trace_selected(regions, width, |at| mask[at] != 0)
+    }
+
+    /// The trace itself, over whatever `selected` calls foreground.
+    fn trace_selected(
+        &mut self,
+        regions: &mut [u32],
+        width: usize,
+        selected: impl Fn(usize) -> bool,
+    ) -> u32 {
         assert!(width > 0, "width must be non-zero");
         assert_eq!(
-            values.len() % width,
+            regions.len() % width,
             0,
             "width must divide the buffer length"
         );
         assert!(
-            u32::try_from(values.len()).is_ok(),
+            u32::try_from(regions.len()).is_ok(),
             "image has more pixels than a u32 index can address"
         );
 
-        let height = values.len() / width;
+        let height = regions.len() / width;
         regions.fill(0);
         // Cleared rather than merely resized: a stamp left over from a previous
         // tile collides with this tile's low region numbers, and the failure is
         // a hole silently declared already-escaped.
         self.escaped.clear();
-        self.escaped.resize(values.len(), 0);
+        self.escaped.resize(regions.len(), 0);
 
         let mut found = 0u32;
-        for start in 0..values.len() {
-            if regions[start] != 0 || !selected(values[start], lower, upper) {
+        for start in 0..regions.len() {
+            if regions[start] != 0 || !selected(start) {
                 continue;
             }
             found += 1;
@@ -139,7 +177,7 @@ impl RegionTracer {
                         continue;
                     };
                     let neighbour = ny * width + nx;
-                    if regions[neighbour] != 0 || !selected(values[neighbour], lower, upper) {
+                    if regions[neighbour] != 0 || !selected(neighbour) {
                         continue;
                     }
                     regions[neighbour] = found;
