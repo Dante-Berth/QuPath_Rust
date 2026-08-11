@@ -450,23 +450,66 @@ provably in what remains:
 | --- | --- |
 | `getFilledPolygonROIs`, holes filled | 88,424 markers -> 88,423 regions, **measured** |
 | mean intensity `> 0.1` on `ipToMeasure` | 66,739 survive, 24.5% dropped, **measured** |
-| `bp.filter(MAX)`, AND with the thresholded LoG | merges adjacent candidates; not measured |
-| `watershedPostProcess`: EDM watershed, splits by shape | splits some back; not measured |
-| area outside 10–400 µm², *on the objects that produces* | not measurable before the two above |
+| `bp.filter(MAX)`, AND with the thresholded LoG | **ported**, bit-identical; merges adjacent candidates |
+| `new EDM().toWatershed(bp)`: split by shape | **ported**, bit-identical; splits some back |
+| `refineBoundary` — **this table did not know it existed**; see below | not ported, not measured |
+| area outside 10–400 µm², *on the objects that produces* | not measurable before `refineBoundary` |
 | tile seams (§2) | 66,739 -> **48,045**, 28% dropped, **measured** |
 | QuPath | **25,757** |
+
+On the fixture's realistic case — random pixels through the whole real chain —
+the merge and the split together take **87 candidates to 49 objects, a 1.78x
+reduction**: the merge collapses 87 into 13 blobs and the split cuts those back
+into 49. That is the right order of magnitude for the 2.6x still outstanding, and
+it is the first evidence that the remaining gap is where this table says it is.
+It is *not* a pipeline number — see step 2b, which has to land before the
+pipeline can be asked.
+
+### The correction this file owes, again: §1.5b's step list was missing a stage
+
+The list below said the area filter runs on what the shape split leaves. **It
+does not.** Between them stands `refineBoundary`, and reading the call site
+rather than this list is what found it:
+
+```java
+if (refineBoundary && sigma > 1.5) {
+    FloatProcessor fpBoundaryCleanup = (FloatProcessor)fpDetection.duplicate();
+    fpBoundaryCleanup.blurGaussian(1);
+    fpBoundaryCleanup.convolve(new float[]{0, -1, 0, -1, 4, -1, 0, -1, 0}, 3, 3);
+    ByteProcessor bp2 = SimpleThresholding.thresholdAbove(fpBoundaryCleanup, 0.0);
+    bp2.copyBits(bp, 0, 0, Blitter.MIN);
+    bp.filter(ByteProcessor.MIN);
+    bp.copyBits(bp2, 0, 0, Blitter.MAX);
+}
+```
+
+Three things make this load-bearing rather than a detail:
+
+- **It fires on CMU-1.** `refineBoundary` is a hard-coded `true` with a `TODO`
+  beside it, and `sigma` is `1.5 / 0.4990 = 3.006`, comfortably over the 1.5.
+- **It needs an image the pipeline does not keep.** `fpDetection` is the *raw*
+  deconvolved channel — before the median, before the background subtraction,
+  before the blur. That is a third distinct image, and it is neither `log` nor
+  `to_measure`. §1.5a had already found that the mean is measured on an image
+  nothing else uses; this is a second one.
+- **It is a second Gaussian and a second Laplacian** over the whole tile, at
+  sigma 1. On a memory-bandwidth-bound pipeline that is not free, and it is not
+  in any cost estimate in this file.
 
 Order to port in, cheapest evidence first:
 
 1. ~~**Tile seams (§2)**~~ — **done**, and it was worth 1.33x of the gap. See §2.
-2. **Merge and shape split**, which needs a Euclidean distance map and a second
-   watershed. Both halves change object identity, not only count, so this is
-   where a Dice or IoU comparison first becomes meaningful. **Read the call site
-   before writing anything**: this list has now been wrong about three stages in
-   a row, and this entry was written from the same summary that produced the
-   §1.5 and §2 errors.
-3. **The area filter**, which is a histogram pass over whatever step 2 leaves —
-   trivial once it has objects to run on, and meaningless before.
+2. ~~**Merge and shape split**~~ — **done**, bit-identical, pinned by
+   `MergeAndSplit.json` at four checkpoints: the merged mask, the float EDM, the
+   `MaximumFinder` segmentation and the mask `toWatershed` leaves. Six mutations
+   were tried against it and five fail. The distance map is exact rather than a
+   chamfer, and `isEDM = true` is what makes the maxima grouping work on
+   plateaus.
+2b. **`refineBoundary`**, above. Not optional, not in the old plan, and it needs
+   the raw detection channel plumbed through to it.
+3. **The area filter**, a mean and a pixel count over whatever step 2b leaves.
+   Note its mean test is `<`, where the first filter's is `<=`. Meaningless
+   before 2b, since it runs on those objects.
 4. **ROI vertices.** The masks match now; the polygons do not exist. QuPath's
    `PathObject` geometry is the Wand's vertex list, so exporting objects needs
    the contour itself and not just what it encloses. Note §2 already needs a
@@ -474,6 +517,10 @@ Order to port in, cheapest evidence first:
 5. **Measurements**, into the columnar table `qupath-objects` already provides.
 
 A fixture for each, recorded the same way as everything above.
+
+**The merge and the split are ported but not wired into the pipeline.** Running
+them without 2b would report a count QuPath never computes, and this file has
+enough measured-the-wrong-thing history already. The wiring lands with 2b.
 
 ### 1.6 The claim
 

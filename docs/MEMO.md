@@ -32,15 +32,22 @@ equivalent code is 1–3x and that is not the lever.
 
 ## 2. Where it actually stands
 
-**The detection chain is ported through the first object filter, and the tiling
-around it.** Deconvolution, background subtraction by reconstruction, Gaussian
-blur, Laplacian, regional maxima, labelling, watershed flood, filled-region
-tracing, the mean-intensity filter, the tile grid and the overlap resolution.
-Every one is pinned by a recorded fixture and most are bit-identical.
+**The detection chain is ported through the shape split, and the tiling around
+it.** Deconvolution, background subtraction by reconstruction, Gaussian blur,
+Laplacian, regional maxima, labelling, watershed flood, filled-region tracing,
+the mean-intensity filter, the tile grid, the overlap resolution, and now the
+merge, the Euclidean distance map and `MaximumFinder`'s segmentation. Every one
+is pinned by a recorded fixture and most are bit-identical.
 
-**It is not `WatershedCellDetection` yet.** Missing: the merge and shape split,
-the area filter that runs on *those* objects, ROI vertices, and the measurement
-tail. Until those land there is no end-to-end claim to make.
+**It is not `WatershedCellDetection` yet.** Missing: `refineBoundary`, the area
+filter that runs on *its* objects, ROI vertices, and the measurement tail. Until
+those land there is no end-to-end claim to make.
+
+**The merge and the split are ported but not wired in**, deliberately: they sit
+between the intensity filter and `refineBoundary`, and running them without it
+would report a count QuPath never computes. On the fixture's realistic case they
+take 87 candidates to 49 objects — a 1.78x reduction, against the 2.6x still
+outstanding.
 
 **The count**, on the profiled 4000x4000 region of CMU-1:
 
@@ -115,7 +122,7 @@ fix, two negative results, and two soundness fixes.
 
 ## 4. How this project goes wrong
 
-The same failure has now happened five times, and it is worth recognising by
+The same failure has now happened six times, and it is worth recognising by
 shape rather than by instance:
 
 > **A plausible reading of the source, never checked against a run.**
@@ -131,6 +138,14 @@ shape rather than by instance:
   and the pipeline was using the TIFF's 256 px storage tiles — every count
   inflated 1.33x, and no per-stage fixture could see it, because each stage was
   bit-identical *on the tile it was given*.
+- `MaximumFinder` was written off **twice** as something detection never calls.
+  It does: `EDM.toWatershed` reaches it, and it is what splits the nuclei. The
+  first reading was right about the maxima stage and wrong about the program.
+- The roadmap's own step list said the area filter runs on what the shape split
+  leaves. Between them stands `refineBoundary` — a second Gaussian and a second
+  Laplacian, on an image the pipeline does not keep — guarded by a hard-coded
+  `true` and a `sigma > 1.5` that CMU-1's 3.006 clears. A list of remaining
+  stages is not a reading of the source, and this one had a stage missing.
 
 Every one produced entirely reasonable-looking output. The defences that actually
 worked, in order: recording a fixture from a real QuPath run, counting objects,
@@ -145,8 +160,14 @@ plans that were wrong.
 
 ## 5. What to distrust right now
 
-- **`ROADMAP.md`'s remaining plans** — §1.5b steps 2 to 5. Written from a summary
-  of the source, same as the three that turned out wrong.
+- **`ROADMAP.md`'s remaining plans** — §1.5b steps 2b to 5. Written from a
+  summary of the source, same as the four that turned out wrong. Step 2 has
+  since been ported and its entry was accurate; the list it sat in was still
+  missing a whole stage.
+- **The merge and split are unwired**, so nothing measures them end to end yet.
+  Their fixtures are strong — four checkpoints, pixel-exact, five of six
+  mutations failing — but a stage that no pipeline run exercises has only ever
+  been checked on 13 small images.
 - **`resolve_overlaps` has no QuPath-recorded fixture.** Its eight tests use
   hand-built candidates. Given the record above, that is the weakest thing in the
   tree.
