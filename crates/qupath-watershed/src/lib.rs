@@ -37,10 +37,12 @@
 //! assert_eq!(labels[9], 2.0);
 //! ```
 
+mod edm;
 mod label;
 mod queue;
 mod regions;
 
+pub use edm::DistanceMap;
 pub use label::{Labeller, label_image};
 pub use queue::{HierarchicalQueue, LEVELS, PixelIndex};
 pub use regions::{RegionTracer, filled_regions};

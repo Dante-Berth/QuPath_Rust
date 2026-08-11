@@ -23,7 +23,7 @@
 //! number the whole stage exists to change.
 
 use qupath_pipeline::{FOREGROUND, Merger};
-use qupath_watershed::RegionTracer;
+use qupath_watershed::{DistanceMap, RegionTracer};
 
 fn fixture() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -35,6 +35,15 @@ fn between<'a>(haystack: &'a str, start: &str, end: &str, from: usize) -> (&'a s
     let open = haystack[from..].find(start).expect(start) + from + start.len();
     let close = haystack[open..].find(end).expect(end) + open;
     (&haystack[open..close], close)
+}
+
+fn floats(text: &str) -> Vec<f32> {
+    if text.trim().is_empty() {
+        return Vec::new();
+    }
+    text.split(',')
+        .map(|v| v.trim().parse().expect("float"))
+        .collect()
 }
 
 fn ints(text: &str) -> Vec<u32> {
@@ -86,6 +95,7 @@ fn matches_qupath_merge() {
     // previous case would show up here and nowhere else.
     let mut merger = Merger::new();
     let mut tracer = RegionTracer::new();
+    let mut distances = DistanceMap::new();
     while let Some(start) = cases[at..].find("{\"name\": \"") {
         let from = at + start;
         let (name, next) = between(cases, "\"name\": \"", "\"", from);
@@ -96,7 +106,7 @@ fn matches_qupath_merge() {
         let (binary_text, next) = between(cases, "\"binary\": [", "]", next);
         let (log_text, next) = between(cases, "\"logMask\": [", "]", next);
         let (merged_text, next) = between(cases, "\"merged\": [", "]", next);
-        let (_, next) = between(cases, "\"edm\": [", "]", next);
+        let (edm_text, next) = between(cases, "\"edm\": [", "]", next);
         let (_, next) = between(cases, "\"maxima\": [", "]", next);
         let (_, next) = between(cases, "\"segmented\": [", "]", next);
         at = next;
@@ -136,6 +146,25 @@ fn matches_qupath_merge() {
             index(expected_merged) as u64,
             "{name}: merged region count"
         );
+
+        // The distance map the shape split runs on, compared bit for bit: a
+        // chamfer would be wrong by a percent or two, would look right, and
+        // would move the saddle between two touching nuclei by a pixel.
+        let their_edm = floats(edm_text);
+        // Asserted rather than left to `zip`, which would compare nothing at
+        // all and pass if the fixture ever stopped carrying this array.
+        assert_eq!(their_edm.len(), width * height, "{name}: recorded EDM");
+        let mut ours = vec![0.0f32; binary.len()];
+        distances.make_float_edm(&binary, &mut ours, width);
+        for (at, (&theirs, &mine)) in their_edm.iter().zip(&ours).enumerate() {
+            assert_eq!(
+                mine.to_bits(),
+                theirs.to_bits(),
+                "{name}: pixel ({}, {}) is {mine} from background, QuPath has {theirs}",
+                at % width,
+                at / width
+            );
+        }
 
         count += 1;
         merged_seen += found;
