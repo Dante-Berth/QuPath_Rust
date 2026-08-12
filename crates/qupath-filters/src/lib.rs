@@ -384,6 +384,57 @@ fn fold_row(column: &mut [f32], row: &[f32]) {
     }
 }
 
+/// Half-width at or above which the block scheme beats shifting the row.
+///
+/// **Measured, not derived from the pass counts.** Counting passes says 3: the
+/// shift path costs `2 * half_width + 1` of them and the block scheme four, so
+/// they cross at 2. That comparison assumes a pass is a pass, and on a build
+/// with AVX2 they are not — the shift path is a slice-to-slice maximum that
+/// vectorises fully, while the block scheme carries a serial running maximum
+/// along each block and speeds up about 3.1x against the fold's 10.7x. Seven
+/// cheap vector passes beat four with a dependency in them.
+///
+/// Swept on a real tile with `erode_cost`, interleaved, five runs at each
+/// setting, seconds for the radius-16.03 erosion:
+///
+/// | threshold | 3 | 6 | **7** | 8 | 9 | 11 | 13 | 17 |
+/// | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+/// | seconds | .1159 | .1153 | **.1152** | .1159 | .1178 | .1198 | .1255 | .1436 |
+///
+/// Seven was lowest in ten of ten interleaved runs against 3, about 0.6%, and
+/// the curve turns sharply upwards after 9. For the two radii detection uses
+/// this moves the `half_width` 5 and 1 rectangles of radius 16.03, and the 2
+/// of radius 32.06, onto the shift path. Both paths compute the same thing —
+/// `matches_the_literal_definition_over_many_shapes` covers radii either side
+/// of any threshold, and the suite passes with this set anywhere from 1 to 20.
+///
+/// **The sweep has to vary the threshold inside one binary**, which is why
+/// [`block_threshold`] reads it from the environment rather than this constant
+/// being the only control. Two separately built binaries of *identical* source
+/// measured 0.1250 and 0.1160 s here — **7.7% apart on no semantic difference
+/// at all**, from code layout alone. That is an order of magnitude more than
+/// the effect being measured, so an A/B across two builds cannot see a change
+/// of this size and the interleaved within-binary form is the only one that
+/// can. See ROADMAP §5.
+const BLOCK_THRESHOLD: usize = 7;
+
+/// The block-scheme threshold, overridable for the sweep that chose it.
+///
+/// Reads `QUPATH_RANK_BLOCK_THRESHOLD` once. Present so the crossover can be
+/// re-measured within a single binary — see [`BLOCK_THRESHOLD`] for why that
+/// matters more than it sounds — and so the next person to touch the two
+/// horizontal paths can check the setting rather than assume it.
+fn block_threshold() -> usize {
+    use std::sync::OnceLock;
+    static THRESHOLD: OnceLock<usize> = OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        std::env::var("QUPATH_RANK_BLOCK_THRESHOLD")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(BLOCK_THRESHOLD)
+    })
+}
+
 /// `out[x] = max(out[x], max over dx in [-half_width, half_width] of
 /// column[clamp(x + dx)])`, or that maximum written straight to `out[x]` when
 /// `write` is set.
@@ -403,10 +454,11 @@ fn horizontal_max(
 ) {
     // Two ways to do this, and the cheaper one depends on the window. Shifting
     // the row costs `2 * half_width + 1` passes; the block scheme below costs
-    // four regardless of width. They cross at `half_width == 2` (five passes
-    // against four), so 3 is the first width where the block scheme is clearly
-    // ahead — and small windows dominate at the radii cell detection uses.
-    if half_width < 3 {
+    // four regardless of width. Passes are not interchangeable, though — see
+    // `BLOCK_THRESHOLD`, where the crossover is measured rather than counted.
+    // A `OnceLock` load per rectangle per row, against a pass over the whole
+    // row either side of it.
+    if half_width < block_threshold() {
         // The shift path folds one shifted copy at a time, so only the first of
         // those may write; the rest accumulate on top of it.
         let mut write = write;

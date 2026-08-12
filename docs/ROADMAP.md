@@ -788,13 +788,92 @@ scheduling artefact. `erode_cost` says what it is made of, on a real tile:
 | the erosion, radius 16.03 | 19.30 |
 | its 33 folded source rows alone | 2.69 |
 
-**86% of it is the horizontal maxima**, not the vertical folds — thirteen
-rectangles, each costing four passes along the row (the extended copy, the
-prefix scan, the suffix scan, the combine) plus the negated whole-image copy
-that MIN takes on the way in. Pairing the prefix and suffix chains so four run
-in flight instead of one was tried and is worth **1.00x**, so it is throughput
-and not latency: the passes themselves are the cost, and fewer passes per
-rectangle is the change to try. Nobody has.
+Re-measured this session at `-C target-cpu=x86-64-v3`, which is the flag every
+benchmark in this file is quoted at, on the same 2120² real tile: **25.87
+ns/px against a vertical floor of 3.53**, so the filter costs **7.32x its
+floor** rather than the 2.82x the same probe reports on a default build. The
+gap between those two ratios is the whole point — the vertical fold is a
+slice-to-slice maximum that AVX2 speeds up **10.7x**, while the horizontal
+half, which carries a serial running maximum through each block, speeds up
+**3.1x** (68.74 to 22.34 ns/px). **The horizontal half is not merely most of
+the stage, it is the half that does not vectorise.** That is a sharper
+statement of the target than "86%" — though 86% is what it still comes to on
+the AVX2 build, 22.34 of 25.87 ns/px, so the share this file already recorded
+was right even though the ratio beside it was not.
+
+**86% of it is the horizontal maxima**, not the vertical folds — **eleven**
+rectangles (this file said thirteen; `Plan::for_radius(16.03)` produces eleven,
+of half-widths 16, 15, 14, 13, 12, 11, 10, 9, 7, 5 and 1), each costing four
+passes along the row (the extended copy, the prefix scan, the suffix scan, the
+combine) plus the negated whole-image copy that MIN takes on the way in.
+Pairing the prefix and suffix chains so four run in flight instead of one was
+tried and is worth **1.00x**, so it is throughput and not latency: the passes
+themselves are the cost.
+
+### "Fewer passes per rectangle" was the wrong place to look, and here is why
+
+This file named that as the change to try. It has now been worked out rather
+than tried, and there is no slack in it. Three arguments, and each closes off
+one of the ways in:
+
+1. **Eleven rectangles is the minimum for an exact cover.** Grayscale MAX is
+   monotone in the neighbourhood, so a cover that reaches any pixel outside the
+   disc inflates the answer — an over-approximation is not merely inexact, it
+   is wrong in the direction that matters. Every row `dy` must therefore be
+   covered to exactly `hw[dy]`, and a rectangle contributes its full half-width
+   to every row it touches, so the widest rectangle touching row `dy` has
+   half-width exactly `hw[dy]`. Distinct half-widths force distinct rectangles.
+   Radius 16.03 has eleven of them, and `Plan` already emits eleven.
+2. **The four passes cannot be shared between rectangles.** van Herk requires
+   the block length to equal the window length — with blocks of 33 and a window
+   of 31, `max(suffix[l], prefix[r])` over-reaches whenever both ends land in
+   one block, which a numeric sweep confirms at every narrower span. And the
+   over-reach is not harmlessly inside the disc: the `hw = 1, hh = 16`
+   rectangle stretched to 33 columns would read `dx = ±16` at `dy = 16`, where
+   the disc allows one. So each rectangle needs its own scan structure.
+3. **Nor is either scan doing work that gets thrown away.** The combine reads
+   `suffix[..width]` and `prefix[2*half_width..]`; against an extended row of
+   `width + 2*half_width` that leaves 32 of 2,152 entries unused at the widest
+   rectangle and fewer at the rest — about 1.5%, not a lever.
+
+**The transposed ordering costs exactly the same**, which is worth recording
+because it looks like it should win. Computing the windowed maximum once per
+*source* row at each distinct width and folding vertically afterwards comes to
+`2120 x 44` horizontal plus `2120 x 33` vertical row-passes; the current
+ordering is `2120 x (33 + 44)`. Identical. The growing accumulator already
+amortises the vertical half optimally, and the transpose only moves the same
+horizontal work from the output side to the input side while needing eleven
+buffers of 33 rows live per thread instead of four rows.
+
+**What was removed instead**, in `1931ba5`: every output row opened with
+`out.fill(NEG_INFINITY)` so the first rectangle's fold had something to beat.
+The first rectangle now writes `out` and the rest fold into it — one pass of
+about 77 gone. Isolated on a real tile, 0.1164 s to 0.1159 s, lower in all six
+alternating pairs; ~0.4%, under the 1.3% its pass count predicts because a fill
+is a store-only stream that never misses.
+
+**So the erosion's remaining cost is the decomposition working as designed**,
+and the next attempt on it is not a better rectangle scheme. The target the
+measurements above actually name is the van Herk scan itself: a serial running
+maximum along each block of 33, which is a loop-carried dependency and so the
+one part of this filter SIMD does not help. Two things follow, neither tried:
+
+- **A vectorised prefix-maximum.** The running maximum within a block is a
+  scan, and a scan over 33 lanes has a standard log-depth SIMD form (shift by
+  1, 2, 4, 8, 16, taking a maximum each time). That replaces 33 serial
+  comparisons with five vector operations per block. It is the only change
+  identified here that attacks the 3.1x rather than the pass count.
+- **Or drop van Herk at these widths.** It is O(1) per pixel in comparisons but
+  pays four passes and a serial chain for it. At `half_width` 16 the shift path
+  costs 33 passes of pure vectorised maximum instead, and the crossover in
+  `horizontal_max` is set at 3 on a pass count that assumed both sides
+  vectorise equally. On the AVX2 build they do not. Where that crossover
+  actually falls is now an open and cheaply measurable question.
+
+**A note for anyone re-measuring:** `erode_cost` reports 25.87 ns/px with
+`-C target-cpu=x86-64-v3` and 106.43 without it. Every figure in this section
+is the former. The flag is in the invocation list at the top of this file; run
+without it and you are timing a different program.
 
 ### Four more changes measured, and reverted
 
