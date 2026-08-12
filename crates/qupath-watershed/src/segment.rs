@@ -190,12 +190,14 @@ impl Segmenter {
         let height = edm.len() / width;
         let image = Image { width, height };
 
+        // `types` is the one that has to arrive zeroed: every stage reads a flag
+        // before it writes one. `levels` is written for every pixel by
+        // `make_8bit` and `list` is written before it is read, so clearing
+        // either is 22 MB of memset per 2120² tile that nothing observes.
         self.types.clear();
         self.types.resize(edm.len(), 0);
-        self.levels.clear();
-        self.levels.resize(edm.len(), 0);
-        self.list.clear();
-        self.list.resize(edm.len(), 0);
+        fit(&mut self.levels, edm.len(), 0);
+        fit(&mut self.list, edm.len(), 0);
 
         let mut global_min = f32::MAX;
         let mut global_max = -f32::MAX;
@@ -552,8 +554,9 @@ impl Segmenter {
             max_bin = max_bin.max(self.histogram[value]);
         }
 
-        self.coordinates.clear();
-        self.coordinates.resize(capacity, 0);
+        // Every entry below `capacity` is written by the bucket fill below, so
+        // this one is dead memset too.
+        fit(&mut self.coordinates, capacity, 0);
         self.level_offset.clear();
         self.level_offset.resize(highest + 1, 0);
         // The coordinate packing is ImageJ's: x in the low bits, y above,
@@ -717,6 +720,20 @@ impl Segmenter {
         )]
         let changed = changed as u32;
         changed
+    }
+}
+
+/// Gives `buffer` exactly `len` entries without rewriting the ones it already
+/// has.
+///
+/// The length is exact rather than merely sufficient, so an index past the end
+/// still panics instead of landing in a previous tile's leftovers — which is the
+/// whole reason not to simply let the buffer stay long.
+fn fit<T: Copy>(buffer: &mut Vec<T>, len: usize, fill: T) {
+    if buffer.len() < len {
+        buffer.resize(len, fill);
+    } else {
+        buffer.truncate(len);
     }
 }
 
