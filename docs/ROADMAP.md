@@ -870,7 +870,30 @@ one part of this filter SIMD does not help. Two things follow, neither tried:
   scan, and a scan over 33 lanes has a standard log-depth SIMD form (shift by
   1, 2, 4, 8, 16, taking a maximum each time). That replaces 33 serial
   comparisons with five vector operations per block. It is the only change
-  identified here that attacks the 3.1x rather than the pass count.
+  identified here that attacks the 3.1x rather than the pass count, and it is
+  still untried — but see the entry below before reaching for it, because the
+  cheap version of the same idea backfired badly.
+
+  **Carrying several block chains at once does not work, and it is the obvious
+  thing to try first.** Blocks are disjoint reductions, so four chains can run
+  in flight with no reordering — the argument that was worth 2.4x on the
+  reconstruction's raster pass in `edb7d74`. It is bit-identical, pinned over
+  every span and length including NaN and both zeros. It is also **20% slower**
+  at four chains, and the regression starts before any interleaving at all:
+
+  | chains in flight | 1 | 2 | 3 | 4 | 6 | 8 |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | seconds | .1295 | .1302 | .1506 | .1559 | .1363 | .1399 |
+
+  Against `.1152` at HEAD. **One chain through the restructured loop is already
+  12% slower than the slice-zip loop it replaced**, so the cost is not the
+  interleaving, it is having written the scan as indexed accesses into an array
+  of accumulators instead of a `zip` over two slices. That shape is what the
+  autovectoriser was consuming; a hand-interleaved version takes it away and
+  gives back less than it costs. Any future attempt at this scan has to keep
+  the slice-zip form, which is a real constraint on the SIMD version above —
+  and it is the second time in two sessions that an in-flight-widening that
+  worked elsewhere has reversed sign here.
 - **Dropping van Herk at the narrow widths — done, in `7270ed6`.** It is O(1)
   per pixel in comparisons but pays four passes and a serial chain for it,
   and `horizontal_max` chose between it and the shift path at half-width 3, on
@@ -1275,6 +1298,17 @@ the third stage running.
   different machine from one. **An A/B on a component, however carefully
   interleaved and asserted, does not predict the sign in place.** The bar for a
   speed claim is now the saturated grid as well as the component.
+- **Hand-interleaving a chain costs the autovectoriser, and that can outweigh
+  the chain.** Carrying four of the rank filter's block scans in flight — the
+  same disjoint-reductions argument that was worth 2.4x on the reconstruction —
+  is **20% slower**, and the damage is done before any interleaving: rewriting
+  the scan as indexed accesses into an array of four accumulators, then running
+  *one* chain through it, is already 12% slower than the `zip` over two slices
+  it replaced (.1295 against .1152 s). The slice-zip shape is what the compiler
+  was turning into vector code, and taking it away gave back less than it cost.
+  Widen a chain only where the loop was not vectorising in the first place —
+  the reconstruction's raster pass had a genuine serial dependency across the
+  whole row, this one has 33-element blocks the compiler was already handling.
 - **A stage that costs more than a strictly larger stage is a stall.** The
   Laplacian's nine taps cost more than the separable twenty-nine-tap blur ahead
   of it, because both had the same loop-carried accumulator — the second one
