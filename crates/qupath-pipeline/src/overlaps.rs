@@ -42,6 +42,24 @@
 //!   box meets the two tiles' shared rectangle are compared, so an object deep
 //!   inside a core is never a candidate for removal.
 //!
+//! # The deleted copy goes on deleting
+//!
+//! `listSecond` is built once per tile pair and `removeChildObject` takes the
+//! object off the tile, not off that list. So within a pair QuPath keeps
+//! comparing against copies it has already deleted — and a deleted copy that is
+//! larger than a later first-tile object **still deletes it**.
+//!
+//! This port had the obvious liveness check there, and it was wrong: it kept
+//! 12 objects on the profiled 4000x4000 region and 37 on a 9000x9000 one that
+//! QuPath does not keep. Reproduced deliberately now, and pinned by
+//! `a_removed_second_can_still_remove_a_first`, which was written to fail
+//! against the check before it was taken out.
+//!
+//! The returned count is the one thing that does *not* follow QuPath here. Its
+//! `nRemoved` is a log line and increments once per removal, so it double-counts
+//! a second copy two first objects both delete; this counts objects, because the
+//! pipeline subtracts it from the candidate total.
+//!
 //! # Why a pixel mask rather than a polygon
 //!
 //! QuPath intersects JTS geometries and takes the area. These polygons are the
@@ -188,13 +206,20 @@ pub fn resolve_overlaps(tiles: &[Region], candidates: &mut [Candidate]) -> u32 {
                 .collect();
 
             for &fo in &firsts {
-                if !candidates[fo].alive {
-                    continue;
-                }
                 for &so in &seconds {
-                    if !candidates[so].alive {
-                        continue;
-                    }
+                    // **No liveness test on `so`, deliberately.** `listSecond`
+                    // is a snapshot and `removeChildObject` takes the object off
+                    // the tile, not off the list, so QuPath goes on comparing
+                    // against a copy it has already deleted — and that deleted
+                    // copy can still delete a smaller first-tile object. Adding
+                    // the obvious check here keeps an object QuPath does not;
+                    // `a_removed_second_can_still_remove_a_first` is the case.
+                    //
+                    // `fo` needs no test either: the only branch that removes it
+                    // breaks out of this loop, and a candidate removed in an
+                    // earlier tile pair never reaches `firsts`, because QuPath
+                    // rebuilds both lists from the tile's live children.
+
                     // `if (!firstRegion.intersects(...)) continue;`
                     if intersect(candidates[fo].bounds, candidates[so].bounds).is_none() {
                         continue;
@@ -208,12 +233,17 @@ pub fn resolve_overlaps(tiles: &[Region], candidates: &mut [Candidate]) -> u32 {
                     let (first_area, second_area) = (candidates[fo].area, candidates[so].area);
                     if first_area >= second_area {
                         if shared / f64::from(second_area) > OVERLAP_THRESHOLD {
+                            // Counted once however often QuPath reaches it.
+                            // `nRemoved` is a log line there and double-counts a
+                            // second copy removed twice; here the count is
+                            // subtracted from the candidate total, so it has to
+                            // mean objects rather than removals.
+                            removed += u32::from(candidates[so].alive);
                             candidates[so].alive = false;
-                            removed += 1;
                         }
                     } else if shared / f64::from(first_area) > OVERLAP_THRESHOLD {
+                        removed += u32::from(candidates[fo].alive);
                         candidates[fo].alive = false;
-                        removed += 1;
                         // `break;` — this object is gone, so it cannot lose
                         // again to a later one.
                         break;
@@ -355,6 +385,39 @@ mod tests {
         let tiles = [region(0, 0, 30, 30), region(0, 0, 30, 30)];
         let mut candidates = [left, right];
         assert_eq!(resolve_overlaps(&tiles, &mut candidates), 0);
+    }
+
+    #[test]
+    fn a_removed_second_can_still_remove_a_first() {
+        // `listSecond` is a snapshot taken once per tile pair, and QuPath never
+        // asks whether an entry of it is still attached before comparing against
+        // it — `removeChildObject` takes the object off `second`, and the local
+        // list keeps it. So an object already deleted by one first-tile object
+        // goes on to delete a later one.
+        //
+        // It reads like a bug in QuPath and it is not one this port gets to fix:
+        // a resolver that skips the deleted copy keeps an object QuPath does not,
+        // and the whole §2 count turns on which. Reproduced deliberately.
+        //
+        // Tile 1 is further right, so it supplies `first`. `wide` is bigger than
+        // `blob` and takes it; `sliver` is smaller than `blob` and would survive
+        // if `blob` were treated as gone.
+        let tiles = [region(0, 0, 60, 40), region(40, 0, 60, 40)];
+        let blob = block(0, 45, 10, 10, 20);
+        let wide = block(1, 45, 10, 11, 19);
+        let sliver = block(1, 45, 29, 10, 1);
+        assert!(wide.area >= blob.area, "wide must win against blob");
+        assert!(sliver.area < blob.area, "blob must win against sliver");
+        assert_eq!(wide.intersection_area(&sliver), 0, "one tile, no overlap");
+
+        let mut candidates = [wide, sliver, blob];
+        assert_eq!(resolve_overlaps(&tiles, &mut candidates), 2);
+        assert!(candidates[0].alive(), "the widest copy survives");
+        assert!(
+            !candidates[1].alive(),
+            "the sliver loses to the deleted blob"
+        );
+        assert!(!candidates[2].alive(), "the blob lost to the widest copy");
     }
 
     #[test]
