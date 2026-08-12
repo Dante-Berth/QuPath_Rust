@@ -102,6 +102,33 @@ as much as widening the other two was. None of the three needed SIMD.
 
 ### Faster this session
 
+**~1.3%, from deleting memsets, and nothing else.** Seven tile buffers were
+cleared and zero-filled before the stage that overwrites every pixel of them —
+the background estimate, the Laplacian, the labels, the region map twice, the
+merge's region map, the binary mask — and the tracer cleared 18 MB of escape
+stamps three times a tile to erase numbers a counter can step past instead.
+About 150 MB per tile of writes nothing read. On the saturated grid, stage time
+18.079 s to 17.839 s, lower in all three alternating pairs. Object count
+unchanged.
+
+That is the whole of it. **Four other changes were measured and reverted**, and
+they are the more useful half of the session — see §4's second entry, and
+ROADMAP §4 for the numbers. One of them, four rows of the reconstruction's
+raster pass in flight at once, is **1.21x in isolation and 0.83x where the
+pipeline actually runs**, which is the first time this project has had a
+speedup change sign.
+
+**The stage table everybody optimises against turned out to be a
+configuration.** It comes from the 4000x4000 profiled region — four tiles, so
+four cores of a twenty-thread pool, on a machine with six fast cores and eight
+slow ones. On a grid that fills the pool the **erosion is 28%** and the largest
+stage in the pipeline, where that table says 10.4% and the roadmap says "the
+erosion is not the problem". The stage this file has pointed three optimisation
+passes at, the reconstruction, is 10.8% there against 26.2% here. Read ROADMAP
+§4's new subsection before picking anything up.
+
+### Faster in the session before this one
+
 **The region tracer, 1.1x, and nothing else.** The hole test walked each
 region's bounding box twice — once to flood the background in from the border,
 once more to claim what the flood missed — and the second pass is only useful
@@ -113,10 +140,10 @@ on the recorded run and 1.08x to 1.16x across five, so read it as 1.1x. The
 tracer is ~15% of stage time across its three stages, which puts it at ~1.015x on
 the pipeline — inside this machine's run-to-run spread end to end.
 
-**Four things were tried and reverted**, and they are the more useful half of
-the session: see §4's second entry.
+**Four things were tried and reverted** in that session too: see §4's second
+entry.
 
-### Faster in the session before this one
+### Faster two sessions ago
 
 **The reconstruction's raster pass, 2.42x**, which was the first end-to-end wall
 clock gain this project had: **1.19x** on a 9000x9000 region at 25 tiles on
@@ -129,7 +156,7 @@ cost was one loop-carried dependency, and the measurement that found it took ten
 minutes: feed the loop a constant instead of its left neighbour, accept that the
 answer is wrong, read the clock. 3.87 ns/px became 0.62.
 
-### Faster two sessions ago
+### Faster three sessions ago
 
 **One thing, worth 1.17x**, and only at saturation: the rank filter and the
 convolver were parallelising rows *inside* the per-tile rayon job. Removing that
@@ -155,6 +182,12 @@ harness, so treat them as approximate.
   slower), and the erosion — which the roadmap had blamed — turned out to be 12%
   of the stage, not 59%. Its third lever, the raster pass, is the 2.42x above,
   and it took the stage from 57.6% of pipeline time to 52.9%.
+
+  **That erosion figure is now known to be a figure about four tiles.** On a
+  grid that fills the thread pool the erosion is 28% of the whole pipeline and
+  its largest single stage — larger than the reconstruction the three sentences
+  above are about. Both numbers are correct measurements of different
+  configurations, which is the point: see ROADMAP §4.
 - **Every stage's share of pipeline time fell this session and none of them got
   faster.** The background went 52.9% to 37.6%, tracing 14.0% to 7.1%, the
   watershed 11.7%. Four new stages went into the denominator. A share is a
@@ -164,7 +197,7 @@ harness, so treat them as approximate.
   a buffer an earlier one has finished with, which is why it is 1.2 GB rather
   than 2.
 
-**Nothing in this session made anything faster.** It closed the chain, recorded
+**Nothing in that session made anything faster.** It closed the chain, recorded
 one fixture, and found one divergence (D-008) by reading a call site.
 
 ---
@@ -220,15 +253,28 @@ the wrong answer, read the clock — cost ten minutes and was never run. The sam
 shape as the blur's transpose in ROADMAP §4.3, which was also reasoned from a
 share and was also wrong.
 
-**That variant now has four instances and they say something sharper than "read
+**That variant now has five instances and they say something sharper than "read
 the share carefully".** The reconstruction's index arithmetic: 1.03x. The shape
 split's branchless height, tree-shaped minimum and branchless neighbourhood:
 1.02x together. The tracer's 4 M hardware divisions per tile, removed entirely:
-1.00x. Meanwhile the changes that *did* pay were a stage that ran twice (1.1x on
-the tracer), a memset nothing read, and three loop-carried dependencies (2.3x,
-3.7x, 2.4x). **Expensive-looking instructions on a covered path are free;
-work that happens and is not needed is not.** Ask which of the two a change is
-before writing it, and prefer the diagnostic that answers it in ten minutes.
+1.00x. The rank filter's prefix and suffix scans, paired so four chains run in
+flight: 1.00x. Meanwhile the changes that *did* pay were a stage that ran twice
+(1.1x on the tracer), a memset nothing read — twice now — and three loop-carried
+dependencies (2.3x, 3.7x, 2.4x). **Expensive-looking instructions on a covered
+path are free; work that happens and is not needed is not.** Ask which of the
+two a change is before writing it, and prefer the diagnostic that answers it in
+ten minutes.
+
+**A third variant arrived this session and it is worse, because the answer was
+not merely small but the wrong sign.** Putting four rows of the reconstruction's
+raster pass in flight at once is bit-identical, 1.21x on the pass in isolation
+and 1.14x on the whole reconstruction — a proper interleaved A/B, output
+asserted equal on every timed iteration, exactly the bar this repository sets —
+and on the grid the pipeline actually runs it is **0.83x**. It does not do one
+instruction more; it reads nine streams per tile where the old one read three,
+and twenty tiles of that is a different machine. **The component harness is
+necessary and it is not sufficient. Measure on the saturated grid before
+keeping anything.**
 
 Every one produced entirely reasonable-looking output. The defences that actually
 worked, in order: recording a fixture from a real QuPath run, counting objects,

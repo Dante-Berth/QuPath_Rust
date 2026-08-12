@@ -170,8 +170,20 @@ RUSTFLAGS="-C target-cpu=x86-64-v3" \
     cargo run --release -p qupath-pipeline --example trace_previous_vs_current
 RUSTFLAGS="-C target-cpu=x86-64-v3" \
     cargo run --release -p qupath-pipeline --example split_cost
-# the saturated grid the throughput figure is quoted on
 RUSTFLAGS="-C target-cpu=x86-64-v3" \
+    cargo run --release -p qupath-pipeline --example erode_cost
+RUSTFLAGS="-C target-cpu=x86-64-v3" \
+    cargo run --release -p qupath-pipeline --example reconstruct_rows
+RUSTFLAGS="-C target-cpu=x86-64-v3" \
+    cargo run --release -p qupath-pipeline --example reconstruct_blocked
+# the saturated grid the throughput figure is quoted on, and the one whose
+# stage shares are the ones to optimise against — see §4
+RUSTFLAGS="-C target-cpu=x86-64-v3" \
+    cargo run --release -p qupath-pipeline --example region -- \
+    data/CMU-1.svs 20000 5000 9000 9000
+# the same region at one, four and twenty threads, which is what says how much
+# of a stage's share is the stage and how much is the pool
+RAYON_NUM_THREADS=4 RUSTFLAGS="-C target-cpu=x86-64-v3" \
     cargo run --release -p qupath-pipeline --example region -- \
     data/CMU-1.svs 20000 5000 9000 9000
 ./parity/record.sh && ./parity/record-slide.sh && ./parity/bench.sh   # needs JDK 25
@@ -703,6 +715,138 @@ rows did not exist a session ago:
 | labelling | 0.9% |
 | object filter | 0.5% |
 
+### The stage table above is a configuration, not a property of the pipeline
+
+**Every share in it was taken on the 4000x4000 profiled region, which is four
+tiles on a twenty-thread pool.** On a grid large enough to fill the pool the
+table is a different table, and the difference is large enough to change which
+stage anyone would work on next. Same slide, same code, same run of `region`:
+
+| Stage | profiled 4000², 4 tiles | saturated 9000², 25 tiles |
+| --- | ---: | ---: |
+| background — **erode** | 10.4% | **28.0%** |
+| background — regrow | **26.2%** | 10.8% |
+| shape split | 14.4% | 8.7% |
+| gaussian blur | 2.5% | 7.9% |
+| maxima | 5.1% | 7.9% |
+| watershed flood | 11.7% | 7.3% |
+| `refineBoundary` | 3.3% | 6.7% |
+| tracing | 7.1% | 3.7% |
+
+Two different things move these and they have to be separated before either
+column is used:
+
+- **The tissue.** The profiled region is 34.1% labelled pixels and the
+  saturated one 5.9%, and the data-dependent stages follow that — the
+  reconstruction settles in fewer passes on sparser tissue, and the flood and
+  the tracing have less to do. This is why the regrow's share falls.
+- **The threads.** The erosion's cost per pixel is fixed by the kernel and does
+  not depend on the image at all, so its share can only have moved because
+  everything is measured against a total that moved — and because the stage
+  itself got more expensive per pixel. It did. Holding the region fixed and
+  varying only the pool, stage seconds summed across threads, where perfect
+  scaling would be a flat row:
+
+  | Stage | 1 thread | 4 threads | 20 threads | 20 / 1 |
+  | --- | ---: | ---: | ---: | ---: |
+  | gaussian blur | 0.490 | 0.556 | 1.529 | 3.12x |
+  | decode | 0.192 | 0.214 | 0.582 | 3.03x |
+  | **erode** | 1.743 | 1.877 | 5.036 | 2.89x |
+  | watershed flood | 0.422 | 0.499 | 1.213 | 2.87x |
+  | `refineBoundary` | 0.536 | 0.620 | 1.238 | 2.31x |
+  | maxima | 0.572 | 0.638 | 1.317 | 2.30x |
+  | regrow | 1.001 | 1.072 | 2.013 | 2.01x |
+  | shape split | 0.855 | 0.951 | 1.549 | 1.81x |
+  | wall clock | 7.013 | 2.069 | 1.240 | **5.65x faster** |
+
+  **Nothing is flat, and almost none of the inflation happens before four
+  threads.** One thread to four costs 6–9%; four to twenty costs another
+  2.4–2.8x. That shape is what this machine is: an i7-13800H is **6
+  performance cores at 5.0–5.2 GHz with two threads each, plus 8 efficiency
+  cores at 4.0 GHz**, so a four-thread run is four distinct P-cores and a
+  twenty-thread run is every SMT sibling and every E-core as well. A share
+  taken at four threads is a share taken on the least contended configuration
+  this machine has.
+
+**So §4.8's reading — that the pipeline is memory-bandwidth-bound and that
+cache-blocking is one of the two honest answers — is not established by these
+numbers.** Bandwidth would degrade gradually as threads were added; this
+degrades almost entirely at the step where slower cores and shared execution
+resources arrive. And the blocking §4.8 proposes was measured this session and
+is 1.7–2.6x **worse** — see below. Somebody should separate the two causes with
+a run pinned to P-cores only before the next optimisation is chosen on the
+strength of either.
+
+**Where that leaves the next lever: the erosion, which this file wrote off.**
+§4.7 recorded it as 12% of the background stage and said "the erosion is not the
+problem". On the saturated grid it is 28% of the whole pipeline and the largest
+single stage, and it is the largest at one thread too, so this is not a
+scheduling artefact. `erode_cost` says what it is made of, on a real tile:
+
+| | ns/px |
+| --- | ---: |
+| the erosion, radius 16.03 | 19.30 |
+| its 33 folded source rows alone | 2.69 |
+
+**86% of it is the horizontal maxima**, not the vertical folds — thirteen
+rectangles, each costing four passes along the row (the extended copy, the
+prefix scan, the suffix scan, the combine) plus the negated whole-image copy
+that MIN takes on the way in. Pairing the prefix and suffix chains so four run
+in flight instead of one was tried and is worth **1.00x**, so it is throughput
+and not latency: the passes themselves are the cost, and fewer passes per
+rectangle is the change to try. Nobody has.
+
+### Four more changes measured, and reverted
+
+All four are in ROADMAP §5's collection now. Each is reproducible from a probe
+committed here, and each was measured on a real tile rather than a generated
+one:
+
+1. **Skipping settled rows in the reconstruction's raster passes.** The premise
+   was that after a few passes the changes live in a few rows and the rest of
+   each sweep is work that happens and is not needed. `reconstruct_rows` says
+   they do not: on a real tile every one of the 2,120 rows still holds a moved
+   pixel through pass nine, and at pass thirteen — the last one — 1,984 rows
+   still move and a conservative skip rule would still visit 2,071 of them.
+   Nothing was written; the probe was the whole experiment and cost ten minutes.
+2. **Cache-blocking the reconstruction**, which is §4.8's own suggestion.
+   Settling a strip of rows several times while it is in L2 rather than
+   sweeping the whole tile once. It reaches the same fixed point bit for bit —
+   the queue after the raster phase is a complete algorithm, so any sequence of
+   valid dilation updates ahead of it is legal — and it is slower everywhere:
+   **1.53x** slower in isolation (140.7 ms against 215.9 for the best of fifteen
+   strip and round settings), and **1.7–2.6x** slower in place on the saturated
+   grid, where the theory said the traffic saving should pay most. The strip
+   size barely matters, from 32 rows to 512, which is itself the answer: L2
+   residency buys about 20% per sweep and the blocking needs 24–36 sweeps where
+   the whole-image passes need 14.
+3. **Four rows of a raster pass in flight at once**, skewed two columns apart so
+   each row's chain is independent — the change that was worth 2.42x on this
+   same pass when the chain was shortened, applied again to widen it. It is
+   bit-identical, pinned by `rows_in_flight_change_nothing` over every shape
+   from 1x1 up including both zeros, and **its sign depends on the thread
+   count**:
+
+   | | pass | reconstruct | in place |
+   | --- | ---: | ---: | ---: |
+   | isolated, one thread | **1.21x** | 1.14x | |
+   | profiled region, 4 tiles | | | **1.05x** |
+   | saturated grid, 25 tiles | | | **0.83x** |
+
+   Four alternating pairs of binaries agreed on the last row. It turns three
+   sequential streams per tile into nine concurrent ones — five marker rows and
+   four mask rows — and twenty tiles of that is what the last column is. The
+   gain in isolation is real and it is not available where the pipeline runs.
+4. **Pairing the rank filter's prefix and suffix scans**, above: 1.00x.
+
+**The one thing that was kept removes work rather than instructions**, which is
+now this repository's only reliable pattern: seven tile buffers were cleared and
+zero-filled before the stage that overwrites them, ~150 MB per tile of memset on
+a pipeline that had no use for any of it. On the saturated grid that is stage
+time 18.079 s to 17.839 s, lower in all three alternating pairs — about 1.3%,
+which is at the edge of what this machine can resolve and is the honest size of
+it.
+
 **The §4.4 ratio check was applied to all four new stages and does not fire.**
 The shape split is the largest of them and lands third overall, but it is
 genuinely more work than the flood beside it: four sweeps of an exact distance
@@ -992,15 +1136,36 @@ the third stage running.
   script. Every recorder now flushes and calls `System.exit(0)`, and the flush
   is load-bearing — `System.exit` does not drain `System.out`, and a truncated
   fixture is worse than a hang because it still looks like a recording.
-- **Instruction count is not cost, and this repository has now proved it four
+- **Instruction count is not cost, and this repository has now proved it five
   times.** The reconstruction's index arithmetic: 1.03x. The shape split's
   branchless height, its tree-shaped minimum and its branchless neighbourhood:
   1.02x together. The tracer's 4 M hardware divisions per tile, removed
-  entirely: 1.00x. Every one of them was an expensive-looking instruction on a
-  path the out-of-order engine was already covering, and every one cost an
-  afternoon. **What has actually worked, every time, is removing work**: a stage
-  that ran twice (§4.6), a memset nothing read (§4), a dependency that serialised
-  a loop (§4.3, §4.4, §4.7). Ask which of those a change is before writing it.
+  entirely: 1.00x. The rank filter's prefix and suffix scans, paired so four
+  chains run in flight: 1.00x. Every one of them was an expensive-looking
+  instruction on a path the out-of-order engine was already covering, and every
+  one cost an afternoon. **What has actually worked, every time, is removing
+  work**: a stage that ran twice (§4.6), a memset nothing read — twice now, 22 MB
+  a tile in the segmenter and ~150 MB a tile in the tile loop — and a dependency
+  that serialised a loop (§4.3, §4.4, §4.7). Ask which of those a change is
+  before writing it.
+- **A profile share carries the thread count and the region it was taken on.**
+  Every share in §4's stage table comes from the 4000x4000 profiled region,
+  which is four tiles on a twenty-thread pool — four P-cores of a machine that
+  has six P-cores and eight slower E-cores. On a grid that fills the pool the
+  erosion is 28% where that table says 10.4%, and the reconstruction 10.8%
+  where it says 26.2%. **The largest stage is not the same stage in the two
+  columns**, and this file has pointed three optimisation passes at the second
+  one. Quote a share with its tile count and its thread count, or do not quote
+  it.
+- **A speedup can change sign with the thread count, and one did.** Four rows of
+  the reconstruction's raster pass in flight at once is 1.21x on the pass in
+  isolation, 1.05x in place on four tiles, and **0.83x** on a saturated grid,
+  measured with alternating binaries four times over. It computes bit-identical
+  output and does not do one instruction more; what it changes is that a tile
+  reads nine streams at once instead of three, and twenty tiles of that is a
+  different machine from one. **An A/B on a component, however carefully
+  interleaved and asserted, does not predict the sign in place.** The bar for a
+  speed claim is now the saturated grid as well as the component.
 - **A stage that costs more than a strictly larger stage is a stall.** The
   Laplacian's nine taps cost more than the separable twenty-nine-tap blur ahead
   of it, because both had the same loop-carried accumulator — the second one
