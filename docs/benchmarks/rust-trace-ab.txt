@@ -1,0 +1,10 @@
+CMU-1 tile 2120x2120 = 4.49 Mpx, minimum of 9
+interleaved repetitions
+
+                 labels s     binary s       both s vs previous
+    previous       0.0596       0.0361       0.0957      1.00x
+     current       0.0517       0.0317       0.0834      1.15x
+
+Both rows produced identical region maps and identical region counts
+on every timed iteration; the assertions above are what
+make that a claim rather than an expectation.
