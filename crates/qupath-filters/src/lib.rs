@@ -694,4 +694,23 @@ mod tests {
         let mut pixels = vec![0.0f32; 7];
         rank(&mut pixels, 3, 1.0, RankOp::Max);
     }
+
+    #[test]
+    fn a_poisoned_output_is_fully_overwritten() {
+        // The pipeline stopped zeroing the buffer it hands this between tiles,
+        // because the filter writes every pixel of it. That is a convention, so
+        // it is pinned rather than trusted: an output arriving full of a
+        // previous tile's values has to come back the same as one arriving
+        // zeroed.
+        let width = 9;
+        let source: Vec<f32> = (0..width * 7).map(|i| (i % 13) as f32 - 4.0).collect();
+        for op in [RankOp::Min, RankOp::Max] {
+            let mut zeroed = vec![0.0f32; source.len()];
+            let mut poisoned = vec![f32::NAN; source.len()];
+            let mut filter = RankFilter::new();
+            filter.apply_into(&source, &mut zeroed, width, 3.5, op);
+            filter.apply_into(&source, &mut poisoned, width, 3.5, op);
+            assert_eq!(zeroed, poisoned, "{op:?} left a pixel of the output unwritten");
+        }
+    }
 }

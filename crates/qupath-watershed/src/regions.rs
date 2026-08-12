@@ -42,6 +42,7 @@
 //! is not filled, and the bridging pixel beyond the gap is its own region.
 
 use crate::Connectivity;
+use crate::segment::fit;
 
 /// A tracer that owns its working buffers, for repeated use.
 ///
@@ -50,10 +51,21 @@ use crate::Connectivity;
 #[derive(Debug, Default)]
 pub struct RegionTracer {
     stack: Vec<u32>,
-    /// Stamped with the region index rather than cleared per region, so the
-    /// background flood costs one pass over each region's bounding box and no
-    /// clearing between them.
+    /// Stamped rather than cleared per region, so the background flood costs one
+    /// pass over each region's bounding box and no clearing between them.
+    ///
+    /// The stamp is [`RegionTracer::generation`] plus the region index, not the
+    /// index alone, so it does not repeat between calls either — see there.
     escaped: Vec<u32>,
+    /// Stamps already spent, so the next call's stamps cannot collide with a
+    /// previous one's.
+    ///
+    /// This used to be a clear of the whole of `escaped` at the top of every
+    /// trace: 18 MB per 2120² tile, three times a tile, to erase stamps that a
+    /// counter can simply step past. It costs one `u32` and a check for
+    /// overflow, and the clear stays as what happens when the counter would
+    /// wrap.
+    generation: u32,
     /// Whether every region pays the closing scan over its bounding box, as the
     /// first port had it. See [`RegionTracer::with_unconditional_scan`].
     unconditional_scan: bool,
@@ -170,11 +182,24 @@ impl RegionTracer {
 
         let height = regions.len() / width;
         regions.fill(0);
-        // Cleared rather than merely resized: a stamp left over from a previous
-        // tile collides with this tile's low region numbers, and the failure is
-        // a hole silently declared already-escaped.
-        self.escaped.clear();
-        self.escaped.resize(regions.len(), 0);
+        // A stamp left over from a previous trace collides with this one's low
+        // region numbers, and the failure is a hole silently declared
+        // already-escaped. The counter is what keeps them apart: every stamp
+        // this call can write is above every stamp any previous call wrote, so
+        // the leftovers are unreachable rather than erased. Only a buffer that
+        // has to grow is written here, and only in the part that is new.
+        //
+        // The clear is still what happens when the counter cannot step past the
+        // leftovers — one image's worth of regions from the top of `u32` — since
+        // the alternative is a stamp that means two different things.
+        let regions_at_most = truncate(regions.len());
+        if u32::MAX - self.generation < regions_at_most {
+            self.escaped.clear();
+            self.generation = 0;
+        }
+        fit(&mut self.escaped, regions.len(), 0);
+        let generation = self.generation;
+        self.generation += regions_at_most;
 
         let mut found = 0u32;
         for start in 0..regions.len() {
@@ -220,6 +245,7 @@ impl RegionTracer {
                 width,
                 height,
                 found,
+                generation + found,
                 bounds,
             );
         }
@@ -310,6 +336,12 @@ impl Bounds {
 /// this a skip rather than a different fill: an enclosed pixel already carrying
 /// another region's number is both unreachable and unclaimable, so the count
 /// errs towards scanning rather than towards changing the answer.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the region's number and its escape stamp used to be one argument \
+              and are deliberately two: they index different buffers and only \
+              the stamp has to be unique across calls"
+)]
 fn fill_enclosed<const SCAN_ALWAYS: bool>(
     stack: &mut Vec<u32>,
     escaped: &mut [u32],
@@ -317,6 +349,7 @@ fn fill_enclosed<const SCAN_ALWAYS: bool>(
     width: usize,
     height: usize,
     index: u32,
+    stamp: u32,
     bounds: Bounds,
 ) {
     let bx0 = bounds.x0.saturating_sub(1);
@@ -333,8 +366,8 @@ fn fill_enclosed<const SCAN_ALWAYS: bool>(
     stack.clear();
     let mut seed = |x: usize, y: usize, stack: &mut Vec<u32>, reached: &mut usize| {
         let at = y * width + x;
-        if regions[at] != index && escaped[at] != index {
-            escaped[at] = index;
+        if regions[at] != index && escaped[at] != stamp {
+            escaped[at] = stamp;
             *reached += usize::from(inside(x, y));
             stack.push(truncate(at));
         }
@@ -361,10 +394,10 @@ fn fill_enclosed<const SCAN_ALWAYS: bool>(
                 continue;
             }
             let neighbour = ny * width + nx;
-            if regions[neighbour] == index || escaped[neighbour] == index {
+            if regions[neighbour] == index || escaped[neighbour] == stamp {
                 continue;
             }
-            escaped[neighbour] = index;
+            escaped[neighbour] = stamp;
             reached += usize::from(inside(nx, ny));
             stack.push(truncate(neighbour));
         }
@@ -377,7 +410,7 @@ fn fill_enclosed<const SCAN_ALWAYS: bool>(
     for y in bounds.y0..=bounds.y1 {
         for x in bounds.x0..=bounds.x1 {
             let at = y * width + x;
-            if regions[at] == 0 && escaped[at] != index {
+            if regions[at] == 0 && escaped[at] != stamp {
                 regions[at] = index;
             }
         }
@@ -554,5 +587,55 @@ mod tests {
         let count = tracer.trace_into(&values, &mut reused, width, 0.5, f32::INFINITY);
         assert_eq!(count, expected);
         assert_eq!(reused, fresh);
+    }
+
+    #[test]
+    fn the_stamp_counter_clears_rather_than_wrapping() {
+        // The counter is what replaced clearing 18 MB of stamps per trace, and
+        // the one input it cannot step past is the top of `u32`. Wrapping there
+        // would hand this trace the stamps of a previous one, and the failure is
+        // silent: a hole declared already-escaped and left unfilled. The clear
+        // is still what happens, and this is the only case that reaches it.
+        let (values, width) = image(&[
+            ".......", ".11111.", ".1...1.", ".1...1.", ".11111.", "..1.1..", ".......",
+        ]);
+        let mut fresh = vec![0u32; values.len()];
+        let expected = filled_regions(&values, &mut fresh, width, 0.5, f32::INFINITY);
+
+        let mut tracer = RegionTracer::new();
+        tracer.trace_into(&values, &mut vec![0u32; values.len()], width, 0.5, f32::INFINITY);
+        tracer.generation = u32::MAX - 1;
+
+        let mut wrapped = vec![0u32; values.len()];
+        let count = tracer.trace_into(&values, &mut wrapped, width, 0.5, f32::INFINITY);
+        assert_eq!(count, expected, "region count differs after the counter reset");
+        assert_eq!(wrapped, fresh, "region map differs after the counter reset");
+        assert_eq!(
+            tracer.generation,
+            u32::try_from(values.len()).expect("small image"),
+            "the counter did not restart"
+        );
+    }
+
+    #[test]
+    fn a_poisoned_region_map_is_fully_overwritten() {
+        // The pipeline stopped zeroing this buffer between tiles, because the
+        // trace fills it. That is a convention, so it is pinned rather than
+        // trusted: a buffer arriving full of a previous tile's numbers has to
+        // come back the same as one arriving zeroed, or the tile loop is reading
+        // leftovers.
+        let (values, width) = image(&[".11..", ".1.1.", "..1..", "11111"]);
+        let mut zeroed = vec![0u32; values.len()];
+        let expected = filled_regions(&values, &mut zeroed, width, 0.5, f32::INFINITY);
+
+        let mut poisoned = vec![u32::MAX; values.len()];
+        let count = RegionTracer::new().trace_into(&values, &mut poisoned, width, 0.5, f32::INFINITY);
+        assert_eq!(count, expected);
+        assert_eq!(poisoned, zeroed);
+
+        let mask: Vec<u8> = values.iter().map(|&v| u8::from(v > 0.5) * 255).collect();
+        let mut from_mask = vec![u32::MAX; values.len()];
+        RegionTracer::new().trace_mask_into(&mask, &mut from_mask, width);
+        assert_eq!(from_mask, zeroed);
     }
 }

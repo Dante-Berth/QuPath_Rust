@@ -135,8 +135,10 @@ impl Merger {
         // `getFilledPolygonROIs(bp, FOUR_CONNECTED)` against `[127, inf)`, then
         // `bp.fill(r)` for each: every traced region's filled polygon is set to
         // foreground, which adds exactly the enclosed pixels.
-        self.regions.clear();
-        self.regions.resize(binary.len(), 0);
+        //
+        // The trace below clears the region map itself, so zeroing it here was
+        // the same 18 MB per 2120² tile twice over. See `fit` in `lib.rs`.
+        crate::fit(&mut self.regions, binary.len(), 0);
         let found = tracer.trace_mask_into(binary, &mut self.regions, width);
         for (pixel, &region) in binary.iter_mut().zip(&self.regions) {
             if region != 0 {

@@ -250,4 +250,20 @@ mod tests {
         assert_eq!(count, expected);
         assert_eq!(reused, fresh);
     }
+
+    #[test]
+    fn a_poisoned_label_image_is_fully_overwritten() {
+        // The pipeline hands this the previous tile's labels without clearing
+        // them, on the strength of the threshold pass writing every pixel
+        // before the flood reads one. Pinned rather than trusted.
+        let width = 7;
+        let values: Vec<f32> = (0..width * 5).map(|i| ((i * 5) % 9) as f32 - 4.0).collect();
+        let mut zeroed = vec![0.0f32; values.len()];
+        let mut poisoned = vec![-7.0f32; values.len()];
+        let mut labeller = Labeller::new();
+        let a = labeller.label_into(&values, &mut zeroed, width, 0.0, Connectivity::Four);
+        let b = labeller.label_into(&values, &mut poisoned, width, 0.0, Connectivity::Four);
+        assert_eq!(a, b, "the label count differs");
+        assert_eq!(zeroed, poisoned, "a pixel of the label image was left unwritten");
+    }
 }

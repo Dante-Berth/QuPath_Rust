@@ -641,8 +641,8 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
                 // convolution reads a 3x3 neighbourhood and cannot overwrite what
                 // it is still reading, and `apply_into` then copies nothing.
                 let mark = Instant::now();
-                scratch.log.clear();
-                scratch.log.resize(scratch.density.len(), 0.0);
+                // `apply_into` writes every pixel of its output, edges included.
+                fit(&mut scratch.log, scratch.density.len(), 0.0);
                 scratch.convolver.apply_into(
                     &scratch.density,
                     &mut scratch.log,
@@ -677,8 +677,9 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
                 // against a threshold of 0.5: basins become candidate objects, with
                 // their holes filled and anything they enclose absorbed.
                 let mark = Instant::now();
-                scratch.regions.clear();
-                scratch.regions.resize(scratch.labels.len(), 0);
+                // The trace clears the region map itself, so zeroing it here was
+                // the same 18 MB twice.
+                fit(&mut scratch.regions, scratch.labels.len(), 0);
                 let traced = scratch.tracer.trace_into(
                     &scratch.labels,
                     &mut scratch.regions,
@@ -763,6 +764,30 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
     })
 }
 
+/// Gives `buffer` exactly `len` entries without rewriting the ones it already
+/// has.
+///
+/// Every caller below hands the buffer straight to a stage that writes every
+/// entry of it before anything reads one, so the zero-fill these used to do was
+/// a memset nothing observed — 95 MB of it per 2120² tile across the five, on a
+/// pipeline §4.8 measures as bound by memory bandwidth. Tiles are all one size
+/// but for the grid's last row and column, so after a worker's first tile this
+/// does nothing at all.
+///
+/// The length is exact rather than merely sufficient, so an index past the end
+/// still panics instead of landing in the previous tile's leftovers. Each call
+/// site names the stage that overwrites the buffer, and each of those stages
+/// has a test that a poisoned buffer comes back the same as a zeroed one; the
+/// convention is what this trades the memset for, so it is pinned rather than
+/// trusted.
+pub(crate) fn fit<T: Copy>(buffer: &mut Vec<T>, len: usize, fill: T) {
+    if buffer.len() < len {
+        buffer.resize(len, fill);
+    } else {
+        buffer.truncate(len);
+    }
+}
+
 fn nanos(since: Instant) -> u64 {
     u64::try_from(since.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
@@ -808,8 +833,9 @@ fn seed_markers(
     clocks.maxima.fetch_add(nanos(mark), Ordering::Relaxed);
 
     let mark = Instant::now();
-    labels.clear();
-    labels.resize(scratch.log.len(), 0.0);
+    // `label_into` writes every pixel before it reads one: the threshold test
+    // sets each to a pending marker or to zero.
+    fit(labels, scratch.log.len(), 0.0);
     let found =
         scratch
             .labeller
@@ -856,8 +882,8 @@ fn finish_objects(
 ) -> Objects {
     // `bp`: a fresh ByteProcessor with every surviving candidate filled.
     let mark = Instant::now();
-    scratch.binary.clear();
-    scratch.binary.resize(scratch.regions.len(), 0);
+    // `write_binary` writes every pixel: a region's number or zero.
+    fit(&mut scratch.binary, scratch.regions.len(), 0);
     scratch
         .objects
         .write_binary(&scratch.regions, &mut scratch.binary);
@@ -900,8 +926,8 @@ fn finish_objects(
     // `getFilledPolygonROIs(bp, FOUR_CONNECTED)` again, on the refined binary,
     // and then the area filter over what it finds.
     let mark = Instant::now();
-    scratch.regions.clear();
-    scratch.regions.resize(scratch.binary.len(), 0);
+    // As above: the trace clears the region map itself.
+    fit(&mut scratch.regions, scratch.binary.len(), 0);
     let nuclei = scratch
         .tracer
         .trace_mask_into(&scratch.binary, &mut scratch.regions, width);
@@ -1019,8 +1045,8 @@ fn subtract_background(
     scratch.background_mask.clear();
 
     let mark = Instant::now();
-    scratch.background.clear();
-    scratch.background.resize(scratch.density.len(), 0.0);
+    // The rank filter writes every pixel of its output.
+    fit(&mut scratch.background, scratch.density.len(), 0.0);
     scratch.filter.apply_into(
         &scratch.density,
         &mut scratch.background,

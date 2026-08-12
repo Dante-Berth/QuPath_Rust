@@ -577,4 +577,20 @@ mod tests {
             "with no minimum there is nothing left to reject it"
         );
     }
+
+    #[test]
+    fn a_poisoned_binary_is_fully_overwritten() {
+        // The pipeline hands this the previous tile's mask without clearing it.
+        // `write_binary` writes every pixel — foreground or zero — and this is
+        // what says so.
+        let regions = split(6, 4);
+        let values = vec![1.0f32; regions.len()];
+        let mut filter = ObjectFilter::new();
+        filter.apply(&values, &regions, 2, 0.5, None);
+        let mut zeroed = vec![0u8; regions.len()];
+        let mut poisoned = vec![17u8; regions.len()];
+        filter.write_binary(&regions, &mut zeroed);
+        filter.write_binary(&regions, &mut poisoned);
+        assert_eq!(zeroed, poisoned, "a pixel of the binary was left unwritten");
+    }
 }

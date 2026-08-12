@@ -729,7 +729,7 @@ impl Segmenter {
 /// The length is exact rather than merely sufficient, so an index past the end
 /// still panics instead of landing in a previous tile's leftovers — which is the
 /// whole reason not to simply let the buffer stay long.
-fn fit<T: Copy>(buffer: &mut Vec<T>, len: usize, fill: T) {
+pub(crate) fn fit<T: Copy>(buffer: &mut Vec<T>, len: usize, fill: T) {
     if buffer.len() < len {
         buffer.resize(len, fill);
     } else {

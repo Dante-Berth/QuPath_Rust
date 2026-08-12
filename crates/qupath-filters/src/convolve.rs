@@ -715,4 +715,20 @@ mod tests {
         let mut pixels = vec![0.0f32; 16];
         convolve(&mut pixels, 4, &[1.0; 8], 3, 3);
     }
+
+    #[test]
+    fn a_poisoned_output_is_fully_overwritten() {
+        // As `qupath_filters::tests::a_poisoned_output_is_fully_overwritten`:
+        // the pipeline hands this the previous tile's buffer without clearing
+        // it, so every pixel including the edges has to be written here.
+        let width = 8;
+        let source: Vec<f32> = (0..width * 6).map(|i| (i % 11) as f32).collect();
+        let kernel = [0.0, -1.0, 0.0, -1.0, 4.0, -1.0, 0.0, -1.0, 0.0];
+        let mut zeroed = vec![0.0f32; source.len()];
+        let mut poisoned = vec![f32::NAN; source.len()];
+        let mut convolver = Convolver::new();
+        convolver.apply_into(&source, &mut zeroed, width, &kernel, 3, 3);
+        convolver.apply_into(&source, &mut poisoned, width, &kernel, 3, 3);
+        assert_eq!(zeroed, poisoned, "a pixel of the output was left unwritten");
+    }
 }
