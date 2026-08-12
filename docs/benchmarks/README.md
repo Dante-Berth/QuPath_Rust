@@ -583,6 +583,14 @@ the check that it removed only the stall.
 Separate processes, not interleaved, so the in-place row is approximate in
 magnitude; the isolated row meets the bar this file sets.
 
+**Re-running this today gives a different object count and a different wall
+clock**, and neither is a regression: the merge, the shape split,
+`refineBoundary` and the area filter have since gone into the path, so the same
+region produces 19,063 objects rather than 82,997 and the pipeline does 70.1
+Mpx/s rather than 80.4. The 2.42x on the pass itself is unaffected — it is
+measured in isolation by `reconstruct_pass_previous_vs_current`, which the new
+stages do not touch.
+
 ## Where this leaves the pipeline
 
 Three components are now faster in isolation, and the profile says what each is

@@ -30,20 +30,26 @@ Five crates, each checked against fixtures recorded from a real QuPath build:
 | `qupath-watershed` | Marker-controlled flood, bucket queue, 4/8-connected labelling, filled-region tracing | recorded, 3 + 13 + 17 cases |
 | `qupath-filters` | MIN/MAX rank filter, ImageJ Gaussian blur, convolution, morphological reconstruction | recorded, 42 + 22 + 22 + 24 cases |
 | `qupath-slide` | Aperio SVS / tiled TIFF reader, pure Rust | recorded, 5 regions |
-| `qupath-pipeline` | Streams slide tiles through the above, filters the candidates | colour deconvolution; object filters, 17 images |
+| `qupath-pipeline` | Tiles a region QuPath's way and runs every detection stage over it | colour deconvolution; object filters, 17 images; merge and split; boundary refinement |
 
-Every image-processing stage `WatershedCellDetection` runs **before** its
-watershed is ported and pinned against output recorded from QuPath itself —
-deconvolution, background subtraction by reconstruction, the Laplacian of
-Gaussian, the regional maxima, the labelling and the flood — and so are the
-first two things it does **after**: tracing each basin to a hole-filled region,
-and the mean-intensity filter over it. What is still missing is the merge and
-shape split, the area filter that runs on *those* objects, and measurement. So
-the output is candidate nuclei rather than cells, and the runtime is still not
-comparable with QuPath's.
+**The detection chain is closed.** Every stage `WatershedCellDetection` runs
+from the colour deconvolution to the objects it goes on to measure is ported and
+pinned against output recorded from QuPath itself, and running on QuPath's own
+tile grid: background subtraction by reconstruction, the Laplacian of Gaussian,
+the regional maxima, the labelling, the flood, the region tracing, the
+mean-intensity filter, the merge, the shape split, `refineBoundary` and the area
+filter. What is missing is the tail — ROI vertices, cell expansion, the
+measurements — none of which changes how many objects there are.
 
-The count is 66,739 candidates against QuPath's 25,757 cells on the same region.
-**Neither of the last two stages was the fix the roadmap expected**, and both
+**The count is 26,647 objects against QuPath's 25,757 cells on the same region**,
+1.035x, from 1.86x. It is not clean, and where it is not is documented: QuPath
+resolves its tile-seam overlaps on *cells* with smoothed polygon geometry, where
+this compares nucleus pixel masks, so it removes at least as many duplicates as
+this does. See D-008 in [DIVERGENCES.md](DIVERGENCES.md). A matching count is
+also the weakest evidence of a match there is — two runs can agree on how many
+objects they found and disagree about where every one of them is.
+
+**None of the last four stages was the fix the roadmap expected**, and the
 corrections are worth more than the code:
 
 - The roadmap said for two revisions that `findRegionalMaxima`'s prominence test
@@ -55,9 +61,11 @@ corrections are worth more than the code:
   — no tracing", and that the area filter could be estimated on raw basins. Both
   are wrong at the call site: ImageJ's Wand traces a *threshold range*, so two
   basins meeting with no watershed line between them are one object, and the
-  area filter runs after a merge-and-split on objects that do not exist yet. The
-  intensity filter alone removes 24.5%, which is within one object of what had
-  been predicted for it, leaving a 2.6x gap in stages still to come.
+  area filter runs after a merge-and-split on objects that do not exist yet.
+- Its list of remaining stages then turned out to be missing one. Between the
+  shape split and the area filter stands `refineBoundary` — a second Gaussian
+  and a second Laplacian at sigma 1, on the raw deconvolved channel, guarded by
+  a hard-coded `true`. A list of stages is not a reading of the source.
 
 Three bugs the fixtures caught, all of which had been producing entirely
 plausible images:
@@ -77,9 +85,9 @@ plausible images:
 That is the argument for the whole approach in miniature: no test that did not
 compare against QuPath's own numbers could have found any of them.
 
-**End-to-end cell detection is unchanged at QuPath's 15.87 s**, and will stay
-that way until the stages above exist. Component speedups and what they are
-worth are in [docs/benchmarks/README.md](docs/benchmarks/README.md); what comes
+**End-to-end cell detection is still not comparable with QuPath's 15.87 s**,
+because QuPath spends part of it on the tail this pipeline does not have.
+Component speedups and what they are worth are in [docs/benchmarks/README.md](docs/benchmarks/README.md); what comes
 next is in [docs/ROADMAP.md](docs/ROADMAP.md). **New here? Start with
 [docs/MEMO.md](docs/MEMO.md)** — what is finished, what is genuinely faster, and
 what to distrust, in one page.

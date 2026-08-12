@@ -18,17 +18,41 @@ build.
 | `qupath-watershed` | Marker-controlled flood, bucket queue, 4/8-connected labelling, filled-region tracing | `WatershedFlood.json`, 3 cases; `RegionalMaxima.json` labels, 13 surfaces; `ObjectFilters.json` regions, 17 images | queue 20-32x vs heap; flood 1.40x vs previous; labelling and tracing identical |
 | `qupath-filters` | MIN/MAX rank filter, Gaussian blur, convolution, morphological reconstruction | `RankFilterMinMax.json` 42 cases; `GaussianBlur.json` 10 kernels + 12 images; `LaplacianConvolution.json` 5 scales + 17 images; `RegionalMaxima.json` 11 reconstructions + 13 surfaces | rank 3.1-9.7x vs ImageJ; blur, convolution and reconstruction bit-identical |
 | `qupath-slide` | Aperio SVS / tiled TIFF reader | `SlideRegion.json`, 5 regions | 4000x4000 region in 0.09 s |
-| `qupath-pipeline` | Tiles a region QuPath's way, streams each tile through the above, filters and de-duplicates the candidates | `ColourDeconvolution*.json`; `ObjectFilters.json` statistics and decisions, 17 images | 80.4 Mpx/s on a saturated grid; 48,033 candidates against QuPath's 25,757 cells |
+| `qupath-pipeline` | Tiles a region QuPath's way and streams each tile through every stage from the deconvolution to the area filter | `ColourDeconvolution*.json`; `ObjectFilters.json` statistics and decisions, 17 images; `MergeAndSplit.json`; `RefineBoundary.json` | 70.1 Mpx/s on a saturated grid; 26,647 objects against QuPath's 25,757 cells |
 
-**The end-to-end number is still QuPath's 15.87 s**, because the pipeline is not
-`WatershedCellDetection`. Every image-processing stage QuPath runs *before* its
-watershed is ported and pinned, and so are the first two things it does *after*
-— tracing basins to filled regions, and the intensity filter over them — and, as
-of §2, so is the tile grid all of it runs on. What remains is the merge and
-shape split, the area filter that runs on the objects *that* produces, and the
-measurement tail. Do not compare the two figures until §1.5 below is done; the
-pipeline currently produces **48,033 candidates** where QuPath detects 25,757
-cells.
+**The detection chain is closed.** Every stage `WatershedCellDetection` runs from
+the colour deconvolution to the objects it goes on to measure is ported, pinned
+by a fixture recorded from a real QuPath build, and wired into the pipeline on
+QuPath's own tile grid: the background subtraction, the Laplacian of Gaussian,
+the regional maxima, the labelling, the flood, the region tracing, the intensity
+filter, the merge, the shape split, `refineBoundary` and the area filter.
+
+**On the profiled 4000x4000 region that is 26,647 objects against QuPath's
+25,757 cells — 1.035x, from 1.86x.** Each figure below is the stage measured
+against the stage before it, never a prediction:
+
+| Stage | Objects | Change |
+| --- | ---: | ---: |
+| basins traced | 80,762 | |
+| intensity filter | 51,152 | −36.7% |
+| merge | 26,397 | −48.4% |
+| shape split and `refineBoundary` | 45,990 | +74.2% |
+| area filter | 28,359 | −38.3% |
+| tile seams | **26,647** | −6.0% |
+| QuPath | 25,757 | |
+
+**Do not read 1.035x as clean.** `DIVERGENCES.md` D-008 is why: QuPath resolves
+its seam overlaps on **cells** — `cellExpansion` is 5 µm and `preferNucleus` is
+`false` — using smoothed polygon geometry, where this compares nucleus pixel
+masks. A cell is strictly larger than its nucleus, so QuPath removes at least as
+many duplicates as this does, and the residual 890 objects are the same order of
+magnitude as the 1,712 resolved away here. That is the first place to look for
+the remainder, not the last.
+
+**The end-to-end time is still not comparable to QuPath's 15.87 s.** What
+separates the two is now the tail — ROI vertices, cell expansion, the
+measurements — none of which changes how many objects there are, and all of
+which QuPath spends time on.
 
 ### The correction this file owes: §2's plan was wrong in the same way §1.5's was
 
@@ -69,17 +93,22 @@ missing. A figure that goes up because a stage was added is the honest outcome.
 **The counts are not a quality series either**: 397,822 -> 211,728 -> 42,966 ->
 91,957 -> 88,424 basins -> 66,739 candidates -> 48,045 after §2 put the tiles on
 QuPath's grid -> 48,033 once the seam resolution stopped skipping a copy QuPath
-had already deleted, against QuPath's 25,757 cells.
+had already deleted -> **26,647** once the merge, the shape split,
+`refineBoundary` and the area filter landed, against QuPath's 25,757 cells. Only
+the last step was a stage removing what a plan said it would, and its plan was
+the one written from the call site rather than from this file.
 
-**Nor is the throughput figure.** It has moved 0.215 s -> 0.95 s on the profiled
-4000x4000 region, and that is not a regression: the region is smaller than one
-of QuPath's grid steps, so it is now 4 tiles on 20 threads where it used to be
-272. Per pixel the work fell 30% (0.253 to 0.178 s/Mpx summed across threads).
-On a region large enough to fill the pool the pipeline does **80.4 Mpx/s**.
-Quote that one, or quote both with the tile counts attached. It was 66.7 before
-§4.7's raster pass landed, on the same 9000x9000 region in the same session; the
-42.6 this file used to give is a different region with more tissue in it and the
-two are not comparable.
+**Nor is the throughput figure.** It has moved 0.215 s -> 0.95 s -> 1.09 s on
+the profiled 4000x4000 region, and neither step is a regression: the first was
+§2 putting the region on QuPath's grid, where it is 4 tiles on 20 threads rather
+than 272, and the second is four stages that did not exist before being in the
+path. On a region large enough to fill the pool the pipeline does **70.1
+Mpx/s**, best of three on a 9000x9000 region at 25 tiles on 20 threads. It was
+80.4 there before this session's stages landed, and 66.7 before §4.7's raster
+pass; the 42.6 this file used to give is a different region with more tissue in
+it and the two are not comparable. **A figure that moves because a stage was
+added is the honest outcome** — quote it with the stage list attached, or not at
+all.
 
 ### The correction this file owes: §1.4 was not the stage that fixes the count
 
@@ -137,6 +166,10 @@ RUSTFLAGS="-C target-cpu=x86-64-v3" \
     cargo run --release -p qupath-pipeline --example reconstruct_previous_vs_current
 RUSTFLAGS="-C target-cpu=x86-64-v3" \
     cargo run --release -p qupath-pipeline --example previous_vs_current
+# the saturated grid the throughput figure is quoted on
+RUSTFLAGS="-C target-cpu=x86-64-v3" \
+    cargo run --release -p qupath-pipeline --example region -- \
+    data/CMU-1.svs 20000 5000 9000 9000
 ./parity/record.sh && ./parity/record-slide.sh && ./parity/bench.sh   # needs JDK 25
 ```
 
@@ -371,9 +404,10 @@ The flood connectivity was wrong in the same place and is fixed with it:
 flood is **4**-connected, not 8. It is also not the connectivity of the maxima
 test one line earlier, which is 8.
 
-This stage now costs 52% of pipeline stage time, the largest by a wide margin —
-59% of it the radius-16 erosion, 40% the reconstruction. Both numbers are new
-and neither has been looked at; see §4.7.
+This stage costs **37.6%** of pipeline stage time, still the largest by a wide
+margin — 26.2 points of it the reconstruction and 10.4 the radius-16 erosion.
+It was 52.9% before the stages of §1.5b landed around it; in absolute terms
+nothing about it moved. See §4.7.
 
 ### 1.5a Region tracing and the intensity filter — **done**
 
@@ -436,43 +470,48 @@ that copy, and `subtract_background` clears its mask on every call rather than
 only when it rebuilds it: the filter reads that mask, and a previous tile's
 would reject candidates at coordinates meaningless in this one.
 
-Cost in place: tracing 14.0% of pipeline stage time, the filter 1.1%. The §4.4
-ratio check does not fire — tracing does about 1.1 image-equivalents of work
-(6.1 M labelled pixels flooded, plus 13.7 M bounding-box pixels for the hole
-test against a 17.8 M image), which is comparable to the watershed beside it at
-14.3%.
+Cost in place: tracing 7.1% of pipeline stage time, the filter 0.5%. Both
+roughly halved as a share when the stages below landed around them; in absolute
+terms neither moved. The §4.4 ratio check does not fire — tracing does about 1.1
+image-equivalents of work (6.1 M labelled pixels flooded, plus 13.7 M
+bounding-box pixels for the hole test against a 17.8 M image), which is
+comparable to the watershed beside it at 11.7%.
 
-### 1.5b What is left, and what it has to be worth
+### 1.5b What is left — **the chain is closed; this is now the tail**
 
-The intensity filter dropped 24.5% — 88,423 candidates to **66,739** — which is
-within one object of the 66,740 the earlier estimate predicted for it. So that
-estimate was sound, and the conclusion it pointed at stands: **this was not the
-count fix either.** The gap to QuPath's 25,757 is still 2.6x, and it is now
-provably in what remains:
+Everything this section listed is ported, pinned and wired in. The table it used
+to hold as a prediction is the measured table at the top of this file, and the
+gap it was tracking went from 2.6x to **1.035x**.
 
-| Stage | Effect on the profiled region |
-| --- | --- |
-| `getFilledPolygonROIs`, holes filled | 88,424 markers -> 88,423 regions, **measured** |
-| mean intensity `> 0.1` on `ipToMeasure` | 66,739 survive, 24.5% dropped, **measured** |
-| `bp.filter(MAX)`, AND with the thresholded LoG | **ported**, bit-identical; merges adjacent candidates |
-| `new EDM().toWatershed(bp)`: split by shape | **ported**, bit-identical; splits some back |
-| `refineBoundary` — **this table did not know it existed**; see below | not ported, not measured |
-| area outside 10–400 µm², *on the objects that produces* | not measurable before `refineBoundary` |
-| tile seams (§2) | 66,739 -> **48,033**, 28% dropped, **measured** |
-| QuPath | **25,757** |
+The one number worth restating here, because it was this section's only piece of
+evidence before the pipeline could be asked: on `MergeAndSplit.json`'s realistic
+case the merge and split together took **87 candidates to 49 objects, 1.78x**.
+In place on the profiled region the same pair is 51,152 to 45,990 — 1.11x — and
+the difference is not a defect in either number. The fixture's case is 96x96
+random pixels, where nearly every candidate has a neighbour close enough for the
+dilation to bridge; a real tile is mostly nuclei that already stand apart. **A
+ratio measured on a synthetic input is not that ratio on a real one**, which is
+§5's own lesson arriving a second time and from the other direction.
 
-On the fixture's realistic case — random pixels through the whole real chain —
-the merge and the split together take **87 candidates to 49 objects, a 1.78x
-reduction**: the merge collapses 87 into 13 blobs and the split cuts those back
-into 49. That is the right order of magnitude for the 2.6x still outstanding, and
-it is the first evidence that the remaining gap is where this table says it is.
-It is *not* a pipeline number — see step 2b, which has to land before the
-pipeline can be asked.
+What remains — the old list's steps 4 and 5, with one added — none of which
+changes how many objects the pipeline finds:
 
-### The correction this file owes, again: §1.5b's step list was missing a stage
+- **Step 4, ROI vertices.** The masks match; the polygons do not exist. QuPath's
+  `PathObject` geometry is the Wand's vertex list, so exporting objects needs
+  the contour itself and not just what it encloses. This is also what D-008
+  needs: `smoothBoundaries` defaults on, and the seam resolution compares the
+  *smoothed* polygon's area.
+- **Step 4b, cell expansion**, which D-008 shows is not optional for the count
+  claim even though it adds no objects — the seam resolution runs on cells.
+- **Step 5, measurements**, into the columnar table `qupath-objects` already
+  provides.
+
+A fixture for each, recorded the same way as everything above.
+
+### The correction this file owed: §1.5b's step list had been missing a stage
 
 The list below said the area filter runs on what the shape split leaves. **It
-does not.** Between them stands `refineBoundary`, and reading the call site
+did not.** Between them stands `refineBoundary`, and reading the call site
 rather than this list is what found it:
 
 ```java
@@ -500,7 +539,7 @@ Three things make this load-bearing rather than a detail:
   sigma 1. On a memory-bandwidth-bound pipeline that is not free, and it is not
   in any cost estimate in this file.
 
-Order to port in, cheapest evidence first:
+The order it was ported in, cheapest evidence first, and what each was worth:
 
 1. ~~**Tile seams (§2)**~~ — **done**, and it was worth 1.33x of the gap. See §2.
 2. ~~**Merge and shape split**~~ — **done**, bit-identical, pinned by
@@ -508,30 +547,40 @@ Order to port in, cheapest evidence first:
    `MaximumFinder` segmentation and the mask `toWatershed` leaves. Six mutations
    were tried against it and five fail. The distance map is exact rather than a
    chamfer, and `isEDM = true` is what makes the maxima grouping work on
-   plateaus.
-2b. **`refineBoundary`**, above. Not optional, not in the old plan, and it needs
-   the raw detection channel plumbed through to it.
-3. **The area filter**, a mean and a pixel count over whatever step 2b leaves.
-   Note its mean test is `<`, where the first filter's is `<=`. Meaningless
-   before 2b, since it runs on those objects.
-4. **ROI vertices.** The masks match now; the polygons do not exist. QuPath's
-   `PathObject` geometry is the Wand's vertex list, so exporting objects needs
-   the contour itself and not just what it encloses. Note §2 already needs a
-   pixel mask per seam candidate, so the two overlap.
-5. **Measurements**, into the columnar table `qupath-objects` already provides.
+   plateaus. In place: 51,152 candidates to 26,397 merged blobs.
+3. ~~**`refineBoundary`**~~ — **done**, bit-identical, pinned by
+   `RefineBoundary.json` at two checkpoints: the sigma-1 Laplacian of Gaussian
+   compared by its bits, and the mask the block leaves. Fourteen cases, eight
+   mutations tried and all eight fail. The whole block is
+   `erode(bp) OR (bp AND cleanup > 0)`, and the merge's `MAX` and this `MIN`
+   share `ByteProcessor.filter` — where the merge could not tell a replicated
+   border from a zero-padded one, this can, and `all-foreground` is the case
+   that does. Together with the split: 26,397 to 45,990.
+4. ~~**The area filter**~~ — **done**. 45,990 to 28,359, 38.3% dropped. Its
+   three tests are not the first filter's: the mean is `<` where that one is
+   `<=`, and both area tests *and* the mean test sit inside
+   `if (minArea > 0 || maxArea > 0)`, so clearing the area window removes the
+   mean test with it.
 
-A fixture for each, recorded the same way as everything above.
-
-**The merge and the split are ported but not wired into the pipeline.** Running
-them without 2b would report a count QuPath never computes, and this file has
-enough measured-the-wrong-thing history already. The wiring lands with 2b.
+**The wiring landed with them**, which is what this section said it would. The
+area filter came with the wiring rather than after it, for the same reason the
+merge did not land alone: the seam resolution has to run on QuPath's final
+object set, and running it a stage early would have measured something QuPath
+never computes.
 
 ### 1.6 The claim
 
-Only once 1.1–1.5 are done: run both implementations on the same region and
-compare **cell counts first, then time**. A run that is fast and finds a
-different number of cells has not been ported. Success is Dice or IoU >= 0.99
-on the object masks per §5, and a cell count within a documented margin.
+**Object counts: 26,647 against QuPath's 25,757, 1.035x**, on the profiled
+4000x4000 region at QuPath's own tiling. That is the first end-to-end count
+comparison this project has been able to make, and D-008 says where the residual
+most likely is.
+
+**What is still not claimable is time**, and no honest comparison against
+QuPath's 15.87 s exists yet: QuPath spends part of that on the tail this
+pipeline does not have. Nor is the stronger success criterion met — Dice or IoU
+>= 0.99 on the object masks per §5 needs QuPath's per-object masks recorded,
+which no fixture holds. A matching count is necessary and is not sufficient: two
+runs can agree on how many objects there are and disagree about where.
 
 ---
 
@@ -552,21 +601,25 @@ said instead. What landed:
   approximately — the Wand's polygon encloses whole pixels, so its area *is* the
   filled pixel count.
 
-Measured on the profiled region, changing only the grid:
+Measured on the profiled region, changing only the grid. **The right-hand column
+is now objects after the whole chain**, where it used to be candidates after the
+intensity filter, so it is not comparable to the figures the paragraphs below
+discuss:
 
-| Grid | Tiles | Markers | Regions | Duplicates | Candidates |
+| Grid | Tiles | Markers | Regions | Duplicates | Objects |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| storage-sized, 240 px, no halo | 289 | 79,399 | 79,398 | 0 | 62,102 |
-| **QuPath's, 2052/3078, 60 px halo** | 4 | 80,763 | 80,762 | 3,107 | **48,045** |
-| one tile, no seam | 1 | 75,736 | 75,735 | 0 | 46,772 |
+| storage-sized, 240 px, no halo | 289 | 79,399 | 79,398 | 0 | 31,982 |
+| **QuPath's, 2052/3078, 60 px halo** | 4 | 80,763 | 80,762 | 1,712 | **26,647** |
+| one tile, no seam | 1 | 75,736 | 75,735 | 0 | 26,420 |
 
 Reproduce with `cargo run --release -p qupath-pipeline --example tile_seams`.
 
-**That table is the measurement as it was taken and the figures below discuss
-it as such.** The middle row is now 3,119 duplicates and **48,033** candidates:
-`resolve_overlaps` had skipped a second-tile copy once something removed it, and
-QuPath does not — `listSecond` is a snapshot, so a deleted copy goes on deleting.
-Twelve objects, 0.02%, and it changes none of the three conclusions.
+**The candidate-level figures the paragraphs below were written against**, kept
+because the conclusions are theirs: 62,102 / 48,045 / 46,772 on the three grids,
+and the middle row became 3,119 duplicates and 48,033 candidates once
+`resolve_overlaps` stopped skipping a second-tile copy something had already
+removed — QuPath does not, because `listSecond` is a snapshot and a deleted copy
+goes on deleting. Twelve objects, 0.02%, changing none of the conclusions.
 
 Three things worth keeping from this:
 
@@ -575,7 +628,10 @@ Three things worth keeping from this:
   finite halo reproduces a single-tile run. QuPath has the same property: its own
   4-tile run lands at 48,045 against a seamless 46,772, a 2.7% difference that is
   inherent to tiling rather than a defect. **The target is matching QuPath's
-  grid, not choosing a better one.**
+  grid, not choosing a better one.** At object level the same two runs are 26,647
+  and 26,420, **0.9%** — the stages after the filter absorb most of the seam
+  disagreement, which nothing predicted and which is worth knowing before anyone
+  proposes a wider halo.
 - **The count fell 28%**, 66,739 to 48,045, and the gap to QuPath's 25,757 went
   from 2.6x to **1.87x**. This is the first stage in three that removed anything
   like what a plan predicted — and it is the one whose prediction nobody wrote
@@ -585,10 +641,12 @@ Three things worth keeping from this:
   reconstruction on a 256 px tile is a different image from one on a 2000 px
   tile, and the smaller one was wrong.
 
-Still open here: an object placed exactly on a boundary is covered by
+Still open here, and it is now the weakest link in the count claim rather than a
+loose end: an object placed exactly on a boundary is covered by
 `overlaps::tests`, on hand-built candidates rather than through the pipeline. A
 fixture recorded from QuPath's own `resolveOverlaps` would be stronger and does
-not exist.
+not exist — and **D-008 says the port is comparing the wrong objects anyway**,
+nucleus masks where QuPath compares smoothed cell polygons.
 
 ---
 
@@ -618,6 +676,38 @@ dependencies are linked.
 Only after 1 and 2. Each of these is worth less than it looks — the Amdahl
 ceilings in `docs/benchmarks/README.md` multiply to about 1.7x for what is
 already ported.
+
+**The stage table, on the profiled region, now that the chain is closed.** Every
+share below is against a total of 3.78 s summed across threads, and four of the
+rows did not exist a session ago:
+
+| Stage | Share |
+| --- | ---: |
+| background — regrow | 26.2% |
+| background — erode | 10.4% |
+| **shape split** | **14.4%** |
+| watershed flood | 11.7% |
+| tracing | 7.1% |
+| **merge** | **6.2%** |
+| maxima | 5.1% |
+| **nuclei: second trace and area filter** | **4.4%** |
+| decode | 3.5% |
+| **`refineBoundary`** | **3.3%** |
+| gaussian blur | 2.5% |
+| deconvolve | 1.3% |
+| laplacian | 1.1% |
+| labelling | 0.9% |
+| object filter | 0.5% |
+
+**The §4.4 ratio check was applied to all four new stages and does not fire.**
+The shape split is the largest of them and lands third overall, but it is
+genuinely more work than the flood beside it: four sweeps of an exact distance
+map, then `MaximumFinder`'s five stages over it. `refineBoundary`'s 3.3% is a
+sigma-1 blur plus a Laplacian, against 2.5% and 1.1% for the sigma-3 pair, which
+is what a narrower kernel over the same image should cost. The merge's 6.2% is
+dominated by the trace and fill inside it, and the main trace is 7.1%. None of
+the four has had an optimisation pass, and the shape split is where one would
+start.
 
 1. **Doing less work.** Untouched so far and the largest lever by far.
    `Slide::level_for_width` exists but nothing uses it: detection at a
@@ -657,10 +747,12 @@ already ported.
    more than a strictly larger stage is a stall, and that ratio is worth
    checking for on every stage this list adds** — it is now the second time the
    same dependency has been shipped.
-5. **The watershed is now about 14% of pipeline stage time** — down from 40%
-   only because §1.4b and §1.5a added stages around it, not because it got
-   faster. In absolute terms it is unchanged.
-6. **Region tracing landed at 14.0%**, level with the watershed beside it. The
+5. **The watershed is 11.7% of pipeline stage time** — down from 40% only
+   because §1.4b, §1.5a and §1.5b added stages around it, not because it got
+   faster. In absolute terms it is unchanged, and it has been unchanged through
+   three revisions of this number.
+6. **Region tracing landed at 14.0% and now reads 7.1%**, for the same reason.
+   The
    §4.4 ratio check does **not** fire: it floods 6.1 M labelled pixels
    four-connected and then walks 13.7 M bounding-box pixels for the hole test,
    against a 17.8 M image, so it does about 1.1 image-equivalents of scattered
@@ -668,10 +760,11 @@ already ported.
    bounding-box half is the place to start if one is ever wanted — that figure
    is the sum over regions, so it grows with the number of candidates rather
    than with the image.
-7. **The background stage is 59% of pipeline stage time** and is the largest
-   single lever. **The 59% erosion / 40% reconstruction split this file used to
-   record was measured on 256 px tiles and does not survive §2.** At the tile
-   size QuPath actually uses it is:
+7. **The background stage is 37.6% of pipeline stage time** — 59% before §2,
+   52.9% before §1.5b — and is still the largest single lever. **The 59%
+   erosion / 40% reconstruction split this file used to record was measured on
+   256 px tiles and does not survive §2.** At the tile size QuPath actually uses
+   it is:
 
    | | 256 px tiles (old) | 2120 px tiles (measured) |
    | --- | ---: | ---: |
@@ -683,8 +776,8 @@ already ported.
    after all. Reproduce with
    `cargo run --release -p qupath-pipeline --example reconstruct_cost`.
 
-   The reconstruction is 46.5% of pipeline stage time on its own, and the
-   regional maxima add another 6.5% of the same code. Two things have now been
+   The reconstruction is 26.2% of pipeline stage time on its own, and the
+   regional maxima add another 5.1% of the same code. Two things have now been
    ruled out rather than assumed:
 
    - **The repeat heuristic is already optimal.** `morphologicalReconstruction`
@@ -750,6 +843,17 @@ already ported.
    remaining speed lever and it did not exist before §2.** The honest options are
    cache-blocking the separable stages within a tile, or accepting it; what is
    *not* available is going back to small tiles, because that is the §2 bug.
+
+   **That table predates §1.5b and the peak column has moved**, though the
+   efficiency argument has not: a tile's working set is now ~240 MB and the
+   20-thread peak is **4.46 GB**, from 3.30. The four new stages needed one more
+   float image that cannot be reconstructed (`fpDetection`, which
+   `refineBoundary` reads), a byte mask, the merger's region map, and the shape
+   split's own scratch at ~17 bytes a pixel — which is the largest single item in
+   the budget. Everything else they need is a buffer an earlier stage has
+   finished with: the distance map lands in the Laplacian's, and the
+   refinement's two working images come out of that and the prominence.
+   `bounded_memory.rs` carries the budget as 66 bytes per padded tile pixel.
 
    Two things already came out of this and are done. **Both were measured
    one variable at a time**, best of 5 on a 9000x9000 region, every variant
@@ -898,7 +1002,28 @@ the third stage running.
   reconstruction settles in 4 raster passes and dropping the repeat loop looked
   like a free 1.47x. On a real tile it takes 14 passes and dropping the loop is
   **2x slower**. The synthetic case was not merely less representative; it
-  reversed the sign of the answer.
+  reversed the sign of the answer. It also mis-sizes a *count*, and more gently:
+  the merge and split take 87 candidates to 49 on `MergeAndSplit.json`'s
+  realistic case, 1.78x, and 51,152 to 45,990 in place, 1.11x. Neither number is
+  wrong. A 96x96 field of random pixels puts nearly every candidate within a
+  pixel of a neighbour, and a real tile does not.
+- **The objects a cross-tile rule compares are part of the rule.** §2 ported
+  `resolveOverlaps` — right grid, right keep-the-larger rule, right 10%
+  threshold — against nucleus pixel masks. QuPath runs it on the **cells**,
+  because `cellExpansion` defaults to 5 µm and `preferNucleus` is `false`, using
+  smoothed polygon geometry. A cell is strictly larger than its nucleus, so the
+  port removes fewer duplicates than QuPath does and its object count is an
+  over-count by that amount. This is the same shape as "the unit a stage runs on
+  is part of the stage" below, one level up: the rule was read carefully and the
+  thing it is applied to was not. See D-008.
+- **A doc comment written before the recording is a prediction.**
+  `RefineBoundary.java`'s comment claimed a flat image convolves to exactly zero,
+  so `bp2` would be empty and the case would pin the erosion alone. The interior
+  does; the ring one pixel inside the border comes back at ±2.98e-08, rounding
+  left over from the blur's tail-sum edge handling, and `bp2` is exactly the
+  pixels where that went positive. The recording corrected the comment before the
+  port was written, which is the process working — but only because the fixture
+  was recorded first and read, rather than recorded and assumed.
 - **`map_init` is not per thread.** Rayon calls it once per *job* and splits into
   more jobs when there are more items, so per-worker scratch held under it scales
   with the item count. Invisible while tiles were 2 MB; unbounded once they were

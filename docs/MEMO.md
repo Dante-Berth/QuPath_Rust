@@ -32,42 +32,43 @@ equivalent code is 1–3x and that is not the lever.
 
 ## 2. Where it actually stands
 
-**The detection chain is ported through the shape split, and the tiling around
-it.** Deconvolution, background subtraction by reconstruction, Gaussian blur,
-Laplacian, regional maxima, labelling, watershed flood, filled-region tracing,
-the mean-intensity filter, the tile grid, the overlap resolution, and now the
-merge, the Euclidean distance map and `MaximumFinder`'s segmentation. Every one
-is pinned by a recorded fixture and most are bit-identical.
+**The detection chain is closed.** Every stage `WatershedCellDetection` runs
+from the colour deconvolution to the objects it goes on to measure is ported,
+pinned by a fixture recorded from a real QuPath build, and running in the
+pipeline on QuPath's own tile grid: deconvolution, background subtraction by
+reconstruction, Gaussian blur, Laplacian, regional maxima, labelling, watershed
+flood, filled-region tracing, the mean-intensity filter, the tile grid and its
+overlap resolution, the merge, the Euclidean distance map, `MaximumFinder`'s
+segmentation, `refineBoundary`, and the area filter.
 
-**It is not `WatershedCellDetection` yet.** Missing: `refineBoundary`, the area
-filter that runs on *its* objects, ROI vertices, and the measurement tail. Until
-those land there is no end-to-end claim to make.
-
-**The merge and the split are ported but not wired in**, deliberately: they sit
-between the intensity filter and `refineBoundary`, and running them without it
-would report a count QuPath never computes. On the fixture's realistic case they
-take 87 candidates to 49 objects — a 1.78x reduction, against the 2.6x still
-outstanding.
+**What is missing is the tail**, and none of it changes how many objects there
+are: ROI vertices, cell expansion, the measurements.
 
 **The count**, on the profiled 4000x4000 region of CMU-1:
 
 | | |
 | --- | ---: |
-| pipeline candidates | 48,033 |
+| pipeline objects | 26,647 |
 | QuPath cells | 25,757 |
-| gap | **1.86x** |
+| gap | **1.035x** |
 
-The gap is now provably inside the merge-and-split and the area filter, because
-everything else has been measured and accounted for.
+From 1.86x, and every step of the way there was measured against the step before
+it rather than predicted. **Do not read 1.035x as clean.** `DIVERGENCES.md`
+D-008: QuPath resolves its seam overlaps on *cells*, using smoothed polygon
+geometry, where this compares nucleus pixel masks. A cell is larger than its
+nucleus, so QuPath removes at least as many duplicates as this does — and 1,712
+were removed here against a residual gap of 890. Same order of magnitude, so
+that is the first place to look, not the last.
 
-**The time**: 80.4 Mpx/s on a 9000x9000 region, 25 tiles on 20 threads — a grid
-large enough to fill the pool. That is up from 66.7 this session and it is the
-first end-to-end gain the project has recorded. Do not compare it against the
-42.6 Mpx/s this file used to quote: that was a different region with more tissue
-in it, and only the ratio within one region means anything.
+**The time**: 70.1 Mpx/s on a 9000x9000 region, 25 tiles on 20 threads — a grid
+large enough to fill the pool. That is **down** from 80.4 and it is not a
+regression: four stages that did not exist are now in the path. Nothing got
+slower and nothing got faster this session. Do not compare either figure against
+the 42.6 Mpx/s this file used to quote: that was a different region with more
+tissue in it, and only the ratio within one region means anything.
 
-Against QuPath's 15.87 s there is still nothing to compare, because the two are
-not computing the same thing yet.
+Against QuPath's 15.87 s there is still nothing to compare, because QuPath
+spends part of it on the tail this pipeline does not have.
 
 ---
 
@@ -101,8 +102,17 @@ as much as widening the other two was. None of the three needed SIMD.
 
 ### Faster this session
 
-**The reconstruction's raster pass, 2.42x**, which is the first end-to-end wall
-clock gain this project has had: **1.19x** on a 9000x9000 region at 25 tiles on
+**Nothing.** This session closed the detection chain — `refineBoundary`, and the
+wiring of the merge, the shape split and the area filter into the pipeline — and
+made no attempt to make anything faster. The throughput figure moved 80.4 to
+70.1 Mpx/s because four stages that did not exist are now in the path. Read that
+as the pipeline doing more, not as it doing worse; nothing that was there before
+changed.
+
+### Faster in the session before this one
+
+**The reconstruction's raster pass, 2.42x**, which was the first end-to-end wall
+clock gain this project had: **1.19x** on a 9000x9000 region at 25 tiles on
 20 threads, 66.7 to 80.4 Mpx/s, with 82,997 objects out either way.
 
 It is worth reading §4 of this file before the number. The roadmap had said for
@@ -112,7 +122,7 @@ cost was one loop-carried dependency, and the measurement that found it took ten
 minutes: feed the loop a constant instead of its left neighbour, accept that the
 answer is wrong, read the clock. 3.87 ns/px became 0.62.
 
-### Faster in the session before this one
+### Faster two sessions ago
 
 **One thing, worth 1.17x**, and only at saturation: the rank filter and the
 convolver were parallelising rows *inside* the per-tile rayon job. Removing that
@@ -138,16 +148,23 @@ harness, so treat them as approximate.
   slower), and the erosion — which the roadmap had blamed — turned out to be 12%
   of the stage, not 59%. Its third lever, the raster pass, is the 2.42x above,
   and it took the stage from 57.6% of pipeline time to 52.9%.
+- **Every stage's share of pipeline time fell this session and none of them got
+  faster.** The background went 52.9% to 37.6%, tracing 14.0% to 7.1%, the
+  watershed 11.7%. Four new stages went into the denominator. A share is a
+  ratio; read it with the stage list that was in the total when it was taken.
+- **The peak resident set went 3.3 GB to 4.5 GB**, for the same reason and in the
+  same direction: more stages, more buffers. Three of the four new stages reuse
+  a buffer an earlier one has finished with, which is why it is 1.2 GB rather
+  than 2.
 
-**Nothing else in this session made anything faster.** The rest was one parity
-fix worth 12 objects, one negative result (specialising the pass on direction:
-1.03x), and a degenerate-shape sweep that found nothing.
+**Nothing in this session made anything faster.** It closed the chain, recorded
+one fixture, and found one divergence (D-008) by reading a call site.
 
 ---
 
 ## 4. How this project goes wrong
 
-The same failure has now happened eight times, and it is worth recognising by
+The same failure has now happened nine times, and it is worth recognising by
 shape rather than by instance:
 
 > **A plausible reading of the source, never checked against a run.**
@@ -177,6 +194,11 @@ shape rather than by instance:
   profiled region, thirty-seven on a larger one. Every unit test passed both
   ways, because they were all written from the same reading of the Java that the
   code was.
+- `resolve_overlaps` compares nucleus masks. QuPath compares **cells** — its
+  `cellExpansion` defaults to 5 µm and `preferNucleus` is `false` — with smoothed
+  polygon geometry. The grid was read carefully, the rule was read carefully, and
+  what the rule is applied to was not. D-008; found by re-reading the call site
+  while checking whether a 1.035x count was too good, not by any test.
 
 The seventh has a variant worth naming separately, because it is about speed
 rather than output:
@@ -196,6 +218,13 @@ worked, in order: recording a fixture from a real QuPath run, counting objects,
 and mutating each claimed convention to check a case fails without it. Looking at
 the image never once caught anything.
 
+**A tenth was avoided and is worth the same attention.** `RefineBoundary.java`'s
+own comment predicted that a flat image would convolve to exactly zero and leave
+`bp2` empty. The interior does; the ring one pixel inside the border comes back
+at ±2.98e-08. The comment was written before the recording, the recording
+contradicted it, and the comment was corrected before a line of Rust existed.
+That is the only reason it is not the tenth entry above.
+
 **So: read the call site before writing code against what `ROADMAP.md` says about
 a stage.** Its plans for the stages that remain were written the same way as the
 plans that were wrong.
@@ -204,25 +233,30 @@ plans that were wrong.
 
 ## 5. What to distrust right now
 
-- **`ROADMAP.md`'s remaining plans** — §1.5b steps 2b to 5. Written from a
-  summary of the source, same as the four that turned out wrong. Step 2 has
-  since been ported and its entry was accurate; the list it sat in was still
-  missing a whole stage.
-- **The merge and split are unwired**, so nothing measures them end to end yet.
-  Their fixtures are strong — four checkpoints, pixel-exact, five of six
-  mutations failing — but a stage that no pipeline run exercises has only ever
-  been checked on 13 small images.
-- **`resolve_overlaps` has no QuPath-recorded fixture.** Its nine tests use
-  hand-built candidates, and one real divergence has now been found in it by
-  re-reading the Java rather than by any of them failing. It is still the weakest
-  thing in the tree, and the one place a recorded fixture would pay most.
+- **The 1.035x count, above everything else on this list.** It is a count, and
+  a count is the weakest evidence of a match there is: two runs can agree on how
+  many objects they found and disagree about where every one of them is. The
+  strong test — Dice or IoU >= 0.99 on the object masks — needs QuPath's
+  per-object masks recorded and no fixture holds them. **A matching count is
+  necessary and is not sufficient.**
+- **`resolve_overlaps`, which is where the residual gap most likely is.** It has
+  no QuPath-recorded fixture; its nine tests use hand-built candidates; one real
+  divergence was found in it by re-reading the Java rather than by any of them
+  failing; and D-008 says it is comparing the wrong objects anyway. It is still
+  the weakest thing in the tree and now it is also load-bearing for the headline
+  number. A recorded fixture would pay more here than anywhere else.
+- **`ROADMAP.md`'s remaining plans** — the tail, ROI vertices and cell expansion
+  and measurements. Written from a summary of the source, same as the five that
+  turned out wrong. Every stage that has since been ported found something the
+  plan did not have.
 - **The 1.17x, the 8%, and the 1.19x wall clock** — separate processes, not
   interleaved. Directions are sound, magnitudes are approximate. The 2.42x on the
   reconstruction pass itself does meet the bar.
-- **Peak memory is ~3.3 GB** at 20 threads on a saturated grid, bounded by
-  threads x tile size and no longer growing with the region. That is a
-  consequence of QuPath's 2048 px tiles and it is 45x what the pipeline used
-  before. Bounded, documented, and larger than anyone would guess.
+- **Peak memory is ~4.5 GB** at 20 threads on a saturated grid, up from 3.3 with
+  this session's stages, bounded by threads x tile size and not growing with the
+  region. That is a consequence of QuPath's 2048 px tiles and it is 60x what the
+  pipeline used before §2. Bounded, documented, and larger than anyone would
+  guess.
 
 ---
 
@@ -230,19 +264,24 @@ plans that were wrong.
 
 Measured, not assumed:
 
-1. **The pipeline is memory-bandwidth-bound**, and this is new. Parallel
-   efficiency runs 96% at 2 threads and 61% at 20; going 12 to 20 threads buys
-   3% for 30% more memory. A tile's working set went from ~2 MB (L2-resident) to
-   ~145 MB (streaming from DRAM) when the tiling was corrected. This is the
-   biggest lever and it did not exist a week ago.
-2. ~~**The reconstruction raster pass**~~ — **done, 2.42x**, and the reason this
+1. **The pipeline is memory-bandwidth-bound.** Parallel efficiency runs 96% at
+   2 threads and 61% at 20; going 12 to 20 threads buys 3% for 30% more memory.
+   A tile's working set went from ~2 MB (L2-resident) to ~145 MB (streaming from
+   DRAM) when the tiling was corrected, and this session's stages took it to
+   ~240 MB. This is the biggest lever and it did not exist a week ago.
+2. **The shape split, 14.4% of stage time** — the largest single stage after the
+   background's two halves, and no optimisation pass has touched it. The only
+   new lever this session created, and the §4.4 stall check does not fire on it:
+   an exact distance map in four sweeps plus `MaximumFinder`'s five stages is
+   genuinely more work than the flood beside it at 11.7%.
+3. ~~**The reconstruction raster pass**~~ — **done, 2.42x**, and the reason this
    entry gave was wrong; see §4. What is left there is another 2.6x in principle
    — the chain-cut probe runs at 0.62 ns/px against the current 1.62 — but
    collecting it means a parallel prefix scan over the max-min semiring, which
    is a different algorithm rather than a tighter loop, and in place the stage is
    already running into §6.1's bandwidth wall (2.03x isolated, 1.71x at 25
    tiles). Not obviously the next thing to spend a day on.
-3. **Doing less work** — still untouched, still the largest lever in the
+4. **Doing less work** — still untouched, still the largest lever in the
    guidelines' own ordering. `Slide::level_for_width` exists and nothing uses it;
    the profiled region is 99% tissue but a whole slide is mostly glass.
 
