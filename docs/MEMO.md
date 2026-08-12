@@ -53,16 +53,21 @@ outstanding.
 
 | | |
 | --- | ---: |
-| pipeline candidates | 48,045 |
+| pipeline candidates | 48,033 |
 | QuPath cells | 25,757 |
-| gap | **1.87x** |
+| gap | **1.86x** |
 
 The gap is now provably inside the merge-and-split and the area filter, because
 everything else has been measured and accounted for.
 
-**The time**, same region: 42.6 Mpx/s on a grid large enough to fill the thread
-pool. Against QuPath's 15.87 s there is still nothing to compare, because the
-two are not computing the same thing yet.
+**The time**: 80.4 Mpx/s on a 9000x9000 region, 25 tiles on 20 threads — a grid
+large enough to fill the pool. That is up from 66.7 this session and it is the
+first end-to-end gain the project has recorded. Do not compare it against the
+42.6 Mpx/s this file used to quote: that was a different region with more tissue
+in it, and only the ratio within one region means anything.
+
+Against QuPath's 15.87 s there is still nothing to compare, because the two are
+not computing the same thing yet.
 
 ---
 
@@ -81,24 +86,42 @@ every timed iteration.
 | Columnar measurement scan/filter | ~100x | QuPath's per-object measurement map |
 | Watershed priority queue | 20–32x | a binary heap of the same shape |
 | Laplacian convolution | 3.69x in place | its own previous version |
+| Reconstruction raster pass | 2.42x | its own previous version |
 | MIN/MAX rank filter | 3.1–9.7x | ImageJ's `RankFilters` |
 | Gaussian blur | 2.30x in place | its own previous version |
 | Deconvolution | 0.768 s to 0.031 s | its own previous version |
 
-Two of those — the blur and the Laplacian — were the *same defect twice*: a
-loop-carried accumulator carrying one output pixel, so the loop ran at the
-latency of a multiply-add instead of its throughput. Neither needed SIMD.
+**Three of those are the same defect**, and it is now the pattern to check for
+first. The blur and the Laplacian both carried one output pixel in a loop-carried
+accumulator, so the loop ran at the latency of a multiply-add rather than its
+throughput. The reconstruction carried one pixel's result into the next pixel's
+input, which is a real data dependency rather than an accidental one — but it was
+three comparisons long where the algebra needs two, and shortening it was worth
+as much as widening the other two was. None of the three needed SIMD.
 
 ### Faster this session
+
+**The reconstruction's raster pass, 2.42x**, which is the first end-to-end wall
+clock gain this project has had: **1.19x** on a 9000x9000 region at 25 tiles on
+20 threads, 66.7 to 80.4 Mpx/s, with 82,997 objects out either way.
+
+It is worth reading §4 of this file before the number. The roadmap had said for
+two revisions why that pass was slow — index arithmetic, a per-pixel `Option`,
+edge branches in the inner loop — and **all of it together is worth 1.03x**. The
+cost was one loop-carried dependency, and the measurement that found it took ten
+minutes: feed the loop a constant instead of its left neighbour, accept that the
+answer is wrong, read the clock. 3.87 ns/px became 0.62.
+
+### Faster in the session before this one
 
 **One thing, worth 1.17x**, and only at saturation: the rank filter and the
 convolver were parallelising rows *inside* the per-tile rayon job. Removing that
 nesting is 2.053 s to 1.750 s on a 9000x9000 region, best of 5, same 142,957
 objects out.
 
-Against that, bounding per-worker scratch to the thread count costs **8%**. Net
-on `main`: **1.08x**. Both figures come from separate processes rather than one
-interleaved harness, so treat them as approximate.
+Against that, bounding per-worker scratch to the thread count costs **8%**. Net:
+**1.08x**. Both figures come from separate processes rather than one interleaved
+harness, so treat them as approximate.
 
 ### Not acceleration, however much it looks like it
 
@@ -107,22 +130,24 @@ interleaved harness, so treat them as approximate.
   went away was work that should never have happened.
 - **The headline region got 4.4x slower in wall clock**, 0.215 s to 0.95 s. Real,
   and not a regression: 4000x4000 is smaller than one of QuPath's grid steps, so
-  it is 4 tiles across 20 threads where it used to be 272. Quote 42.6 Mpx/s on a
+  it is 4 tiles across 20 threads where it used to be 272. Quote the Mpx/s on a
   saturated grid, or quote both with the tile counts attached. Never quote the
   0.215 s as a baseline — it was measured on the wrong tiling.
-- **The background stage was measured, not accelerated.** Its two known levers
-  were investigated and both came back negative: QuPath's raster-repeat heuristic
-  is already optimal (the textbook alternative is 2x slower), and the erosion —
-  which the roadmap had blamed — turned out to be 12% of the stage, not 59%.
+- **The background stage's other two levers came back negative.** QuPath's
+  raster-repeat heuristic is already optimal (the textbook alternative is 2x
+  slower), and the erosion — which the roadmap had blamed — turned out to be 12%
+  of the stage, not 59%. Its third lever, the raster pass, is the 2.42x above,
+  and it took the stage from 57.6% of pipeline time to 52.9%.
 
-**Nothing else in this session made anything faster.** The rest was a correctness
-fix, two negative results, and two soundness fixes.
+**Nothing else in this session made anything faster.** The rest was one parity
+fix worth 12 objects, one negative result (specialising the pass on direction:
+1.03x), and a degenerate-shape sweep that found nothing.
 
 ---
 
 ## 4. How this project goes wrong
 
-The same failure has now happened six times, and it is worth recognising by
+The same failure has now happened eight times, and it is worth recognising by
 shape rather than by instance:
 
 > **A plausible reading of the source, never checked against a run.**
@@ -146,6 +171,25 @@ shape rather than by instance:
   Laplacian, on an image the pipeline does not keep — guarded by a hard-coded
   `true` and a `sigma > 1.5` that CMU-1's 3.006 clears. A list of remaining
   stages is not a reading of the source, and this one had a stage missing.
+- `resolve_overlaps` skipped a candidate another tile's copy had already
+  deleted, which is the obvious thing and not what QuPath does: its `listSecond`
+  is a snapshot, and a deleted copy goes on deleting. Twelve objects on the
+  profiled region, thirty-seven on a larger one. Every unit test passed both
+  ways, because they were all written from the same reading of the Java that the
+  code was.
+
+The seventh has a variant worth naming separately, because it is about speed
+rather than output:
+
+> **A profile share, read as though it said why.**
+
+The roadmap recorded for two revisions that the reconstruction's raster pass was
+slow because of its index arithmetic, and named five specific things in the
+inner loop. All five together are worth 1.03x. It was one dependency chain, and
+the experiment that showed it — break the chain, keep everything else, accept
+the wrong answer, read the clock — cost ten minutes and was never run. The same
+shape as the blur's transpose in ROADMAP §4.3, which was also reasoned from a
+share and was also wrong.
 
 Every one produced entirely reasonable-looking output. The defences that actually
 worked, in order: recording a fixture from a real QuPath run, counting objects,
@@ -168,11 +212,13 @@ plans that were wrong.
   Their fixtures are strong — four checkpoints, pixel-exact, five of six
   mutations failing — but a stage that no pipeline run exercises has only ever
   been checked on 13 small images.
-- **`resolve_overlaps` has no QuPath-recorded fixture.** Its eight tests use
-  hand-built candidates. Given the record above, that is the weakest thing in the
-  tree.
-- **The 1.17x and the 8%** — separate processes, not interleaved. Directions are
-  sound, magnitudes are approximate.
+- **`resolve_overlaps` has no QuPath-recorded fixture.** Its nine tests use
+  hand-built candidates, and one real divergence has now been found in it by
+  re-reading the Java rather than by any of them failing. It is still the weakest
+  thing in the tree, and the one place a recorded fixture would pay most.
+- **The 1.17x, the 8%, and the 1.19x wall clock** — separate processes, not
+  interleaved. Directions are sound, magnitudes are approximate. The 2.42x on the
+  reconstruction pass itself does meet the bar.
 - **Peak memory is ~3.3 GB** at 20 threads on a saturated grid, bounded by
   threads x tile size and no longer growing with the region. That is a
   consequence of QuPath's 2048 px tiles and it is 45x what the pipeline used
@@ -189,11 +235,13 @@ Measured, not assumed:
    3% for 30% more memory. A tile's working set went from ~2 MB (L2-resident) to
    ~145 MB (streaming from DRAM) when the tiling was corrected. This is the
    biggest lever and it did not exist a week ago.
-2. **The reconstruction raster pass**, 46% of stage time, is still a
-   transliteration of QuPath's index arithmetic — `isize` strides, a runtime
-   `Option` tested per pixel, first-row branches inside the inner loop. ~14
-   cycles per pixel for a max-of-five-and-clamp. `RegionalMaxima.json` will
-   catch it if a rewrite changes an answer.
+2. ~~**The reconstruction raster pass**~~ — **done, 2.42x**, and the reason this
+   entry gave was wrong; see §4. What is left there is another 2.6x in principle
+   — the chain-cut probe runs at 0.62 ns/px against the current 1.62 — but
+   collecting it means a parallel prefix scan over the max-min semiring, which
+   is a different algorithm rather than a tighter loop, and in place the stage is
+   already running into §6.1's bandwidth wall (2.03x isolated, 1.71x at 25
+   tiles). Not obviously the next thing to spend a day on.
 3. **Doing less work** — still untouched, still the largest lever in the
    guidelines' own ordering. `Slide::level_for_width` exists and nothing uses it;
    the profiled region is 99% tissue but a whole slide is mostly glass.

@@ -18,7 +18,7 @@ build.
 | `qupath-watershed` | Marker-controlled flood, bucket queue, 4/8-connected labelling, filled-region tracing | `WatershedFlood.json`, 3 cases; `RegionalMaxima.json` labels, 13 surfaces; `ObjectFilters.json` regions, 17 images | queue 20-32x vs heap; flood 1.40x vs previous; labelling and tracing identical |
 | `qupath-filters` | MIN/MAX rank filter, Gaussian blur, convolution, morphological reconstruction | `RankFilterMinMax.json` 42 cases; `GaussianBlur.json` 10 kernels + 12 images; `LaplacianConvolution.json` 5 scales + 17 images; `RegionalMaxima.json` 11 reconstructions + 13 surfaces | rank 3.1-9.7x vs ImageJ; blur, convolution and reconstruction bit-identical |
 | `qupath-slide` | Aperio SVS / tiled TIFF reader | `SlideRegion.json`, 5 regions | 4000x4000 region in 0.09 s |
-| `qupath-pipeline` | Tiles a region QuPath's way, streams each tile through the above, filters and de-duplicates the candidates | `ColourDeconvolution*.json`; `ObjectFilters.json` statistics and decisions, 17 images | 42.6 Mpx/s on a saturated grid; 48,045 candidates against QuPath's 25,757 cells |
+| `qupath-pipeline` | Tiles a region QuPath's way, streams each tile through the above, filters and de-duplicates the candidates | `ColourDeconvolution*.json`; `ObjectFilters.json` statistics and decisions, 17 images | 80.4 Mpx/s on a saturated grid; 48,033 candidates against QuPath's 25,757 cells |
 
 **The end-to-end number is still QuPath's 15.87 s**, because the pipeline is not
 `WatershedCellDetection`. Every image-processing stage QuPath runs *before* its
@@ -27,7 +27,7 @@ watershed is ported and pinned, and so are the first two things it does *after*
 of §2, so is the tile grid all of it runs on. What remains is the merge and
 shape split, the area filter that runs on the objects *that* produces, and the
 measurement tail. Do not compare the two figures until §1.5 below is done; the
-pipeline currently produces **48,045 candidates** where QuPath detects 25,757
+pipeline currently produces **48,033 candidates** where QuPath detects 25,757
 cells.
 
 ### The correction this file owes: §2's plan was wrong in the same way §1.5's was
@@ -68,14 +68,18 @@ missing. A figure that goes up because a stage was added is the honest outcome.
 
 **The counts are not a quality series either**: 397,822 -> 211,728 -> 42,966 ->
 91,957 -> 88,424 basins -> 66,739 candidates -> 48,045 after §2 put the tiles on
-QuPath's grid, against QuPath's 25,757 cells.
+QuPath's grid -> 48,033 once the seam resolution stopped skipping a copy QuPath
+had already deleted, against QuPath's 25,757 cells.
 
 **Nor is the throughput figure.** It has moved 0.215 s -> 0.95 s on the profiled
 4000x4000 region, and that is not a regression: the region is smaller than one
 of QuPath's grid steps, so it is now 4 tiles on 20 threads where it used to be
 272. Per pixel the work fell 30% (0.253 to 0.178 s/Mpx summed across threads).
-On a region large enough to fill the pool the pipeline does **42.6 Mpx/s**.
-Quote that one, or quote both with the tile counts attached.
+On a region large enough to fill the pool the pipeline does **80.4 Mpx/s**.
+Quote that one, or quote both with the tile counts attached. It was 66.7 before
+§4.7's raster pass landed, on the same 9000x9000 region in the same session; the
+42.6 this file used to give is a different region with more tissue in it and the
+two are not comparable.
 
 ### The correction this file owes: §1.4 was not the stage that fixes the count
 
@@ -454,7 +458,7 @@ provably in what remains:
 | `new EDM().toWatershed(bp)`: split by shape | **ported**, bit-identical; splits some back |
 | `refineBoundary` — **this table did not know it existed**; see below | not ported, not measured |
 | area outside 10–400 µm², *on the objects that produces* | not measurable before `refineBoundary` |
-| tile seams (§2) | 66,739 -> **48,045**, 28% dropped, **measured** |
+| tile seams (§2) | 66,739 -> **48,033**, 28% dropped, **measured** |
 | QuPath | **25,757** |
 
 On the fixture's realistic case — random pixels through the whole real chain —
@@ -557,6 +561,12 @@ Measured on the profiled region, changing only the grid:
 | one tile, no seam | 1 | 75,736 | 75,735 | 0 | 46,772 |
 
 Reproduce with `cargo run --release -p qupath-pipeline --example tile_seams`.
+
+**That table is the measurement as it was taken and the figures below discuss
+it as such.** The middle row is now 3,119 duplicates and **48,033** candidates:
+`resolve_overlaps` had skipped a second-tile copy once something removed it, and
+QuPath does not — `listSecond` is a snapshot, so a deleted copy goes on deleting.
+Twelve objects, 0.02%, and it changes none of the three conclusions.
 
 Three things worth keeping from this:
 
