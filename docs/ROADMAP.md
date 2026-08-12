@@ -788,19 +788,6 @@ scheduling artefact. `erode_cost` says what it is made of, on a real tile:
 | the erosion, radius 16.03 | 19.30 |
 | its 33 folded source rows alone | 2.69 |
 
-Re-measured this session at `-C target-cpu=x86-64-v3`, which is the flag every
-benchmark in this file is quoted at, on the same 2120² real tile: **25.87
-ns/px against a vertical floor of 3.53**, so the filter costs **7.32x its
-floor** rather than the 2.82x the same probe reports on a default build. The
-gap between those two ratios is the whole point — the vertical fold is a
-slice-to-slice maximum that AVX2 speeds up **10.7x**, while the horizontal
-half, which carries a serial running maximum through each block, speeds up
-**3.1x** (68.74 to 22.34 ns/px). **The horizontal half is not merely most of
-the stage, it is the half that does not vectorise.** That is a sharper
-statement of the target than "86%" — though 86% is what it still comes to on
-the AVX2 build, 22.34 of 25.87 ns/px, so the share this file already recorded
-was right even though the ratio beside it was not.
-
 **86% of it is the horizontal maxima**, not the vertical folds — **eleven**
 rectangles (this file said thirteen; `Plan::for_radius(16.03)` produces eleven,
 of half-widths 16, 15, 14, 13, 12, 11, 10, 9, 7, 5 and 1), each costing four
@@ -809,6 +796,18 @@ combine) plus the negated whole-image copy that MIN takes on the way in.
 Pairing the prefix and suffix chains so four run in flight instead of one was
 tried and is worth **1.00x**, so it is throughput and not latency: the passes
 themselves are the cost.
+
+**And the ratio in that table was taken on the wrong build.** Re-measured at
+`-C target-cpu=x86-64-v3`, which is the flag every benchmark in this file is
+quoted at, on the same 2120² real tile: **25.87 ns/px against a vertical floor
+of 3.53**, so the filter costs **7.32x its floor**, not 2.82x. The gap between
+those two ratios is the finding. AVX2 speeds the vertical fold — a
+slice-to-slice maximum — up **10.7x**, and the horizontal half, which carries a
+serial running maximum through each block, only **3.1x** (68.74 to 22.34
+ns/px). **The horizontal half is not merely most of the stage, it is the half
+that does not vectorise.** The 86% share survives intact on the AVX2 build,
+22.34 of 25.87 ns/px; it was the ratio beside it that was measuring a different
+program.
 
 ### "Fewer passes per rectangle" was the wrong place to look, and here is why
 
@@ -852,6 +851,15 @@ about 77 gone. Isolated on a real tile, 0.1164 s to 0.1159 s, lower in all six
 alternating pairs; ~0.4%, under the 1.3% its pass count predicts because a fill
 is a store-only stream that never misses.
 
+**That 0.4% does not meet the bar §5 now sets**, and this file should say so
+rather than leave the two paragraphs to contradict each other. It was measured
+by alternating two separately built binaries, and two binaries of identical
+source were later found to differ by 7.7% here on layout alone. The change
+removes a pass that is provably there and the six pairs did agree in sign, so
+it is kept; but the number attached to it is not resolved by the method that
+produced it, and the same caveat applies to every sub-percent alternating-binary
+claim in this section — including `afae767`'s 1.3%.
+
 **So the erosion's remaining cost is the decomposition working as designed**,
 and the next attempt on it is not a better rectangle scheme. The target the
 measurements above actually name is the van Herk scan itself: a serial running
@@ -863,12 +871,23 @@ one part of this filter SIMD does not help. Two things follow, neither tried:
   1, 2, 4, 8, 16, taking a maximum each time). That replaces 33 serial
   comparisons with five vector operations per block. It is the only change
   identified here that attacks the 3.1x rather than the pass count.
-- **Or drop van Herk at these widths.** It is O(1) per pixel in comparisons but
-  pays four passes and a serial chain for it. At `half_width` 16 the shift path
-  costs 33 passes of pure vectorised maximum instead, and the crossover in
-  `horizontal_max` is set at 3 on a pass count that assumed both sides
-  vectorise equally. On the AVX2 build they do not. Where that crossover
-  actually falls is now an open and cheaply measurable question.
+- **Dropping van Herk at the narrow widths — done, in `7270ed6`.** It is O(1)
+  per pixel in comparisons but pays four passes and a serial chain for it,
+  and `horizontal_max` chose between it and the shift path at half-width 3, on
+  a pass count that assumed both sides vectorise equally. They do not. Swept
+  inside one binary on a real tile:
+
+  | threshold | 3 | 6 | **7** | 8 | 9 | 11 | 13 | 17 |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | seconds | .1159 | .1153 | **.1152** | .1159 | .1178 | .1198 | .1255 | .1436 |
+
+  Seven wins in ten of ten interleaved runs, about **0.6%**, and the curve
+  turns up sharply after 9 — so the shift path is ahead further than counting
+  said, but van Herk is still right for the ten widest rectangles. This moves
+  three rectangles across: half-widths 5 and 1 of the erosion, 2 of the
+  radius-32.06 dilation. The saturated grid still reports 19,063 objects. What
+  it does *not* do is touch the widest rectangles, which is where the 22.34
+  ns/px actually sits — the first bullet is still the one that matters.
 
 **A note for anyone re-measuring:** `erode_cost` reports 25.87 ns/px with
 `-C target-cpu=x86-64-v3` and 106.43 without it. Every figure in this section
@@ -1182,6 +1201,17 @@ the third stage running.
   interleaved in one process, take the minimum, and assert both produce
   identical output on every timed iteration. See the `previous_vs_current`
   examples.
+- **Two binaries are not a controlled comparison below about 5%.** Building the
+  same source twice and timing the two executables — the alternating-binaries
+  protocol used for several changes in §4 — measured `erode_cost` at 0.1250 and
+  0.1160 s for **identical semantics**, 7.7% apart from code layout alone. Any
+  claim smaller than that made by comparing two builds is measuring the linker.
+  Where a change can be expressed as a parameter, vary it *inside* one binary
+  and interleave the settings; `BLOCK_THRESHOLD` and its environment override
+  in `qupath-filters` are the worked example, and that is how the 0.6% there
+  was established after a two-binary run had shown 0.3% with a reversed pair.
+  Where it cannot, the honest floor for a two-binary claim is several percent,
+  which is a reason to prefer changes large enough to clear it.
 - **Plausible wrong output is the real risk.** Three bugs now — the transposed
   stain matrix, the strict maximum test, and the DAB vector stored under the
   name `EOSIN` — produced output that looked entirely reasonable. Every one was
