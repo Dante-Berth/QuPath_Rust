@@ -32,12 +32,14 @@ const TILE: u32 = 512;
 
 /// Bytes of scratch each in-flight tile needs per pixel of its padded rectangle.
 ///
-/// The per-worker buffers in `Scratch`: three for the RGB tile, seven `f32`
-/// images (density, background, to_measure, log, prominence, labels, and the
-/// decode staging), and one `u32` region map. Rounded up, and the assertion
+/// The per-worker buffers in `Scratch`: three for the RGB tile, eight `f32`
+/// images (density, detection, background, to_measure, log, prominence, labels,
+/// and the decode staging), two `u32` region maps (the tracer's and the
+/// merger's), one `u8` binary, and the shape split's own scratch, which is the
+/// largest single item at about 17 bytes a pixel. Rounded up, and the assertion
 /// below carries a further factor for allocator slack and the region maps'
 /// growth, so this is a design statement rather than a fitted constant.
-const BYTES_PER_TILE_PIXEL: u64 = 40;
+const BYTES_PER_TILE_PIXEL: u64 = 66;
 
 /// How much the high-water mark may rise when the region grows four-fold at a
 /// fixed tile size and a fixed worker count.

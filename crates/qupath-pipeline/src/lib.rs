@@ -16,19 +16,20 @@
 //! afterwards: tracing each basin to a hole-filled region, and dropping the
 //! ones whose mean intensity or background overlap disqualifies them.
 //!
-//! What is still absent, all of it downstream of the filter:
+//! and so is everything between that filter and the nuclei QuPath goes on to
+//! measure: the merge, the shape split, the boundary refinement, and the area
+//! filter that runs on the objects those leave.
 //!
-//! - **Merging and the shape split.** The survivors are dilated, intersected
-//!   with the thresholded Laplacian, and split again by a distance-transform
-//!   watershed. This changes object identity, not only count.
-//! - **The area filter.** Objects outside 10–400 µm² are dropped — but *after*
-//!   that merge and split, on its objects rather than on these, which is why it
-//!   is not applied here.
-//! - **Cell expansion and measurement.**
+//! What is still absent:
 //!
-//! Those are why [`Outcome::objects`] is not QuPath's count. It is a count of
-//! candidates that passed the first object-level test and no other, and
-//! `docs/ROADMAP.md` §1.5 is where the rest get ported.
+//! - **ROI vertices.** The masks are here; the polygons are not. QuPath's
+//!   `PathObject` geometry is the Wand's vertex list, so exporting objects needs
+//!   the contour and not just what it encloses.
+//! - **Cell expansion and measurement.** Neither changes the nucleus count.
+//!
+//! So [`Outcome::objects`] is now a count of the same objects QuPath's
+//! `roisNuclei` holds after its area filter — see `docs/ROADMAP.md` §1.5 for
+//! what that is worth and what it is not.
 //!
 //! What this does establish is the path: real pixels, real decode, every ported
 //! stage in QuPath's own order, at tile granularity, with memory that does not
@@ -53,7 +54,7 @@ use std::time::Instant;
 
 use qupath_filters::{Convolver, GaussianBlur, RankFilter, RankOp, Reconstructor};
 use qupath_slide::{Slide, SlideError};
-use qupath_watershed::{Connectivity, Labeller, RegionTracer, Watershed};
+use qupath_watershed::{Connectivity, DistanceMap, Labeller, RegionTracer, Segmenter, Watershed};
 use rayon::prelude::*;
 
 pub use merge::{FOREGROUND, Merger};
@@ -137,6 +138,20 @@ pub struct Params {
     pub connectivity: Connectivity,
     /// Preferred side of a processing tile, in pixels.
     ///
+    /// Smallest area an object may have and survive, in pixels, or zero to
+    /// disable the test.
+    ///
+    /// QuPath asks for 10 µm² and divides by the **squared** pixel size, which
+    /// on CMU-1's 0.4990 is 40.16 px². The area is
+    /// [`RegionStats::area`] — ImageJ's `pixelCount`, which skips non-finite
+    /// pixels — rather than the region's size.
+    ///
+    /// Disabling this **and** [`Params::max_area`] disables the second mean test
+    /// with them; see [`ObjectFilter::apply_area`].
+    pub min_area: f64,
+    /// Largest area an object may have and survive, in pixels, or zero to
+    /// disable the test. QuPath's 400 µm², which is 1606.42 px² on CMU-1.
+    pub max_area: f64,
     /// `AbstractTileableDetectionPlugin.PREFERRED_TILE_SIZE * downsampleFactor`.
     /// **This is not the slide's TIFF tile size**, which on CMU-1 is 240 px:
     /// detection tiles are its own grid, an order of magnitude larger, and
@@ -179,6 +194,11 @@ impl Default for Params {
             // QuPath's `threshold` parameter. Nothing scales it: it is an
             // optical density, so it is independent of the pixel size.
             intensity_threshold: 0.1,
+            // 10 and 400 µm² over CMU-1's 0.4990² µm² per pixel. Note the
+            // *squared* pixel size: an area converts differently from a radius,
+            // and using the radius conversion here would be out by 2x.
+            min_area: 10.0 / (0.4990 * 0.4990),
+            max_area: 400.0 / (0.4990 * 0.4990),
             // `Watershed.doWatershed(fpLoG, ipNucleusLabels, 0, false)` — the
             // `false` is `conn8`. Four, not eight, and not the same as the
             // 8-connected neighbourhood the maxima test uses one line earlier.
@@ -222,6 +242,11 @@ struct StageClocks {
     flood: AtomicU64,
     trace: AtomicU64,
     filter: AtomicU64,
+    merge: AtomicU64,
+    split: AtomicU64,
+    refine: AtomicU64,
+    /// The second trace, over the refined binary, and the area filter over it.
+    nuclei: AtomicU64,
 }
 
 /// Time spent in each stage, in seconds, summed across threads.
@@ -253,6 +278,17 @@ pub struct Stages {
     pub trace: f64,
     /// The mean-intensity and background-mask tests over those regions.
     pub filter: f64,
+    /// The merge: a 3x3 maximum, the intersection with the thresholded
+    /// Laplacian, and the hole fill that follows them.
+    pub merge: f64,
+    /// The shape split: the Euclidean distance map and the segmentation
+    /// `MaximumFinder` derives from it.
+    pub split: f64,
+    /// The boundary refinement: a second Gaussian and a second Laplacian, at
+    /// sigma 1, over the raw detection channel.
+    pub refine: f64,
+    /// Tracing the refined binary to nuclei, and the area filter over them.
+    pub nuclei: f64,
 }
 
 impl Stages {
@@ -269,6 +305,10 @@ impl Stages {
             + self.flood
             + self.trace
             + self.filter
+            + self.merge
+            + self.split
+            + self.refine
+            + self.nuclei
     }
 }
 
@@ -288,11 +328,28 @@ pub struct Outcome {
     /// Lower than [`Outcome::markers`] wherever two basins met with no
     /// watershed line between them, or one enclosed another.
     pub regions: u64,
-    /// Candidates surviving the mean-intensity and background-mask tests, after
-    /// duplicates across tile seams have been resolved.
+    /// Candidates surviving the mean-intensity and background-mask tests,
+    /// summed over tiles.
     ///
-    /// **Still not QuPath's cell count.** The merge, the shape split and the
-    /// area filter all come after this and all of them change it.
+    /// QuPath never counts these; it fills them straight into `bp`. The count
+    /// is here because §1.5b's table needs to know what each stage removes, and
+    /// a stage's effect is only measurable against the stage before it.
+    pub candidates: u64,
+    /// Regions the merge leaves — QuPath's `rois2` — summed over tiles.
+    ///
+    /// Lower than [`Outcome::candidates`] wherever the dilation bridged two
+    /// candidates the thresholded Laplacian already joined.
+    pub merged: u64,
+    /// Objects after the shape split and the boundary refinement, summed over
+    /// tiles: QuPath's `roisNuclei`, before its area filter runs on them.
+    pub nuclei: u64,
+    /// Nuclei surviving the area filter, after duplicates across tile seams
+    /// have been resolved.
+    ///
+    /// This is the object set QuPath goes on to measure and convert to
+    /// detections. What separates it from a cell count is the tail — ROI
+    /// vertices, cell expansion, measurements — none of which changes how many
+    /// there are.
     pub objects: u64,
     /// Candidates a neighbouring tile had a better copy of, removed by
     /// [`resolve_overlaps`]. Zero when the region fits in one tile.
@@ -344,6 +401,15 @@ struct Scratch {
     /// Haematoxylin optical density, then the same buffer with the background
     /// subtracted and the blur applied in place.
     density: Vec<f32>,
+    /// QuPath's `fpDetection`: the haematoxylin optical density as the
+    /// deconvolution left it, before the background subtraction and the blur.
+    ///
+    /// A third image, and the last stage in the tile is the only thing that
+    /// reads it — `refineBoundary` duplicates `fpDetection` and filters it at
+    /// sigma 1. It cannot be recovered from `to_measure` and the background
+    /// estimate: adding the estimate back is not the bit pattern the subtraction
+    /// started from.
+    detection: Vec<f32>,
     /// The background estimate: an erosion of `density` grown back under it.
     background: Vec<f32>,
     /// Non-empty only where a region exceeded [`Params::max_background`], which
@@ -361,8 +427,12 @@ struct Scratch {
     /// How far each pixel of `log` stands above the saddle that reaches it.
     prominence: Vec<f32>,
     labels: Vec<f32>,
-    /// Which traced candidate each pixel belongs to, holes included.
+    /// Which traced candidate each pixel belongs to, holes included. Reused for
+    /// the nuclei once the merge, the split and the refinement have run.
     regions: Vec<u32>,
+    /// QuPath's `bp`: 255 inside an object, 0 outside. Every stage from the
+    /// merge onwards reads and writes this rather than a float image.
+    binary: Vec<u8>,
     /// Bounding box and filled area of each traced candidate. Populated only
     /// when the region is tiled, since only a seam can need it.
     extents: Vec<Extent>,
@@ -374,6 +444,10 @@ struct Scratch {
     flooder: Watershed,
     tracer: RegionTracer,
     objects: ObjectFilter,
+    merger: Merger,
+    distances: DistanceMap,
+    segmenter: Segmenter,
+    refiner: BoundaryRefiner,
 }
 
 thread_local! {
@@ -397,6 +471,7 @@ impl Scratch {
             rgb: Vec::new(),
             decoded: Vec::new(),
             density: Vec::new(),
+            detection: Vec::new(),
             background: Vec::new(),
             background_mask: Vec::new(),
             to_measure: Vec::new(),
@@ -404,6 +479,7 @@ impl Scratch {
             prominence: Vec::new(),
             labels: Vec::new(),
             regions: Vec::new(),
+            binary: Vec::new(),
             extents: Vec::new(),
             blur: GaussianBlur::new(),
             // Sequential rows: this scratch is already inside one rayon job per
@@ -417,6 +493,10 @@ impl Scratch {
             flooder: Watershed::new(),
             tracer: RegionTracer::new(),
             objects: ObjectFilter::new(),
+            merger: Merger::new(),
+            distances: DistanceMap::new(),
+            segmenter: Segmenter::new(),
+            refiner: BoundaryRefiner::new(),
         }
     }
 }
@@ -480,6 +560,9 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
     let markers = AtomicU64::new(0);
     let labelled = AtomicU64::new(0);
     let regions = AtomicU64::new(0);
+    let candidates = AtomicU64::new(0);
+    let merged = AtomicU64::new(0);
+    let nuclei = AtomicU64::new(0);
     let objects = AtomicU64::new(0);
     let pixels = AtomicU64::new(0);
 
@@ -519,6 +602,15 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
 
                 let mark = Instant::now();
                 stains.haematoxylin_into(&scratch.rgb, &mut scratch.density);
+                // `fpLoG = (FloatProcessor)fpDetection.duplicate()`, the other
+                // way round: the working image is the copy here and the
+                // untouched one is kept, because `fpDetection` outlives every
+                // stage that modifies `fpLoG` and is read once at the very end
+                // by `refineBoundary`.
+                if params.sigma > SIGMA_FLOOR {
+                    scratch.detection.clear();
+                    scratch.detection.extend_from_slice(&scratch.density);
+                }
                 clocks.deconvolve.fetch_add(nanos(mark), Ordering::Relaxed);
 
                 // Stage order follows `WatershedCellDetection`: the background is
@@ -611,13 +703,19 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
                     background,
                 );
                 clocks.filter.fetch_add(nanos(mark), Ordering::Relaxed);
-                objects.fetch_add(u64::from(kept), Ordering::Relaxed);
+                candidates.fetch_add(u64::from(kept), Ordering::Relaxed);
+
+                let found = finish_objects(scratch, width, params, &clocks);
+                merged.fetch_add(u64::from(found.merged), Ordering::Relaxed);
+                nuclei.fetch_add(u64::from(found.nuclei), Ordering::Relaxed);
+                objects.fetch_add(u64::from(found.kept), Ordering::Relaxed);
 
                 // Everything above is per-tile and final. What is left is the one
                 // thing a tile cannot decide alone: whether a neighbour found the
-                // same nucleus. Only candidates reaching another tile's rectangle
+                // same nucleus. Only objects reaching another tile's rectangle
                 // can, so only those get a mask built for them.
-                let seam = collect_seam_candidates(scratch, index, tile, &padded, width);
+                let seam =
+                    collect_seam_candidates(scratch, index, tile, &padded, width, found.nuclei);
                 Ok(seam)
             })
         })
@@ -637,6 +735,9 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
         markers: markers.load(Ordering::Relaxed),
         labelled: labelled.load(Ordering::Relaxed),
         regions: regions.load(Ordering::Relaxed),
+        candidates: candidates.load(Ordering::Relaxed),
+        merged: merged.load(Ordering::Relaxed),
+        nuclei: nuclei.load(Ordering::Relaxed),
         objects: objects.load(Ordering::Relaxed) - u64::from(duplicates),
         duplicates: u64::from(duplicates),
         elapsed,
@@ -653,6 +754,10 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
             flood: seconds(&clocks.flood),
             trace: seconds(&clocks.trace),
             filter: seconds(&clocks.filter),
+            merge: seconds(&clocks.merge),
+            split: seconds(&clocks.split),
+            refine: seconds(&clocks.refine),
+            nuclei: seconds(&clocks.nuclei),
         },
         peak_resident_bytes: peak_resident_bytes(),
     })
@@ -713,7 +818,111 @@ fn seed_markers(
     found
 }
 
-/// Builds the candidates of one tile that another tile could also have found.
+/// What one tile's run of the stages after the intensity filter produced.
+struct Objects {
+    /// Regions the merge left: QuPath's `rois2`.
+    merged: u32,
+    /// Objects the shape split and the boundary refinement left, which is what
+    /// the area filter is handed: QuPath's `roisNuclei`.
+    nuclei: u32,
+    /// How many of those survived the area filter.
+    kept: u32,
+}
+
+/// Everything `WatershedCellDetection` does between the intensity filter and
+/// the nuclei it goes on to measure.
+///
+/// ```java
+/// bp.filter(ImageProcessor.MAX);
+/// bp.copyBits(bpLoG, 0, 0, Blitter.AND);
+/// ... fill holes ...
+/// new EDM().toWatershed(bp);
+/// ... refineBoundary ...
+/// List<PolygonRoi> roisNuclei = RoiLabeling.getFilledPolygonROIs(bp, Wand.FOUR_CONNECTED);
+/// ... area filter ...
+/// ```
+///
+/// The tile has three float images it is finished with by the time this runs —
+/// `log` once the merge's intersection has read it, `prominence` once the
+/// labelling has, `labels` once the trace has — so the distance map and the
+/// refinement's two working images come out of those rather than out of three
+/// more allocations. At 2120 px tiles and 20 workers that is the difference
+/// between the peak this pipeline claims and 1 GB more of it.
+fn finish_objects(
+    scratch: &mut Scratch,
+    width: usize,
+    params: Params,
+    clocks: &StageClocks,
+) -> Objects {
+    // `bp`: a fresh ByteProcessor with every surviving candidate filled.
+    let mark = Instant::now();
+    scratch.binary.clear();
+    scratch.binary.resize(scratch.regions.len(), 0);
+    scratch
+        .objects
+        .write_binary(&scratch.regions, &mut scratch.binary);
+
+    let merged = scratch.merger.merge(
+        &mut scratch.binary,
+        &scratch.log,
+        width,
+        &mut scratch.tracer,
+    );
+    clocks.merge.fetch_add(nanos(mark), Ordering::Relaxed);
+
+    // `new EDM().toWatershed(bp)`. The Laplacian has been read for the last
+    // time by the merge above, so its buffer becomes the distance map.
+    let mark = Instant::now();
+    scratch
+        .distances
+        .make_float_edm(&scratch.binary, &mut scratch.log, width);
+    scratch
+        .segmenter
+        .segment(&scratch.log, &mut scratch.binary, width);
+    clocks.split.fetch_add(nanos(mark), Ordering::Relaxed);
+
+    // `if (refineBoundary && sigma > 1.5)`. `refineBoundary` is a hard-coded
+    // `true`, so the sigma is the whole of the condition.
+    let mark = Instant::now();
+    if params.sigma > SIGMA_FLOOR {
+        let mut smoothed = std::mem::take(&mut scratch.log);
+        scratch.refiner.refine(
+            &scratch.detection,
+            &mut scratch.binary,
+            width,
+            &mut smoothed,
+            &mut scratch.prominence,
+        );
+        scratch.log = smoothed;
+    }
+    clocks.refine.fetch_add(nanos(mark), Ordering::Relaxed);
+
+    // `getFilledPolygonROIs(bp, FOUR_CONNECTED)` again, on the refined binary,
+    // and then the area filter over what it finds.
+    let mark = Instant::now();
+    scratch.regions.clear();
+    scratch.regions.resize(scratch.binary.len(), 0);
+    let nuclei = scratch
+        .tracer
+        .trace_mask_into(&scratch.binary, &mut scratch.regions, width);
+    let kept = scratch.objects.apply_area(
+        &scratch.to_measure,
+        &scratch.regions,
+        nuclei,
+        params.intensity_threshold,
+        params.min_area,
+        params.max_area,
+    );
+    clocks.nuclei.fetch_add(nanos(mark), Ordering::Relaxed);
+
+    Objects {
+        merged,
+        nuclei,
+        kept,
+    }
+}
+
+/// Builds the objects of one tile that another tile could also have found.
 ///
 /// A candidate matters to [`resolve_overlaps`] only if its bounding box reaches
 /// some other tile's rectangle. On this grid the overlap bands are 60 px of a
@@ -728,13 +937,13 @@ fn collect_seam_candidates(
     tile: &Tile,
     padded: &[Region],
     width: usize,
+    count: u32,
 ) -> Vec<Candidate> {
     if padded.len() < 2 {
         return Vec::new();
     }
 
     let mut extents = std::mem::take(&mut scratch.extents);
-    let count = u32::try_from(scratch.objects.kept().len()).expect("region count fits u32");
     scratch
         .objects
         .extents_into(&scratch.regions, width, count, &mut extents);

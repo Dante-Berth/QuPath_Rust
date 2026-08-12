@@ -69,6 +69,10 @@ fn main() {
         ("watershed", stages.flood),
         ("tracing", stages.trace),
         ("object filter", stages.filter),
+        ("merge", stages.merge),
+        ("shape split", stages.split),
+        ("refine", stages.refine),
+        ("nuclei", stages.nuclei),
     ] {
         println!(
             "  {name:<13} {seconds:7.3} s  {:5.1}%",
@@ -83,26 +87,47 @@ fn main() {
         outcome.labelled,
         100.0 * outcome.labelled as f64 / outcome.pixels as f64
     );
-    println!(
-        "{} basins traced to candidates, {} passed the intensity filter ({:.1}% dropped)",
-        outcome.regions,
-        outcome.objects + outcome.duplicates,
-        100.0 * (outcome.regions - outcome.objects - outcome.duplicates) as f64
-            / outcome.regions as f64
-    );
-    println!(
-        "{} of those were a neighbouring tile's copy of the same nucleus, leaving {}",
-        outcome.duplicates, outcome.objects
-    );
+
+    // Each stage against the one before it, because a count is evidence about
+    // the stage that produced it and about nothing else — ROADMAP §5.
+    let step = |from: u64, to: u64| {
+        if from == 0 {
+            0.0
+        } else {
+            100.0 * (from as f64 - to as f64) / from as f64
+        }
+    };
+    println!("\nobject counts, stage by stage:");
+    for (name, before, after) in [
+        ("intensity filter", outcome.regions, outcome.candidates),
+        ("merge", outcome.candidates, outcome.merged),
+        ("split and refine", outcome.merged, outcome.nuclei),
+        (
+            "area filter",
+            outcome.nuclei,
+            outcome.objects + outcome.duplicates,
+        ),
+        (
+            "tile seams",
+            outcome.objects + outcome.duplicates,
+            outcome.objects,
+        ),
+    ] {
+        println!(
+            "  {name:<18} {before:>7} -> {after:>7}  ({:+.1}%)",
+            -step(before, after)
+        );
+    }
+
     if let Some(bytes) = outcome.peak_resident_bytes {
-        println!("peak resident memory: {:.0} MB", bytes as f64 / 1e6);
+        println!("\npeak resident memory: {:.0} MB", bytes as f64 / 1e6);
     }
     println!(
-        "\nNote: candidates, not cells. Every image stage QuPath runs before its\n\
-         watershed is here and pinned against QuPath's own output, and so are the\n\
-         tracing and the intensity filter that follow it. What is not here is the\n\
-         merge and shape split, the area filter that runs on *its* objects, and\n\
-         the tile seams of ROADMAP §2. All of those only ever remove objects, so\n\
-         this count is still an upper bound on QuPath's rather than a match."
+        "\nNote: nuclei, not cells. Every stage from the deconvolution to the area\n\
+         filter is here and pinned against QuPath's own output, on QuPath's own\n\
+         tile grid. What is not here is the tail — ROI vertices, cell expansion\n\
+         and the measurements — none of which changes how many objects there are.\n\
+         Compare this against QuPath's nucleus count, and read docs/MEMO.md §3\n\
+         before comparing the time."
     );
 }

@@ -67,7 +67,7 @@ fn main() {
     );
     println!(
         "{:<38} {:>6} {:>9} {:>9} {:>7} {:>10} {:>8}",
-        "grid", "tiles", "markers", "regions", "dup", "candidates", "stage s"
+        "grid", "tiles", "markers", "regions", "dup", "objects", "stage s"
     );
 
     let mut reference: Option<Outcome> = None;
@@ -93,10 +93,11 @@ fn main() {
 
     if let Some(reference) = reference {
         println!(
-            "\nAgainst the seamless run's {} candidates, QuPath detects 25,757 cells\n\
-             for this region. What is still missing is the merge and shape split\n\
-             and the area filter that runs on its objects, so this remains an\n\
-             upper bound rather than a match.",
+            "\nAgainst the seamless run's {} objects, QuPath detects 25,757 cells for\n\
+             this region on its own grid — which is the middle row here, not this\n\
+             one. A halo cannot make tiling exact and is not meant to: both\n\
+             reconstructions in this pipeline propagate without bound, so the\n\
+             target is matching QuPath's grid rather than choosing a better one.",
             reference.objects
         );
     }

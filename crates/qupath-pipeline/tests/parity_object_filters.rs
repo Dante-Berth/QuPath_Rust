@@ -156,11 +156,11 @@ fn matches_qupath_object_filters() {
             "{name}: a different set of regions survived"
         );
 
-        let mut binary = vec![0.0f32; labels.len()];
+        let mut binary = vec![0u8; labels.len()];
         filter.write_binary(&regions, &mut binary);
         for (at, (&ours, &theirs)) in binary.iter().zip(&their_binary).enumerate() {
             assert_eq!(
-                ours,
+                f32::from(ours),
                 theirs,
                 "{name}: at {at} ({}, {}) our binary is {ours}, QuPath's is {theirs}",
                 at % width,

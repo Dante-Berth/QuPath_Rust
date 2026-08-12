@@ -230,3 +230,41 @@ against a QuPath run on a *differently sized* region is not measuring the port.
 **Status:** deliberate. Matching QuPath means matching its seams, including the
 ones that cost it accuracy. The seamless figure is recorded here as the
 reference, not as the target.
+
+---
+
+## D-008 — Seam overlaps are resolved on nuclei, where QuPath resolves them on cells
+
+**QuPath:** `ParallelTileObject.resolveOverlaps` runs after the whole detection,
+on the `PathObject`s a tile produced. Two things about those objects matter and
+neither is visible from the rule itself:
+
+- **They are cells, not nuclei.** `cellExpansion` defaults to 5 µm, so each
+  detection is a cell object with its nucleus inside it, and
+  `PathObjectTools.getROI(pathObject, false)` — `preferNucleus` is `false` —
+  returns the *cell* boundary. The 10% test is therefore an overlap between two
+  expanded regions.
+- **Their boundaries are smoothed.** `smoothBoundaries` defaults to `true`, so
+  each polygon has been interpolated, smoothed, interpolated again and
+  simplified before `geometry.getArea()` is taken. That area is not the enclosed
+  pixel count.
+
+**Here:** the overlap is resolved on the nucleus masks, comparing filled pixel
+counts. Same grid, same keep-the-larger rule, same strict 10% threshold, on
+different objects.
+
+**Why it is here:** cell expansion is not ported, and neither is the vertex list
+that smoothing operates on. Nothing in `overlaps.rs` can be made to match until
+both are, and stubbing either would be §10's plausible wrong value.
+
+**Direction of the error, and it is not neutral.** A cell is strictly larger than
+its nucleus, so two copies of the same object across a 60 px band intersect more
+readily as cells than as nuclei. QuPath therefore removes **at least** as many
+duplicates as this does, and this pipeline's object count is an over-count by
+whatever that difference is. Measured on the profiled region: 1,712 of 28,359
+nuclei are resolved away here, 6.0%, against a residual gap to QuPath of 890
+objects — so the two are the same order of magnitude and this is the first place
+to look for that gap, not the last.
+
+**Status:** known, quantified in direction, unfixable before cell expansion and
+ROI vertices land. `docs/ROADMAP.md` §1.5b steps 4 and 5.
