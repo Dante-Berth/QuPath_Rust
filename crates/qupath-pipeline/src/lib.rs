@@ -44,6 +44,7 @@
 mod merge;
 mod objects;
 mod overlaps;
+mod refine;
 mod stain;
 mod tiles;
 
@@ -58,6 +59,7 @@ use rayon::prelude::*;
 pub use merge::{FOREGROUND, Merger};
 pub use objects::{Extent, ObjectFilter, RegionStats};
 pub use overlaps::{Candidate, resolve_overlaps};
+pub use refine::{BoundaryRefiner, CLEANUP_SIGMA, SIGMA_FLOOR};
 pub use stain::Stains;
 pub use tiles::{MAX_TILE_SIZE, PREFERRED_TILE_SIZE, Tile, tile_grid, tile_overlap};
 

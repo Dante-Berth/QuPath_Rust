@@ -27,7 +27,7 @@
 use qupath_filters::{
     Convolver, GaussianBlur, RankFilter, RankOp, Reconstructor, find_regional_maxima,
 };
-use qupath_pipeline::{FOREGROUND, Merger};
+use qupath_pipeline::{BoundaryRefiner, FOREGROUND, Merger};
 use qupath_watershed::{Connectivity, DistanceMap, Labeller, RegionTracer, Segmenter, Watershed};
 
 /// The shapes worth trying, as (width, height).
@@ -151,5 +151,34 @@ fn the_merge_and_split_survive_every_shape() {
         let mut edm = vec![0.0f32; empty.len()];
         DistanceMap::new().make_float_edm(&empty, &mut edm, width);
         Segmenter::new().segment(&edm, &mut empty, width);
+    }
+}
+
+#[test]
+fn the_boundary_refinement_survives_every_shape() {
+    // Its erosion clamps in both directions and its blur runs at sigma 1, which
+    // is wider than most of these shapes — a kernel radius larger than the image
+    // is the case ImageJ handles through the tail sum and a port might not.
+    for (width, height) in SHAPES {
+        let detection = surface(width, height);
+        let mut mask = binary(width, height);
+        let (mut smoothed, mut cleanup) = (Vec::new(), Vec::new());
+        BoundaryRefiner::new().refine(&detection, &mut mask, width, &mut smoothed, &mut cleanup);
+
+        let mut solid = vec![FOREGROUND; width * height];
+        BoundaryRefiner::new().refine(&detection, &mut solid, width, &mut smoothed, &mut cleanup);
+        assert_eq!(
+            solid,
+            vec![FOREGROUND; width * height],
+            "{width}x{height}: a mask with no boundary has nothing to refine, \
+             because every out-of-image neighbour is a copy of a foreground one"
+        );
+
+        let mut empty = vec![0u8; width * height];
+        BoundaryRefiner::new().refine(&detection, &mut empty, width, &mut smoothed, &mut cleanup);
+        assert!(
+            empty.iter().all(|&p| p == 0),
+            "{width}x{height}: the refinement cannot add a pixel"
+        );
     }
 }
