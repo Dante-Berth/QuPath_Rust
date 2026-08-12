@@ -327,7 +327,6 @@ fn filter_row(scan: &Scan<'_>, scratch: &mut Scratch, out: &mut [f32], y: usize)
         suffix,
     } = scratch;
 
-    out.fill(f32::NEG_INFINITY);
     column.fill(f32::NEG_INFINITY);
     fold_row(column, scan.row(y));
 
@@ -335,6 +334,12 @@ fn filter_row(scan: &Scan<'_>, scratch: &mut Scratch, out: &mut [f32], y: usize)
     // read repeats, and folding the same row again cannot change the maximum,
     // so it is skipped.
     let (mut lowest, mut highest) = (y, y);
+
+    // The first rectangle *writes* `out`; every later one folds into it. That
+    // is what replaces the `out.fill(NEG_INFINITY)` this used to open with —
+    // filling and then immediately maximising against the fill is a whole pass
+    // over the row whose only effect is to be overwritten by the next one.
+    let mut first = true;
 
     for rect in scan.plan.rects() {
         for distance in 1..=rect.half_height {
@@ -349,7 +354,16 @@ fn filter_row(scan: &Scan<'_>, scratch: &mut Scratch, out: &mut [f32], y: usize)
                 highest = below;
             }
         }
-        horizontal_max(column, out, rect.half_width, extended, prefix, suffix);
+        horizontal_max(
+            column,
+            out,
+            rect.half_width,
+            extended,
+            prefix,
+            suffix,
+            first,
+        );
+        first = false;
     }
 
     if scan.negate_output {
@@ -371,7 +385,13 @@ fn fold_row(column: &mut [f32], row: &[f32]) {
 }
 
 /// `out[x] = max(out[x], max over dx in [-half_width, half_width] of
-/// column[clamp(x + dx)])`.
+/// column[clamp(x + dx)])`, or that maximum written straight to `out[x]` when
+/// `write` is set.
+///
+/// `write` is what the first rectangle of a row passes. `out` arrives holding
+/// the previous tile's pixels, so the accumulation has to start from a write
+/// somewhere; doing it here rather than with a preliminary
+/// `fill(NEG_INFINITY)` saves a whole pass over the row.
 fn horizontal_max(
     column: &[f32],
     out: &mut [f32],
@@ -379,6 +399,7 @@ fn horizontal_max(
     extended: &mut [f32],
     prefix: &mut [f32],
     suffix: &mut [f32],
+    write: bool,
 ) {
     // Two ways to do this, and the cheaper one depends on the window. Shifting
     // the row costs `2 * half_width + 1` passes; the block scheme below costs
@@ -386,11 +407,15 @@ fn horizontal_max(
     // against four), so 3 is the first width where the block scheme is clearly
     // ahead — and small windows dominate at the radii cell detection uses.
     if half_width < 3 {
+        // The shift path folds one shifted copy at a time, so only the first of
+        // those may write; the rest accumulate on top of it.
+        let mut write = write;
         for dx in -(half_width as isize)..=(half_width as isize) {
-            fold_shifted(out, column, dx);
+            fold_shifted(out, column, dx, write);
+            write = false;
         }
     } else {
-        horizontal_max_blocks(column, out, half_width, extended, prefix, suffix);
+        horizontal_max_blocks(column, out, half_width, extended, prefix, suffix, write);
     }
 }
 
@@ -398,7 +423,7 @@ fn horizontal_max(
 ///
 /// Split into three ranges so the middle one — almost the whole row — is a
 /// contiguous slice against a contiguous slice with no clamping arithmetic.
-fn fold_shifted(out: &mut [f32], column: &[f32], dx: isize) {
+fn fold_shifted(out: &mut [f32], column: &[f32], dx: isize, write: bool) {
     let width = column.len();
     let shift = dx.unsigned_abs();
 
@@ -408,8 +433,12 @@ fn fold_shifted(out: &mut [f32], column: &[f32], dx: isize) {
         // kernel, but that is exactly where the general case below would index
         // out of range.
         let value = if dx < 0 { column[0] } else { column[width - 1] };
-        for acc in out.iter_mut() {
-            fold(acc, value);
+        if write {
+            out.fill(value);
+        } else {
+            for acc in out.iter_mut() {
+                fold(acc, value);
+            }
         }
         return;
     }
@@ -421,6 +450,13 @@ fn fold_shifted(out: &mut [f32], column: &[f32], dx: isize) {
     } else {
         (0, width - shift, shift)
     };
+
+    if write {
+        out[..lo].fill(column[0]);
+        out[lo..hi].copy_from_slice(&column[start..start + (hi - lo)]);
+        out[hi..].fill(column[width - 1]);
+        return;
+    }
 
     for acc in &mut out[..lo] {
         fold(acc, column[0]);
@@ -451,6 +487,7 @@ fn horizontal_max_blocks(
     extended: &mut [f32],
     prefix: &mut [f32],
     suffix: &mut [f32],
+    write: bool,
 ) {
     let width = column.len();
     let span = 2 * half_width + 1;
@@ -483,14 +520,29 @@ fn horizontal_max_blocks(
         }
     }
 
-    for ((acc, &left), &right) in out
-        .iter_mut()
-        .zip(&suffix[..width])
-        .zip(&prefix[2 * half_width..])
-    {
-        let mut best = left;
-        fold(&mut best, right);
-        fold(acc, best);
+    // Two loops rather than one with a test inside: the write case is a pure
+    // two-stream read and a store, and hoisting the branch out keeps both
+    // vectorised. `out` is read at all only in the second.
+    if write {
+        for ((acc, &left), &right) in out
+            .iter_mut()
+            .zip(&suffix[..width])
+            .zip(&prefix[2 * half_width..])
+        {
+            let mut best = left;
+            fold(&mut best, right);
+            *acc = best;
+        }
+    } else {
+        for ((acc, &left), &right) in out
+            .iter_mut()
+            .zip(&suffix[..width])
+            .zip(&prefix[2 * half_width..])
+        {
+            let mut best = left;
+            fold(&mut best, right);
+            fold(acc, best);
+        }
     }
 }
 
@@ -702,15 +754,34 @@ mod tests {
         // it is pinned rather than trusted: an output arriving full of a
         // previous tile's values has to come back the same as one arriving
         // zeroed.
-        let width = 9;
-        let source: Vec<f32> = (0..width * 7).map(|i| (i % 13) as f32 - 4.0).collect();
-        for op in [RankOp::Min, RankOp::Max] {
-            let mut zeroed = vec![0.0f32; source.len()];
-            let mut poisoned = vec![f32::NAN; source.len()];
-            let mut filter = RankFilter::new();
-            filter.apply_into(&source, &mut zeroed, width, 3.5, op);
-            filter.apply_into(&source, &mut poisoned, width, 3.5, op);
-            assert_eq!(zeroed, poisoned, "{op:?} left a pixel of the output unwritten");
+        //
+        // It became load-bearing a second time when the row's first rectangle
+        // started *writing* `out` instead of folding into it — the change that
+        // removed the `fill(NEG_INFINITY)` opening every row. Poisoning with
+        // NaN is what separates the two: `fold` ignores a NaN already sitting
+        // in `out` and a write replaces it, so a rectangle that folded where it
+        // should have written leaves NaN behind here and nowhere else.
+        //
+        // Radii either side of the block-scheme threshold and widths either
+        // side of the kernel, because the write has a separate spelling in each
+        // of the three paths — the block combine, `fold_shifted`'s three
+        // ranges, and `fold_shifted`'s whole-row shortcut for a row narrower
+        // than the shift. Reverting any one of them to a fold fails here.
+        for width in [3usize, 9, 24] {
+            let source: Vec<f32> = (0..width * 7).map(|i| (i % 13) as f32 - 4.0).collect();
+            for radius in [1.0, 2.0, 3.5, 9.0] {
+                for op in [RankOp::Min, RankOp::Max] {
+                    let mut zeroed = vec![0.0f32; source.len()];
+                    let mut poisoned = vec![f32::NAN; source.len()];
+                    let mut filter = RankFilter::new();
+                    filter.apply_into(&source, &mut zeroed, width, radius, op);
+                    filter.apply_into(&source, &mut poisoned, width, radius, op);
+                    assert_eq!(
+                        zeroed, poisoned,
+                        "{op:?} radius {radius} on width {width} left a pixel unwritten"
+                    );
+                }
+            }
         }
     }
 }
