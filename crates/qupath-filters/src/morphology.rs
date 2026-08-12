@@ -74,6 +74,10 @@ pub struct Reconstructor {
     /// trades raster work against queue work and nothing else. See
     /// [`Reconstructor::with_repeat_fraction`].
     repeat_fraction: usize,
+    /// Run the repeat passes through [`dilate_and_compare`], the transliteration
+    /// of QuPath's index arithmetic, rather than [`dilate_pass`]. Set by the
+    /// A/B harness, and by `reconstruct` itself when the input holds a NaN.
+    transliterated: bool,
 }
 
 impl Default for Reconstructor {
@@ -87,6 +91,7 @@ impl Default for Reconstructor {
             passes: 0,
             queued: 0,
             repeat_fraction: DEFAULT_REPEAT_FRACTION,
+            transliterated: false,
         }
     }
 }
@@ -110,6 +115,27 @@ impl Reconstructor {
         self
     }
 
+    /// Runs the repeat passes through the transliteration of QuPath's index
+    /// arithmetic instead of [`dilate_pass`].
+    ///
+    /// Two callers, and they want it for different reasons. The A/B harness
+    /// wants the real previous implementation to measure against rather than a
+    /// reimplementation of it. [`Reconstructor::reconstruct`] wants the one
+    /// implementation that is exact for **every** input, including the NaN that
+    /// [`raise`]'s rearrangement cannot carry the same way — it turns this on
+    /// itself when it finds one.
+    ///
+    /// Both compute the same pass on everything else, asserted pixel for pixel
+    /// and on the change count by `specialising_the_pass_changes_nothing`, and
+    /// again on the whole reconstruction by the harness on every timed
+    /// iteration.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_transliterated_passes(mut self, transliterated: bool) -> Self {
+        self.transliterated = transliterated;
+        self
+    }
+
     /// Raises `marker` towards `mask` by geodesic dilation, in place.
     ///
     /// Semantics are identical to [`morphological_reconstruction`]; this reuses
@@ -127,15 +153,38 @@ impl Reconstructor {
         }
 
         let pixels = marker.len();
+        // `dilate_pass` rearranges QuPath's expression using an identity that
+        // holds on a total order, and NaN is not in one — see its note. Rather
+        // than assume the pipeline never produces one, this establishes it: two
+        // streaming passes over buffers the reconstruction is about to read
+        // fourteen times each, which is under 1% of the stage, and the exact
+        // transliteration runs if either turns one up.
+        let transliterated = self.transliterated || any_nan(marker) || any_nan(mask);
+
         // One forward raster pass, then alternating passes for as long as they
         // are still moving a tenth of the image. QuPath's comment is the
         // justification: the queue is correct on its own but slow, so it is
         // worth repeating the cheap pass while it is doing bulk work.
-        let mut changes = dilate_and_compare(marker, mask, width, height, false, None);
+        let forward = |marker: &mut [f32]| {
+            if transliterated {
+                dilate_and_compare(marker, mask, width, height, false, None)
+            } else {
+                dilate_pass::<false>(marker, mask, width, height)
+            }
+        };
+        let backward = |marker: &mut [f32]| {
+            if transliterated {
+                dilate_and_compare(marker, mask, width, height, true, None)
+            } else {
+                dilate_pass::<true>(marker, mask, width, height)
+            }
+        };
+
+        let mut changes = forward(marker);
         self.passes = 1;
         while self.repeat_fraction > 0 && changes * self.repeat_fraction > pixels {
-            dilate_and_compare(marker, mask, width, height, true, None);
-            changes = dilate_and_compare(marker, mask, width, height, false, None);
+            backward(marker);
+            changes = forward(marker);
             self.passes += 2;
         }
 
@@ -146,6 +195,35 @@ impl Reconstructor {
         self.passes += 1;
         self.queued = self.queue.len() as u64;
         process_queue(marker, mask, width, height, &mut self.queue);
+    }
+
+    /// One raster pass, with no queue and no repeat loop.
+    ///
+    /// Exposed for the A/B harness and the cost probe, which need the pass on
+    /// its own: a whole `reconstruct` is thirteen of these plus a queue-filling
+    /// pass plus the drain, and the drain would dilute any figure claimed about
+    /// the pass. Returns how many pixels moved.
+    ///
+    /// # Panics
+    ///
+    /// As [`Reconstructor::reconstruct`].
+    #[doc(hidden)]
+    pub fn raster_pass(
+        &self,
+        marker: &mut [f32],
+        mask: &[f32],
+        width: usize,
+        reverse: bool,
+    ) -> usize {
+        let height = check(marker, mask, width);
+        if height == 0 {
+            return 0;
+        }
+        match (self.transliterated, reverse) {
+            (true, _) => dilate_and_compare(marker, mask, width, height, reverse, None),
+            (false, false) => dilate_pass::<false>(marker, mask, width, height),
+            (false, true) => dilate_pass::<true>(marker, mask, width, height),
+        }
     }
 
     /// Raster passes the last [`Reconstructor::reconstruct`] needed.
@@ -244,6 +322,21 @@ pub fn find_regional_maxima(image: &[f32], width: usize, threshold: f32) -> Vec<
     out
 }
 
+/// Whether any value is NaN.
+///
+/// Folded rather than written with `any`, which stops at the first NaN: the
+/// early exit is worth nothing on a buffer that essentially never contains one,
+/// and it costs the vectoriser the whole reduction.
+fn any_nan(values: &[f32]) -> bool {
+    values.iter().fold(0u32, |seen, value| {
+        // `value != value` rather than `is_nan`, so this stays a comparison and
+        // a bitwise or with no branch in it.
+        #[expect(clippy::eq_op, reason = "the NaN test, written to vectorise")]
+        let nan = u32::from(value != value);
+        seen | nan
+    }) != 0
+}
+
 /// Shared shape validation. Returns the height.
 fn check(a: &[f32], b: &[f32], width: usize) -> usize {
     assert_eq!(a.len(), b.len(), "marker and mask must be the same size");
@@ -296,6 +389,234 @@ fn punch_out_maxima(out: &mut [f32], image: &[f32], width: usize, height: usize,
             }
         }
     }
+}
+
+/// QuPath's maximum, written out rather than as [`f32::max`].
+///
+/// The two disagree on NaN, and the tie order is observable: the value this
+/// picks is carried into the next comparison and then into the next pixel.
+#[inline(always)]
+fn pick(a: f32, b: f32) -> f32 {
+    if a >= b { a } else { b }
+}
+
+/// QuPath's minimum, written out. Ties take the right-hand value, as
+/// `if neighbour_max >= value_mask { value_mask } else { neighbour_max }` does.
+///
+/// Spelt with a strict `<` rather than QuPath's `>=`, which is the same test
+/// negated and so the same function on everything except NaN — and it is the
+/// spelling `MINSS` implements, so this is one instruction where the negated
+/// form is a compare and a blend. Both zeros pick the same side either way.
+/// [`raise`] documents why NaN cannot reach here.
+#[inline(always)]
+fn clip(a: f32, b: f32) -> f32 {
+    if a < b { a } else { b }
+}
+
+/// A maximum whose ties take the right-hand value, as QuPath's
+/// `if value_new > value` does — it keeps the pixel where it is when the two are
+/// equal, which is what makes "moved" mean moved.
+#[inline(always)]
+fn top(a: f32, b: f32) -> f32 {
+    if a > b { a } else { b }
+}
+
+/// The body of QuPath's inner loop, rearranged so that only two of its three
+/// comparisons stand between one pixel's result and the next's.
+///
+/// `vertical` is the maximum of the three neighbours in the row the scan has
+/// finished; `carried` is the pixel the scan wrote immediately before this one.
+/// Returns this pixel's value afterwards and whether it moved.
+///
+/// # Why it is written this way
+///
+/// QuPath computes `max(max(vertical, carried) clipped to mask, value)`, which
+/// puts **three** dependent compare-and-selects on the path from one pixel to
+/// the next. Since `clip` distributes over `top`, that is the same as
+///
+/// ```text
+///     max( max(clip(vertical, mask), value), clip(carried, mask) )
+///          \___________ floor: no dependence on `carried` __________/
+/// ```
+///
+/// and the floor can be computed while the previous pixel is still resolving.
+/// Two comparisons remain on the chain instead of three.
+///
+/// **This is the whole cost of the stage.** Cutting the chain entirely — feeding
+/// each pixel a constant instead of its left neighbour, which computes the wrong
+/// answer — takes the pass from 3.78 ns/px to 0.62. The pass is not
+/// bandwidth-bound, not branch-bound, and not bound by index arithmetic; it is
+/// bound by this dependency and nothing else.
+///
+/// # Precondition
+///
+/// Neither argument nor either buffer may be NaN. The rearrangement is an
+/// identity on a total order, and NaN is not in one: QuPath's `max` and `min`
+/// both return their right-hand argument when either side is NaN, so a NaN
+/// arriving through `carried` poisons the original expression to "no change"
+/// while it survives this one. [`Reconstructor::reconstruct`] checks its inputs
+/// once and falls back to [`dilate_and_compare`], which is exact for every
+/// input, when the check fails.
+#[inline(always)]
+fn raise(current: &mut [f32], mask: &[f32], x: usize, vertical: f32, carried: f32) -> (f32, bool) {
+    let value = current[x];
+    let value_mask = mask[x];
+    // What the pixel reaches without help from the one the scan just wrote.
+    let floor = top(clip(vertical, value_mask), value);
+    let result = top(clip(carried, value_mask), floor);
+    // Unconditional: `top` keeps `value` on a tie, so when nothing moved this
+    // writes back the bits that were already there, and a branch here would sit
+    // on the chain.
+    current[x] = result;
+    (result, result > value)
+}
+
+/// One raster pass of `dilateAndCompare` without the queue, specialised on
+/// direction. Returns how many pixels moved.
+///
+/// Identical in result to [`dilate_and_compare`] with `queue: None`, and this is
+/// the one the repeat loop runs — the queue is filled by a single pass at the
+/// end, so of the fourteen passes a real tile needs, thirteen come through here.
+///
+/// Two things differ from the transliteration, and it is worth being clear which
+/// one paid, because the roadmap had bet on the other.
+///
+/// **The direction is a constant here**, so the `first_row`, `first_column` and
+/// `Option`-for-the-queue tests leave the inner loop, the two rows in play are
+/// handed out by one `split_at_mut` so no index can address the wrong row, and
+/// the sign-unknown `isize` arithmetic and its negative-index assertion are
+/// gone. ROADMAP §4.7 named exactly this as the reason the pass cost fourteen
+/// cycles per pixel for a max of five values and a clamp. **It was worth 1.03x.**
+/// The transliteration was already compiling to blends with no bounds checks;
+/// there was nothing there to remove.
+///
+/// **What paid is [`raise`]**, which takes one comparison off the path from each
+/// pixel to the next. Cutting that path entirely — feeding a constant instead of
+/// the left neighbour, which computes the wrong answer — runs at 0.62 ns/px
+/// against the 3.87 the transliteration took, so the dependency was six-sevenths
+/// of the stage and everything else was noise around it.
+///
+/// What is *not* different is the answer: the same five values in the same tie
+/// order, rearranged by an identity that holds whenever they are ordered.
+/// `specialising_the_pass_changes_nothing` asserts the pixels and the change
+/// count against the transliteration on every shape down to 1x1, and
+/// [`Reconstructor::reconstruct`] falls back to it on the one input where the
+/// identity does not hold.
+fn dilate_pass<const REVERSE: bool>(
+    marker: &mut [f32],
+    mask: &[f32],
+    width: usize,
+    height: usize,
+) -> usize {
+    // The row the scan starts on has no previous row: QuPath seeds all three
+    // vertical neighbours from the pixel itself, so the pass degenerates to a
+    // one-dimensional running maximum along that row.
+    let first = width * if REVERSE { height - 1 } else { 0 };
+    let mut changes = dilate_first_row::<REVERSE>(
+        &mut marker[first..first + width],
+        &mask[first..first + width],
+    );
+
+    for step in 1..height {
+        let y = if REVERSE { height - 1 - step } else { step };
+        let row = y * width;
+        // The row the scan has just finished is physically adjacent, so one
+        // split hands it out shared alongside this row mutable. Every index
+        // below is then within a slice of exactly `width`, which is what lets
+        // the bounds checks fold away.
+        let (previous, current): (&[f32], &mut [f32]) = if REVERSE {
+            let (current, previous) = marker[row..row + 2 * width].split_at_mut(width);
+            (previous, current)
+        } else {
+            let (previous, current) = marker[row - width..row + width].split_at_mut(width);
+            (previous, current)
+        };
+        changes += dilate_row::<REVERSE>(current, previous, &mask[row..row + width]);
+    }
+    changes
+}
+
+/// The scan's first row, where every vertical neighbour is the pixel itself.
+///
+/// `neighbour_max` collapses to `pick(value, value_previous)`, so this is a
+/// running maximum along the row clipped to the mask — and the first pixel,
+/// whose carried left neighbour is seeded from itself, can never move.
+fn dilate_first_row<const REVERSE: bool>(current: &mut [f32], mask: &[f32]) -> usize {
+    let width = current.len();
+    assert_eq!(mask.len(), width, "row and mask must be the same width");
+
+    let mut changes = 0usize;
+    let mut value_previous = current[if REVERSE { width - 1 } else { 0 }];
+    for step in 1..width {
+        let x = if REVERSE { width - 1 - step } else { step };
+        // Every vertical neighbour is the pixel itself, so it contributes
+        // nothing the pixel's own value does not already supply.
+        let (value, moved) = raise(current, mask, x, current[x], value_previous);
+        value_previous = value;
+        changes += usize::from(moved);
+    }
+    changes
+}
+
+/// One row of the scan, reading the row the scan has just finished.
+///
+/// `previous` is the row above for a forward pass and the row below for a
+/// backward one. The three columns of it in play are carried along the row as
+/// QuPath carries them, so each is loaded once rather than three times.
+fn dilate_row<const REVERSE: bool>(current: &mut [f32], previous: &[f32], mask: &[f32]) -> usize {
+    let width = current.len();
+    assert_eq!(previous.len(), width, "rows must be the same width");
+    assert_eq!(mask.len(), width, "row and mask must be the same width");
+    let last = width - 1;
+
+    // The scan's first column. Its diagonal neighbour falls outside the row and
+    // QuPath seeds it from the one directly across, and its left neighbour is
+    // seeded from the pixel itself — so `value_previous` cannot raise it and is
+    // left out of the maximum here.
+    let start = if REVERSE { last } else { 0 };
+    let across = previous[start];
+    let mut ahead = if width == 1 {
+        // The one column is also the last, where QuPath seeds the diagonal from
+        // the pixel itself.
+        current[start]
+    } else if REVERSE {
+        previous[last - 1]
+    } else {
+        previous[1]
+    };
+    let carried = current[start];
+    let (mut value_previous, moved) = raise(current, mask, start, pick(across, ahead), carried);
+    let mut changes = usize::from(moved);
+    let mut behind = across;
+
+    for step in 1..last {
+        let x = if REVERSE { last - step } else { step };
+        // `behind`, `ahead` and the column across are the three of the previous
+        // row in play; the fourth neighbour is `value_previous`, this row's
+        // pixel that the scan has just written.
+        let across = ahead;
+        ahead = if REVERSE {
+            previous[x - 1]
+        } else {
+            previous[x + 1]
+        };
+        let vertical = pick(pick(behind, across), ahead);
+        let (value, moved) = raise(current, mask, x, vertical, value_previous);
+        behind = across;
+        value_previous = value;
+        changes += usize::from(moved);
+    }
+
+    // The scan's last column, where the diagonal ahead falls outside the row and
+    // QuPath seeds it from the pixel itself. That term cannot change the
+    // outcome — see the note on `specialising_the_pass_changes_nothing` — and it
+    // is kept only so this reads as the same expression QuPath evaluates.
+    if last > 0 {
+        let x = if REVERSE { 0 } else { last };
+        let vertical = pick(pick(behind, ahead), current[x]);
+        changes += usize::from(raise(current, mask, x, vertical, value_previous).1);
+    }
+    changes
 }
 
 /// One raster pass of `dilateAndCompare`, returning how many pixels moved.
@@ -623,6 +944,176 @@ mod tests {
         image[3] = 1.0;
         let prominence = find_regional_maxima(&image, width, 0.001);
         assert!(prominence.iter().all(|&p| p == 0.0));
+    }
+
+    /// A surface with plateaus, NaNs and infinities, sized so that every shape
+    /// the peeled columns care about is exercised.
+    ///
+    /// **The marker carries NaN independently of the mask**, which is what makes
+    /// the tie order observable: `pick` is only asymmetric when exactly one of
+    /// its two arguments is NaN, so a generator that puts NaN in the mask alone
+    /// leaves the comparison order untested. A first version of this did exactly
+    /// that, and two mutations of the order passed against it.
+    ///
+    /// Neither caller can hand the pass a NaN — both start from an optical
+    /// density that has none — so this is not a realistic input. It is the input
+    /// that separates the orderings, and the module documents the order as
+    /// load-bearing, so it is the input the differential test owes.
+    fn awkward(width: usize, height: usize, nan: bool) -> (Vec<f32>, Vec<f32>) {
+        let odd = move |i: usize, salt: usize| match (i * 37 + salt) % 23 {
+            // A plateau, so ties decide what gets carried forward.
+            0..=5 => 0.5,
+            6 | 7 if nan => f32::NAN,
+            // Both zeros, because they compare equal and do not have the same
+            // bits, and every comparison here breaks its ties one way or other.
+            6 => 0.0,
+            7 => -0.0,
+            8 => f32::INFINITY,
+            9 => f32::NEG_INFINITY,
+            n => n as f32 / 23.0 - 0.4,
+        };
+        let mask: Vec<f32> = (0..width * height).map(|i| odd(i, 0)).collect();
+        let marker: Vec<f32> = (0..width * height).map(|i| odd(i, 11)).collect();
+        (marker, mask)
+    }
+
+    #[test]
+    fn specialising_the_pass_changes_nothing() {
+        // The claim `dilate_pass` makes is that peeling the first row and the
+        // two edge columns out of the loop leaves the same five values compared
+        // in the same order. Asserting the image alone would not be enough:
+        // the change count is what drives the repeat loop, so a pass that
+        // settled the same pixels but counted differently would run a different
+        // number of passes. Both are checked, on every shape down to 1x1 —
+        // the widths where the peeled columns overlap each other.
+        //
+        // Seven mutations of the specialised pass were run against this; five
+        // fail. The two that pass are **unobservable rather than untested**, and
+        // both are the same argument:
+        //
+        // - the first row's maximum is `pick(value, value_previous)`, so
+        //   whichever way round it is written a pixel rises exactly when
+        //   `value_previous` is the greater;
+        // - the last column's `current[x]` term likewise only ever offers the
+        //   pixel's own value, and `value < neighbour_max` is false whenever
+        //   that is what the maximum selects.
+        //
+        // Both hold with NaN as well as without, by cases on `pick`. They are
+        // recorded here so the next reader does not mistake "no test fails" for
+        // "the convention is confirmed".
+        for width in 1..=9usize {
+            for height in 1..=9usize {
+                let (marker, mask) = awkward(width, height, false);
+                for reverse in [false, true] {
+                    let mut specialised = marker.clone();
+                    let mut transliterated = marker.clone();
+
+                    let a = if reverse {
+                        dilate_pass::<true>(&mut specialised, &mask, width, height)
+                    } else {
+                        dilate_pass::<false>(&mut specialised, &mask, width, height)
+                    };
+                    let b = dilate_and_compare(
+                        &mut transliterated,
+                        &mask,
+                        width,
+                        height,
+                        reverse,
+                        None,
+                    );
+
+                    assert_eq!(
+                        a, b,
+                        "change count differs at {width}x{height}, reverse={reverse}"
+                    );
+                    assert!(
+                        specialised
+                            .iter()
+                            .zip(&transliterated)
+                            .all(|(x, y)| x.to_bits() == y.to_bits()),
+                        "pixels differ at {width}x{height}, reverse={reverse}\n\
+                         specialised   {specialised:?}\n\
+                         transliterated {transliterated:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_two_passes_reconstruct_the_same_image() {
+        // The whole reconstruction, not one pass: the repeat loop reads the
+        // change count, so this is what catches a miscount that happens to
+        // cancel within a pass.
+        //
+        // `nan` runs too, and must also come out identical — not because the
+        // fast pass handles it, but because `reconstruct` is supposed to notice
+        // and fall back. This is the test that fails if that check is dropped.
+        for nan in [false, true] {
+            for (width, height) in [(1, 1), (2, 3), (7, 5), (16, 16), (33, 17)] {
+                let (marker, mask) = awkward(width, height, nan);
+                let mut specialised = marker.clone();
+                let mut transliterated = marker;
+                Reconstructor::new().reconstruct(&mut specialised, &mask, width);
+                let mut old = Reconstructor::new().with_transliterated_passes(true);
+                old.reconstruct(&mut transliterated, &mask, width);
+                assert!(
+                    specialised
+                        .iter()
+                        .zip(&transliterated)
+                        .all(|(x, y)| x.to_bits() == y.to_bits()),
+                    "reconstruction differs at {width}x{height}, nan={nan}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_nan_anywhere_falls_back_to_the_transliteration() {
+        // Directly, rather than by inference from the test above: one NaN in
+        // either buffer has to be enough, wherever it sits, because the
+        // rearranged expression carries it differently. A pass that took the
+        // fast path here would agree on most images and diverge on some.
+        let (width, height) = (5, 4);
+        let (clean_marker, clean_mask) = awkward(width, height, false);
+
+        let mut expected = clean_marker.clone();
+        Reconstructor::new()
+            .with_transliterated_passes(true)
+            .reconstruct(&mut expected, &clean_mask, width);
+        // A NaN-free reconstruction of the same input agrees, or the rest of
+        // this test would be comparing against the wrong thing.
+        let mut fast = clean_marker.clone();
+        Reconstructor::new().reconstruct(&mut fast, &clean_mask, width);
+        assert_eq!(fast, expected, "the clean case must agree to start with");
+
+        for spot in 0..width * height {
+            for in_mask in [false, true] {
+                let mut marker = clean_marker.clone();
+                let mut mask = clean_mask.clone();
+                if in_mask {
+                    mask[spot] = f32::NAN;
+                } else {
+                    marker[spot] = f32::NAN;
+                }
+
+                let mut automatic = marker.clone();
+                Reconstructor::new().reconstruct(&mut automatic, &mask, width);
+                let mut forced = marker;
+                Reconstructor::new()
+                    .with_transliterated_passes(true)
+                    .reconstruct(&mut forced, &mask, width);
+
+                assert!(
+                    automatic
+                        .iter()
+                        .zip(&forced)
+                        .all(|(x, y)| x.to_bits() == y.to_bits()),
+                    "a NaN at {spot} in the {} was not noticed",
+                    if in_mask { "mask" } else { "marker" }
+                );
+            }
+        }
     }
 
     #[test]

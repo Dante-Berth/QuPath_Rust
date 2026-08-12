@@ -491,6 +491,98 @@ deconvolution table and the blur, this removes work rather than overhead, and
 the stage is a single pass over a tile at exactly the size the isolated figure
 was taken at. The unchanged marker count is the check that it removed only that.
 
+## Morphological reconstruction: the cost was a dependency, not the indexing
+
+The background stage's geodesic dilation was **46.5% of pipeline stage time**,
+the largest single item, and ROADMAP §4.7 said why: the raster pass was a
+transliteration of QuPath's index arithmetic, with an `isize` step carrying the
+direction, `first_row` and `first_column` tests, an `Option` test for the queue,
+and a negative-index assertion, all inside the inner loop — "at 14 cycles per
+pixel for a max-of-five-and-clamp it is doing several times the work the
+arithmetic implies".
+
+**That diagnosis was wrong, and it is worth recording how wrong.** Specialising
+the pass on direction removes every one of those and is worth **1.03x**. The
+transliteration was already compiling to `vcmpss`/`vblendvps` with no bounds
+checks; there was nothing there to take out.
+
+The cost is the **loop-carried dependency**. Each pixel's result is the next
+pixel's left neighbour, and QuPath's expression puts three dependent
+compare-and-selects on that path. The measurement that settles it feeds the loop
+a constant instead of the left neighbour — the wrong answer, so it is a
+diagnostic and not a candidate:
+
+| Pass | ns/px | vs |
+| --- | ---: | ---: |
+| transliterated | 3.87 | — |
+| specialised on direction only | 3.78 | 1.03x |
+| dependency cut entirely (**wrong answer**) | 0.62 | 6.2x |
+
+So six-sevenths of the stage is one chain, and everything the roadmap listed is
+inside the remaining seventh.
+
+### Two comparisons instead of three
+
+`min` distributes over `max`, so
+
+```text
+    max( min(max(vertical, carried), mask), value )
+  = max( max(min(vertical, mask), value), min(carried, mask) )
+         \_______ no dependence on `carried` _______/
+```
+
+and the left half resolves while the previous pixel is still finishing. Spelling
+the clip as the strict `<` that `MINSS` implements, rather than the negated `>=`
+that compiles to a compare and a blend, takes the two remaining comparisons from
+five cycles each to about three.
+
+| | one pass, ns/px | whole reconstruction |
+| --- | ---: | ---: |
+| transliterated | 4.01 | 0.279 s |
+| current | **1.65** | **0.137 s** |
+| | **2.42x** | **2.03x** |
+
+2120² tile of CMU-1, minimum of 15 interleaved repetitions, raw output in
+`rust-reconstruct-pass-ab.txt`. Every timed iteration asserts the image is
+**bit-identical** and that both needed the same number of passes — the change
+count drives the repeat loop, so a pass that agreed on pixels and miscounted
+would run a different number of them.
+
+### The one input where the identity does not hold
+
+Reassociating `min` and `max` is an identity on a total order and NaN is not in
+one: QuPath's `max` and `min` both return their right-hand argument when either
+side is NaN, so a NaN arriving through the carried neighbour poisons the original
+expression to "no change" while it survives the rearranged one.
+
+Rather than assert that the pipeline never produces one, `reconstruct` checks
+both buffers once and runs the exact transliteration if either turns one up. Two
+streaming passes over buffers about to be read fourteen times each — under 1% of
+the stage. `a_nan_anywhere_falls_back_to_the_transliteration` puts a NaN at every
+position of both buffers in turn and requires the whole reconstruction to come
+out unchanged.
+
+### In place, where it is worth less
+
+The component figure overstated it again, and this time the reason is visible:
+
+| | main | current | |
+| --- | ---: | ---: | ---: |
+| regrow, summed across threads | 5.465 s | **3.204 s** | 1.71x |
+| background stage | 10.755 s | 8.420 s | 1.28x |
+| all stages | 18.464 s | 16.129 s | 1.14x |
+| **wall clock** | **1.332 s** | **1.118 s** | **1.19x** |
+| objects out | 82,997 | 82,997 | unchanged |
+
+9000x9000 region, 25 tiles on 20 threads, best of three each way. 2.03x in
+isolation and 1.71x in place, because a chain that no longer hides the memory
+latency runs into the bandwidth wall §4.8 describes — the single-threaded probe
+has the machine to itself and twenty tiles do not. The unchanged object count is
+the check that it removed only the stall.
+
+Separate processes, not interleaved, so the in-place row is approximate in
+magnitude; the isolated row meets the bar this file sets.
+
 ## Where this leaves the pipeline
 
 Three components are now faster in isolation, and the profile says what each is

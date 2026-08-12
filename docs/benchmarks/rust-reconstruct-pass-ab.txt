@@ -1,0 +1,16 @@
+CMU-1 tile 2120x2120 = 4.49 Mpx, 14 raster passes,
+minimum of 15 interleaved repetitions
+
+                 one pass s      ns/px reconstruct s queue+rest s
+  transliterated     0.0180       4.01       0.2789       0.0269
+     specialised     0.0074       1.65       0.1373       0.0332
+
+         speedup       2.42x                    2.03x
+
+7557155 of 4494400 pixels moved in the timed pair.
+
+Both rows computed a bit-identical image and needed the same number
+of passes; the two assertions above are what make that a claim rather
+than an expectation. The last column is everything `reconstruct` does
+that is not a raster pass — chiefly the queue drain, which is unchanged
+code and so is the ceiling on what specialising the pass can be worth.

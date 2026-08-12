@@ -689,13 +689,40 @@ already ported.
      from 6 to 14 and then plateaus. The stage got expensive because tiles got
      70x bigger, not because it degrades.
 
-   What is left, and has *not* been tried: the raster pass is a transliteration
-   of QuPath's index arithmetic — `isize` strides, a runtime `Option` for the
-   queue checked per pixel, and `first_row`/`first_column` branches inside the
-   inner loop. At 14 cycles per pixel for a max-of-five-and-clamp it is doing
-   several times the work the arithmetic implies. Specialising forward and
-   backward, and the queue and no-queue cases, is the obvious next pass, and
-   `RegionalMaxima.json` is there to catch it if it changes an answer.
+   **Done — and the diagnosis this file gave was wrong.** It said the raster
+   pass was expensive because it transliterated QuPath's index arithmetic:
+   `isize` strides, a runtime `Option` for the queue tested per pixel,
+   `first_row`/`first_column` branches inside the inner loop, "several times the
+   work the arithmetic implies". Specialising the pass on direction removes
+   every one of those and is worth **1.03x**. The loop was already compiling to
+   compare-and-blend with no bounds checks.
+
+   The cost was the **loop-carried dependency** — one pixel's result is the next
+   one's left neighbour, with three dependent compare-and-selects between them.
+   Cutting it (wrong answer, diagnostic only) takes the pass from 3.87 ns/px to
+   0.62, so six-sevenths of the stage was that chain and everything this file
+   listed was inside the other seventh.
+
+   `min` distributes over `max`, which hoists the half that does not involve the
+   left neighbour and leaves two comparisons; spelling the clip as the strict
+   `<` that `MINSS` implements rather than the negated `>=` makes each of them
+   one instruction. **2.42x on the pass, 2.03x on the reconstruction, 1.71x on
+   the regrow in place, 1.19x on wall clock** at 25 tiles on 20 threads, with the
+   object count unchanged. Bit-identical, with the change count asserted too
+   because it drives the repeat loop. `docs/benchmarks/README.md` has the tables
+   and `reconstruct_pass_previous_vs_current` is the harness.
+
+   The reassociation is an identity on a total order and NaN is not in one, so
+   `reconstruct` checks both buffers once — under 1% of the stage — and runs the
+   exact transliteration if either holds one, rather than assuming the pipeline
+   never produces a NaN.
+
+   **The lesson is the §4.3 one again, and this is the third time.** A profile
+   share says a stage is expensive; it does not say why, and the reason written
+   down without measuring was wrong here as it was for the blur's transpose. The
+   measurement that settled it — break the dependency, keep everything else,
+   accept the wrong answer, read the clock — took ten minutes and should have
+   come first.
 
 8. **The pipeline is now memory-bandwidth-bound, and that is new.** Parallel
    efficiency on a saturated grid, 90 Mpx region, measured:
