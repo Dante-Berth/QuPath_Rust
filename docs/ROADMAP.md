@@ -166,6 +166,10 @@ RUSTFLAGS="-C target-cpu=x86-64-v3" \
     cargo run --release -p qupath-pipeline --example reconstruct_previous_vs_current
 RUSTFLAGS="-C target-cpu=x86-64-v3" \
     cargo run --release -p qupath-pipeline --example previous_vs_current
+RUSTFLAGS="-C target-cpu=x86-64-v3" \
+    cargo run --release -p qupath-pipeline --example trace_previous_vs_current
+RUSTFLAGS="-C target-cpu=x86-64-v3" \
+    cargo run --release -p qupath-pipeline --example split_cost
 # the saturated grid the throughput figure is quoted on
 RUSTFLAGS="-C target-cpu=x86-64-v3" \
     cargo run --release -p qupath-pipeline --example region -- \
@@ -705,9 +709,40 @@ genuinely more work than the flood beside it: four sweeps of an exact distance
 map, then `MaximumFinder`'s five stages over it. `refineBoundary`'s 3.3% is a
 sigma-1 blur plus a Laplacian, against 2.5% and 1.1% for the sigma-3 pair, which
 is what a narrower kernel over the same image should cost. The merge's 6.2% is
-dominated by the trace and fill inside it, and the main trace is 7.1%. None of
-the four has had an optimisation pass, and the shape split is where one would
-start.
+dominated by the trace and fill inside it, and the main trace is 7.1%.
+
+### The shape split was where this file said to start, and there is no hotspot there
+
+Measured rather than inferred, with `split_cost` on the merged binary of a real
+tile. The split is **26% distance map and 74% segmentation**, and the
+segmentation is five stages of which the largest is a third of it:
+
+| Stage | ms on a 2120² tile | share of the segmentation |
+| --- | ---: | ---: |
+| `getSortedMaxPoints` | 27.1 | 33% |
+| the dilation | 19.3 | 23% |
+| `analyzeAndMarkMaxima` | 13.1 | 16% |
+| the dilation's histogram and buckets | 8.5 | 10% |
+| `make8bit` | 5.5 | 7% |
+| `watershedPostProcess` and the `AND` | 3.3 | 4% |
+| `cleanupMaxima` | 1.8 | 2% |
+
+**Three transformations were tried against it and together they are worth
+1.02x**, this machine's noise floor, and all three were reverted:
+`trueEdmHeight` through one window with the ridge branch replaced by a select;
+its four heights reduced as a tree rather than through one accumulator — the
+change that was worth 2.42x on the reconstruction's raster pass; and the
+dilation's neighbourhood as eight fixed-offset loads instead of eight
+bounds-tested branches.
+
+What was kept is the one change that removes *work* rather than instructions:
+`levels`, `list` and `coordinates` are written before they are read, so clearing
+them was **22 MB of memset per tile** that nothing observed.
+
+The stage is five sequential passes over buffers that do not fit in cache, in an
+order set by grey level rather than by position. **Making it faster means
+changing what it touches, not how it computes**, and that is a different piece
+of work from the four in this list.
 
 1. **Doing less work.** Untouched so far and the largest lever by far.
    `Slide::level_for_width` exists but nothing uses it: detection at a
@@ -751,15 +786,29 @@ start.
    because §1.4b, §1.5a and §1.5b added stages around it, not because it got
    faster. In absolute terms it is unchanged, and it has been unchanged through
    three revisions of this number.
-6. **Region tracing landed at 14.0% and now reads 7.1%**, for the same reason.
-   The
-   §4.4 ratio check does **not** fire: it floods 6.1 M labelled pixels
-   four-connected and then walks 13.7 M bounding-box pixels for the hole test,
-   against a 17.8 M image, so it does about 1.1 image-equivalents of scattered
-   work and costs what that implies. It has had no optimisation pass, and the
-   bounding-box half is the place to start if one is ever wanted — that figure
-   is the sum over regions, so it grows with the number of candidates rather
-   than with the image.
+6. ~~**Region tracing**~~ — **done, 1.1x, and it is the only thing this session
+   found that was worth keeping.** The hole test walked each region's bounding
+   box **twice**: once to flood the background inwards from the grown border,
+   and once more to claim whatever the flood had not reached. The second pass is
+   only ever useful when the first left something behind, and the first already
+   knows — count the pixels it reached inside the box, add the region's own
+   area, and if that reaches the box's area there is nothing to find. The two
+   counts cannot overlap, because a region pixel is never seeded and never
+   marked.
+
+   **On a real tile the skip fires for 26,976 of 27,308 regions**: a nucleus
+   with a hole is rare. Interleaved, asserting the region map *and* the region
+   count identical on both images the pipeline traces: **1.15x on the recorded
+   run, 1.08x to 1.16x across five**, so read it as 1.1x. It is worth 1.015x on
+   the pipeline at most — the tracer is ~15% of stage time across its three
+   stages — and on this machine that is inside the run-to-run spread of the
+   end-to-end figure. The object count is unchanged at 26,647.
+
+   **The division was not the cost, and that is the fourth time.** Both floods
+   pop an offset and recover `x` and `y` with `at % width` and `at / width`,
+   about 4 M hardware divisions per tile. Removing every one of them by carrying
+   packed coordinates is worth **1.00x**, measured one variable at a time, and
+   was reverted. `trace_previous_vs_current` is the harness.
 7. **The background stage is 37.6% of pipeline stage time** — 59% before §2,
    52.9% before §1.5b — and is still the largest single lever. **The 59%
    erosion / 40% reconstruction split this file used to record was measured on
@@ -943,6 +992,15 @@ the third stage running.
   script. Every recorder now flushes and calls `System.exit(0)`, and the flush
   is load-bearing — `System.exit` does not drain `System.out`, and a truncated
   fixture is worse than a hang because it still looks like a recording.
+- **Instruction count is not cost, and this repository has now proved it four
+  times.** The reconstruction's index arithmetic: 1.03x. The shape split's
+  branchless height, its tree-shaped minimum and its branchless neighbourhood:
+  1.02x together. The tracer's 4 M hardware divisions per tile, removed
+  entirely: 1.00x. Every one of them was an expensive-looking instruction on a
+  path the out-of-order engine was already covering, and every one cost an
+  afternoon. **What has actually worked, every time, is removing work**: a stage
+  that ran twice (§4.6), a memset nothing read (§4), a dependency that serialised
+  a loop (§4.3, §4.4, §4.7). Ask which of those a change is before writing it.
 - **A stage that costs more than a strictly larger stage is a stall.** The
   Laplacian's nine taps cost more than the separable twenty-nine-tap blur ahead
   of it, because both had the same loop-carried accumulator — the second one

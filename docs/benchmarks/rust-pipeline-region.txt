@@ -1,28 +1,41 @@
 data/CMU-1.svs  level 0  region 27776,5952 4000x4000
-272 tiles, 17.8 Mpx, 20 threads
+4 tiles, 17.0 Mpx, 20 threads
 
-wall clock: 0.215 s  (82.7 Mpx/s)
+wall clock: 1.027 s  (16.5 Mpx/s)
 
 stage totals, summed across threads:
-  decode          0.188 s    4.6%
-  deconvolve      0.031 s    0.8%
-  background      1.824 s   44.6%
-  gaussian blur   0.282 s    6.9%
-  laplacian       0.085 s    2.1%
-  maxima          0.440 s   10.8%
-  labelling       0.033 s    0.8%
-  watershed       0.584 s   14.3%
-  tracing         0.573 s   14.0%
-  object filter   0.046 s    1.1%
-  total           4.086 s
+  decode          0.121 s    3.3%
+  deconvolve      0.046 s    1.3%
+  background      1.412 s   38.3%
+    erode         0.378 s   10.2%
+    regrow        1.003 s   27.2%
+  gaussian blur   0.098 s    2.7%
+  laplacian       0.041 s    1.1%
+  maxima          0.190 s    5.2%
+  labelling       0.033 s    0.9%
+  watershed       0.443 s   12.0%
+  tracing         0.244 s    6.6%
+  object filter   0.020 s    0.5%
+  merge           0.223 s    6.0%
+  shape split     0.540 s   14.6%
+  refine          0.122 s    3.3%
+  nuclei          0.155 s    4.2%
+  total           3.687 s
 
-88424 markers seeded, 6126178 pixels labelled (34.4% of the region)
-88423 basins traced to candidates, 66739 passed the intensity filter (24.5% dropped)
-peak resident memory: 71 MB
+80763 markers seeded, 5780307 pixels labelled (34.1% of the region)
 
-Note: candidates, not cells. Every image stage QuPath runs before its
-watershed is here and pinned against QuPath's own output, and so are the
-tracing and the intensity filter that follow it. What is not here is the
-merge and shape split, the area filter that runs on *its* objects, and
-the tile seams of ROADMAP §2. All of those only ever remove objects, so
-this count is still an upper bound on QuPath's rather than a match.
+object counts, stage by stage:
+  intensity filter     80762 ->   51152  (-36.7%)
+  merge                51152 ->   26397  (-48.4%)
+  split and refine     26397 ->   45990  (+74.2%)
+  area filter          45990 ->   28359  (-38.3%)
+  tile seams           28359 ->   26647  (-6.0%)
+
+peak resident memory: 1092 MB
+
+Note: nuclei, not cells. Every stage from the deconvolution to the area
+filter is here and pinned against QuPath's own output, on QuPath's own
+tile grid. What is not here is the tail — ROI vertices, cell expansion
+and the measurements — none of which changes how many objects there are.
+Compare this against QuPath's nucleus count, and read docs/MEMO.md §3
+before comparing the time.

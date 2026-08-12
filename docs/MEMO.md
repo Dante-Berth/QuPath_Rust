@@ -102,12 +102,19 @@ as much as widening the other two was. None of the three needed SIMD.
 
 ### Faster this session
 
-**Nothing.** This session closed the detection chain — `refineBoundary`, and the
-wiring of the merge, the shape split and the area filter into the pipeline — and
-made no attempt to make anything faster. The throughput figure moved 80.4 to
-70.1 Mpx/s because four stages that did not exist are now in the path. Read that
-as the pipeline doing more, not as it doing worse; nothing that was there before
-changed.
+**The region tracer, 1.1x, and nothing else.** The hole test walked each
+region's bounding box twice — once to flood the background in from the border,
+once more to claim what the flood missed — and the second pass is only useful
+when the first left something behind. The flood can tell: count what it reached
+inside the box, add the region's own area, and if that reaches the box's area
+there is nothing to find. It fires for 26,976 of 27,308 regions on a real tile.
+Interleaved, with the region map and the region count asserted identical: 1.15x
+on the recorded run and 1.08x to 1.16x across five, so read it as 1.1x. The
+tracer is ~15% of stage time across its three stages, which puts it at ~1.015x on
+the pipeline — inside this machine's run-to-run spread end to end.
+
+**Four things were tried and reverted**, and they are the more useful half of
+the session: see §4's second entry.
 
 ### Faster in the session before this one
 
@@ -213,6 +220,16 @@ the wrong answer, read the clock — cost ten minutes and was never run. The sam
 shape as the blur's transpose in ROADMAP §4.3, which was also reasoned from a
 share and was also wrong.
 
+**That variant now has four instances and they say something sharper than "read
+the share carefully".** The reconstruction's index arithmetic: 1.03x. The shape
+split's branchless height, tree-shaped minimum and branchless neighbourhood:
+1.02x together. The tracer's 4 M hardware divisions per tile, removed entirely:
+1.00x. Meanwhile the changes that *did* pay were a stage that ran twice (1.1x on
+the tracer), a memset nothing read, and three loop-carried dependencies (2.3x,
+3.7x, 2.4x). **Expensive-looking instructions on a covered path are free;
+work that happens and is not needed is not.** Ask which of the two a change is
+before writing it, and prefer the diagnostic that answers it in ten minutes.
+
 Every one produced entirely reasonable-looking output. The defences that actually
 worked, in order: recording a fixture from a real QuPath run, counting objects,
 and mutating each claimed convention to check a case fails without it. Looking at
@@ -269,11 +286,13 @@ Measured, not assumed:
    A tile's working set went from ~2 MB (L2-resident) to ~145 MB (streaming from
    DRAM) when the tiling was corrected, and this session's stages took it to
    ~240 MB. This is the biggest lever and it did not exist a week ago.
-2. **The shape split, 14.4% of stage time** — the largest single stage after the
-   background's two halves, and no optimisation pass has touched it. The only
-   new lever this session created, and the §4.4 stall check does not fire on it:
-   an exact distance map in four sweeps plus `MaximumFinder`'s five stages is
-   genuinely more work than the flood beside it at 11.7%.
+2. ~~**The shape split, 14.4% of stage time**~~ — **looked at, and there is no
+   hotspot in it.** It is 26% distance map and 74% segmentation, and the
+   segmentation is five stages whose largest is a third of it. Three
+   transformations bought 1.02x together, which is noise, and were reverted; see
+   ROADMAP §4. Making it faster means changing what it touches — five sequential
+   passes over buffers that do not fit in cache — and that belongs with §6.1
+   rather than with a tighter loop.
 3. ~~**The reconstruction raster pass**~~ — **done, 2.42x**, and the reason this
    entry gave was wrong; see §4. What is left there is another 2.6x in principle
    — the chain-cut probe runs at 0.62 ns/px against the current 1.62 — but
@@ -281,9 +300,12 @@ Measured, not assumed:
    is a different algorithm rather than a tighter loop, and in place the stage is
    already running into §6.1's bandwidth wall (2.03x isolated, 1.71x at 25
    tiles). Not obviously the next thing to spend a day on.
-4. **Doing less work** — still untouched, still the largest lever in the
-   guidelines' own ordering. `Slide::level_for_width` exists and nothing uses it;
-   the profiled region is 99% tissue but a whole slide is mostly glass.
+4. **Doing less work** — still the largest lever in the guidelines' own
+   ordering, and the only kind of change that has paid this session or any
+   other. `Slide::level_for_width` exists and nothing uses it; the profiled
+   region is 99% tissue but a whole slide is mostly glass. The tracer's 1.1x
+   (§3) is the small version of the same idea: a pass that ran and was not
+   needed.
 
 ---
 

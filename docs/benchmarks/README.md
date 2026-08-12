@@ -15,6 +15,10 @@ RUSTFLAGS="-C target-cpu=x86-64-v3" \
 RUSTFLAGS="-C target-cpu=x86-64-v3" \
     cargo run --release -p qupath-pipeline  --example previous_vs_current
 RUSTFLAGS="-C target-cpu=x86-64-v3" \
+    cargo run --release -p qupath-pipeline  --example trace_previous_vs_current
+RUSTFLAGS="-C target-cpu=x86-64-v3" \
+    cargo run --release -p qupath-pipeline  --example split_cost
+RUSTFLAGS="-C target-cpu=x86-64-v3" \
     cargo run --release -p qupath-pipeline  --example region
 ```
 
@@ -590,6 +594,117 @@ region produces 19,063 objects rather than 82,997 and the pipeline does 70.1
 Mpx/s rather than 80.4. The 2.42x on the pass itself is unaffected — it is
 measured in isolation by `reconstruct_pass_previous_vs_current`, which the new
 stages do not touch.
+
+## Region tracing: the hole test pays for its bounding box twice
+
+The tracer runs three times per tile — on the flooded labels, inside the merge,
+and on the refined binary — and those three stages are 6.7%, 6.0% and 4.4% of
+pipeline stage time. The entry at the end of this file pointed the first pass at
+the bounding-box half, and that half turns out to be two passes rather than one:
+
+- the **flood**, which seeds the border of the box grown by one and marks every
+  background pixel it can reach eight-connected, and
+- the **closing scan**, over the whole box, claiming the pixels the flood did
+  not reach.
+
+The flood is the part that has to happen. The scan is only ever useful when the
+flood left something behind, and it already knows whether it did: count the
+pixels the flood reached inside the box, add the region's own area — the two
+cannot overlap, because a region pixel is never seeded and never marked — and if
+that reaches the box's area there is nothing to find. **On a real tile that
+fires for 26,976 of 27,308 regions**: nuclei rarely have holes.
+
+| | labels | merged binary | both |
+| --- | ---: | ---: | ---: |
+| previous | 0.0596 s | 0.0361 s | 0.0957 s |
+| current | **0.0517 s** | **0.0317 s** | **0.0834 s** |
+| | 1.15x | 1.14x | **1.15x** |
+
+2120² tile of CMU-1, minimum of 9 interleaved repetitions,
+`trace_previous_vs_current`, raw output in `rust-trace-ab.txt`. Four further
+runs of the same harness give 1.08x, 1.13x, 1.16x and 1.15x, so **read this as
+1.1x and not as 1.15x** — the interleaving controls for what the machine is
+doing during a run, not for what it is doing across runs.
+
+Every timed iteration asserts the region **map** and the region **count** are
+identical, on both of the images the pipeline traces — a fill that skipped a
+hole would change the map, and a fill that absorbed a neighbour would change the
+count.
+
+In place it is not separable from the noise. The tracer is about 15% of stage
+time across its three stages, so 1.1x on it is roughly 1.015x on the pipeline;
+alternating the two builds on the saturated 9000x9000 grid gives 69.0 / 69.0 /
+66.5 Mpx/s before and 70.0 / 70.3 / 66.5 after, which is consistent with that
+and would be consistent with rather less. **The object count is unchanged at
+26,647**, which is the part that had to hold.
+
+### The division was not the cost, and that is the fourth time
+
+Both floods pop an offset and recover `x` and `y` from it with `at % width` and
+`at / width` — one hardware division per pop, about 4 M per tile, at twenty-odd
+cycles each. Carrying packed coordinates on the stacks instead removes every one
+of them.
+
+**It is worth 1.00x.** Measured the same way, one variable at a time:
+
+| | both traces | vs previous |
+| --- | ---: | ---: |
+| previous | 0.0960 s | 1.00x |
+| skip the closing scan only | 0.0891 s | 1.08x |
+| packed coordinates only | 0.0960 s | 1.00x |
+| both | 0.0892 s | 1.08x |
+
+The packing was reverted. This is the same shape as the reconstruction's index
+arithmetic above and as the two attempts on the shape split below: an
+instruction count that looks expensive on paper, sitting on a path the
+out-of-order engine was already covering.
+
+## The shape split: five stages and no hotspot
+
+`EDM.toWatershed` is 13.9% of pipeline stage time, the largest stage after the
+background's two halves, and no optimisation pass had touched it. Measured on a
+real tile with `split_cost`, it divides as:
+
+| | ns/px | share of the split |
+| --- | ---: | ---: |
+| `makeFloatEDM` | 6.6 | 26% |
+| `findMaxima` in `SEGMENTED` mode | 18.6 | 74% |
+
+and the segmentation's own five stages, on a 2120² tile at 23% foreground:
+
+| Stage | ms | share |
+| --- | ---: | ---: |
+| `getSortedMaxPoints` | 27.1 | 33% |
+| `watershedSegment` — the dilation | 19.3 | 23% |
+| `analyzeAndMarkMaxima` | 13.1 | 16% |
+| `watershedSegment` — histogram and buckets | 8.5 | 10% |
+| `make8bit` | 5.5 | 7% |
+| `watershedPostProcess` and the `AND` | 3.3 | 4% |
+| `cleanupMaxima` | 1.8 | 2% |
+
+**Three transformations were tried and together they are worth 1.02x**, which is
+this machine's noise floor:
+
+- `trueEdmHeight` addressed through one window instead of eight `y * width + x`
+  products, with the ridge test's branch replaced by a select. Half of
+  `getSortedMaxPoints` is this function — replacing it with a constant, which is
+  the wrong answer and so a diagnostic only, takes the stage from 27.1 ms to
+  12.5.
+- The four interpolated heights reduced as a tree rather than lowered through
+  one accumulator, halving the dependency chain — the transformation that was
+  worth 2.42x on the reconstruction's raster pass.
+- The dilation's neighbourhood bitmask as eight loads at fixed offsets instead
+  of eight bounds-tested branches.
+
+All three were reverted. What was kept is the one change that removes *work*
+rather than instructions: `levels`, `list` and `coordinates` are written before
+they are read, so clearing them was **22 MB of memset per tile** that nothing
+observed.
+
+The stage is not arithmetic-bound. It is five sequential passes over buffers
+that do not fit in cache, with the maxima scan and the dilation touching three
+rows at a time in an order set by level rather than by position. Making it
+meaningfully faster means changing what it touches, not how it computes.
 
 ## Where this leaves the pipeline
 

@@ -1,0 +1,11 @@
+CMU-1 tile 2120x2120 = 4.49 Mpx, 6642 merged regions,
+23.2% foreground
+
+                         best s      ns/px     share
+        makeFloatEDM     0.0297       6.62     26.3%
+    findMaxima + AND     0.0835      18.57     73.7%
+               split     0.1132      25.18    100.0%
+
+Minimum of 9 repetitions each, on the merged binary of a real
+tile rather than on a generated one — ROADMAP §5. The two halves run
+back to back in the pipeline and are timed as one stage there.
