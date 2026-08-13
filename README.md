@@ -85,9 +85,60 @@ plausible images:
 That is the argument for the whole approach in miniature: no test that did not
 compare against QuPath's own numbers could have found any of them.
 
-**End-to-end cell detection is still not comparable with QuPath's 15.87 s**,
-because QuPath spends part of it on the tail this pipeline does not have.
-Component speedups and what they are worth are in [docs/benchmarks/README.md](docs/benchmarks/README.md); what comes
+## Speed
+
+On the region QuPath itself was profiled on — 4000x4000 at (27776, 5952) of
+`CMU-1.svs`, same slide, same default parameters:
+
+![End-to-end cell detection against QuPath](docs/benchmarks/compare-endtoend.svg)
+
+**4.7x single-threaded, 15.6x on twenty threads.** Read the single-threaded bar
+when the question is whether the port is faster, because QuPath's 15.87 s was
+measured single-threaded and QuPath parallelises across tiles in real use. And
+read both as an *upper bound*: QuPath's time includes the tail this pipeline has
+not written — ROI vertices, cell expansion, the measurements — so some of that
+gap is work not yet done rather than work done faster. The gap is decisive
+either way; its exact size is not yet measurable.
+
+The two profiles do not have the same shape, which is the point — a stage that
+dominates QuPath is not the stage that dominates here:
+
+![QuPath's hot frames](docs/benchmarks/compare-hotframes.svg)
+
+![QuPath_Rust's stage breakdown](docs/benchmarks/compare-stages.svg)
+
+QuPath's single largest cost is a `PriorityQueue<PixelWithValue>` of boxed
+objects compared through an interface call — 29.4% of self time in one data
+structure. Here the flood is 12.1% and the queue itself is a flat bucket array.
+The port's own largest stage is the background reconstruction, which barely
+registers in QuPath's profile at 5.1%. **Neither profile predicts the other**,
+and this is why every optimisation in this repository is chosen from a
+measurement of the port rather than from QuPath's flame graph.
+
+Component-level, against ImageJ's own `RankFilters` on the same machine:
+
+![Rank filter against ImageJ](docs/benchmarks/compare-rank.svg)
+
+3.1–9.7x depending on radius, and the *shape* matters more than the peak: the
+win is largest at small radii and settles around 3.4x at the radii detection
+actually uses. Naively scanning the kernel per pixel was **7.6–35.6x slower**
+than ImageJ before the rectangle decomposition replaced it — the algorithm was
+the variable, not the language.
+
+Scaling is set by how many tiles a region has, not by how many cores the machine
+has:
+
+![Wall clock against thread count](docs/benchmarks/compare-threads.svg)
+
+The 4000x4000 region is four tiles, so it saturates at four threads and
+everything past six is idle. The 9000x9000 region is twenty-five tiles and
+keeps improving to twenty. A stage share quoted without its tile count and
+thread count is not a number anyone can use.
+
+Charts regenerate with `python3 docs/benchmarks/plot.py`; every figure in them
+is copied from a recording in [docs/benchmarks/](docs/benchmarks/) or
+[docs/profiles/](docs/profiles/). Component speedups and what they are worth in
+place are in [docs/benchmarks/README.md](docs/benchmarks/README.md); what comes
 next is in [docs/ROADMAP.md](docs/ROADMAP.md). **New here? Start with
 [docs/MEMO.md](docs/MEMO.md)** — what is finished, what is genuinely faster, and
 what to distrust, in one page.
