@@ -722,12 +722,20 @@ were driven from Rust at the measured ratio. None of them is. The Rust crates
 run on in-memory buffers handed to them by tests and benchmarks; nothing reads
 a slide, and no ported code executes during a QuPath detection run.
 
-**So the honest end-to-end number is still 15.87 s**, exactly as it was before
-any of this work — see `docs/profiles/README.md`. Every figure in this file is
-a component measurement, and component measurements have now twice overstated
-what they were worth in place: buffer reuse looked like a third of the queue
-cost and was 3% of the flood, and the incremental rank filter looked like 1.9x
-ahead of ImageJ and was behind it from radius 3.
+**That paragraph is now out of date and is kept for the correction it carries.**
+When it was written nothing read a slide and no ported code ran during a
+detection; the pipeline is closed now and runs end to end, and on QuPath's own
+profiled region it takes **3.359 s on one thread against QuPath's 15.87 s**, or
+1.019 s on twenty — see the charts in the top-level `README.md` and the caveat
+that goes with them, which is that QuPath's figure includes a tail this pipeline
+has not ported.
+
+What survives unchanged is the warning. Every other figure in this file is a
+component measurement, and component measurements have now twice overstated what
+they were worth in place: buffer reuse looked like a third of the queue cost and
+was 3% of the flood, and the incremental rank filter looked like 1.9x ahead of
+ImageJ and was behind it from radius 3. The 1.7x that the three Amdahl ceilings
+above multiply to was never the end-to-end figure and should not be read as one.
 
 The largest remaining piece of work is not a further optimisation of these
 three. It is closing the detection pipeline — the Laplacian, the regional

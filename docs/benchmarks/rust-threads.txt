@@ -1,0 +1,64 @@
+data/CMU-1.svs  level 0
+i7-13800H: 6 P-cores (CPUs 0-11, SMT) + 8 E-cores (CPUs 12-19), 20 logical
+built with -C target-cpu=x86-64-v3
+measured 2026-08-13
+
+Wall clock against thread count, taskset-pinned. Two regions, because the
+answer depends on the tile count and not on the machine.
+
+  region 27776,5952 4000x4000 -- 4 tiles
+    threads  cpus            wall
+          1  0               3.359 s
+          6  0,2,4,6,8,10    1.028 s
+         12  0-11            1.017 s
+         20  0-19            1.019 s
+
+  region 20000,5000 9000x9000 -- 25 tiles
+    threads  cpus            wall
+          1  0               7.260 s
+          6  0,2,4,6,8,10    1.554 s
+          8  0-7             1.689 s
+         12  0-11            1.427 s
+         16  0-15            1.311 s
+         20  0-19            1.203 s
+
+The 4-tile region is flat from 6 threads: four tiles is four units of
+parallelism and the rest of the pool is idle. The 25-tile region improves all
+the way to 20, a real 1.29x from 6. Neither region says the pool wants tuning.
+
+The 8-thread row is slower than the 6-thread row because CPUs 0-7 is four
+physical P-cores plus their SMT siblings, where 0,2,4,6,8,10 is six distinct
+P-cores. Fewer threads on more cores wins.
+
+---
+
+Core type and SMT, saturated 9000x9000 region, stage seconds summed across
+threads. This is the control §4 asked for: the first two rows are the same six
+physical cores with only SMT changing, so clocks and memory bandwidth are held
+fixed.
+
+  config                cpus    threads   total CPU-s   wall
+  6 P-cores, no SMT     0,2..10       6         8.526   1.552 s
+  6 P-cores + SMT       0-11         12        14.162   1.396 s
+  8 E-cores only        12-19         8        15.582   2.263 s
+  all 20                0-19         20        18.347   1.245 s
+  1 thread, 1 P-core    0             1         7.175   7.241 s
+
+Toggling SMT alone costs 1.66x the CPU time to buy 1.11x the wall clock. Memory
+bandwidth cannot distinguish a sibling thread from a distinct core, so it cannot
+be the explanation; contention for shared execution ports can.
+
+The erosion, whose share is the reason two sessions were spent on it:
+
+  config                erode CPU-s   vs 1-core floor
+  1 thread, 1 P-core          1.789             1.00x
+  6 P-cores, no SMT           2.073             1.16x
+  6 P-cores + SMT             3.928             2.20x
+  8 E-cores only              3.914             2.19x
+  all 20                      4.781             2.67x
+
+It scales almost perfectly on real cores and loses a factor of two to SMT, so
+most of its 26-28% saturated-grid share is contention rather than work. On six
+P-cores it is 24.3%. Eleven rectangles of four scalar passes each is pure ALU
+throughput with no stalls for a sibling thread to fill, which is exactly the
+shape that gains nothing from SMT.

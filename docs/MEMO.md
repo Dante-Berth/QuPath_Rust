@@ -67,8 +67,21 @@ slower and nothing got faster this session. Do not compare either figure against
 the 42.6 Mpx/s this file used to quote: that was a different region with more
 tissue in it, and only the ratio within one region means anything.
 
-Against QuPath's 15.87 s there is still nothing to compare, because QuPath
-spends part of it on the tail this pipeline does not have.
+**Against QuPath, on the region QuPath was profiled on** — 4000x4000 at
+(27776, 5952), same slide, same default parameters:
+
+| | wall clock | vs QuPath |
+| --- | ---: | ---: |
+| QuPath, 1 thread | 15.87 s | — |
+| this pipeline, 1 thread | **3.359 s** | **4.7x** |
+| this pipeline, 20 threads | **1.019 s** | **15.6x** |
+
+Read the single-threaded row, not the twenty-threaded one, when the question is
+whether the port is faster: QuPath's profile was taken single-threaded, and
+QuPath parallelises across tiles in real use. And read both as generous to us,
+because QuPath's 15.87 s includes the tail this pipeline has not ported — ROI
+vertices, cell expansion, the measurements. The gap is decisive either way; what
+is not yet measurable is its exact size.
 
 ---
 

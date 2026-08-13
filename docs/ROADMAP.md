@@ -773,9 +773,14 @@ cache-blocking is one of the two honest answers — is not established by these
 numbers.** Bandwidth would degrade gradually as threads were added; this
 degrades almost entirely at the step where slower cores and shared execution
 resources arrive. And the blocking §4.8 proposes was measured this session and
-is 1.7–2.6x **worse** — see below. Somebody should separate the two causes with
-a run pinned to P-cores only before the next optimisation is chosen on the
-strength of either.
+is 1.7–2.6x **worse** — see below.
+
+**That run has since been done, and it disproves the bandwidth reading.**
+Holding the six P-cores fixed and toggling only SMT costs 1.66x the CPU time to
+buy 1.11x the wall clock, which bandwidth cannot explain and execution-port
+contention can. The erosion's uncontended floor is 1.16x on six P-cores against
+2.20x with SMT, so most of its saturated-grid share is contention rather than
+work. Both are recorded with their numbers in §4.9's findings list below.
 
 **Where that leaves the next lever: the erosion, which this file wrote off.**
 §4.7 recorded it as 12% of the background stage and said "the erosion is not the
@@ -1298,6 +1303,47 @@ the third stage running.
   different machine from one. **An A/B on a component, however carefully
   interleaved and asserted, does not predict the sign in place.** The bar for a
   speed claim is now the saturated grid as well as the component.
+- **The pipeline is already 4.7x faster than QuPath on one thread, and the
+  stage table has been read as if it were not.** Same slide, same 4000x4000
+  region, same default parameters, `region` against the 15.87 s in
+  `docs/profiles/README.md`: **3.359 s on one thread, 1.019 s on twenty.** That
+  is 4.7x and 15.6x. The comparison is generous to us — QuPath's 15.87 s
+  includes the tail this pipeline has not ported (ROI vertices, cell expansion,
+  the measurements) — so the honest claim is "decisively faster, by a factor
+  this measurement puts at most at 4.7x single-threaded". It is not close, and
+  no session needs to open by asking whether we are ahead.
+- **Wall clock on the profiled region is flat from six threads, and that is a
+  property of the region, not the machine.** On the 4000x4000 region: 1 thread
+  3.359 s, 6 threads 1.028 s, 12 threads 1.017 s, 20 threads 1.019 s. Four
+  tiles is four units of parallelism, so the pool is exhausted at four and
+  everything past it is idle. On the saturated 9000x9000 grid the same sweep
+  still improves throughout — 6 threads 1.554 s, 12 1.427 s, 16 1.311 s, 20
+  1.203 s, a real **1.29x** from 6 to 20. **Pool tuning is therefore not a
+  lever**: on the small region extra threads already cost nothing in wall clock,
+  and on the large one they are all earning. The only thing left that moves wall
+  clock is per-pixel work on the critical path.
+- **§4.8's memory-bandwidth reading is disproved by an SMT control.** Six
+  P-cores with SMT off against the same six P-cores with SMT on — identical
+  silicon, identical clocks, identical memory system, the only variable being
+  sibling threads — on the saturated grid: total stage CPU time **8.526 s to
+  14.162 s (1.66x)** to buy wall clock **1.552 s to 1.396 s (1.11x)**. Memory
+  bandwidth cannot tell a sibling thread from a distinct core, so it cannot
+  produce that; contention for shared execution ports can and does. This is the
+  run this file asked for above ("somebody should separate the two causes with a
+  run pinned to P-cores only"), and it also explains why the cache-blocking §4.8
+  proposed measured 1.7–2.6x **worse** rather than merely failing to help.
+- **Most of the erosion's saturated-grid share is contention, not work.** Its
+  uncontended floor is one thread on one P-core, where it costs **1.789 CPU-s**
+  on the 9000x9000 grid. Six P-cores without SMT: 2.073 s, only **1.16x** — it
+  scales nearly perfectly on real cores. Six P-cores *with* SMT: **3.928 s,
+  2.20x the floor**, and the eight E-cores land at 2.19x independently. So the
+  "28% of the pipeline" that sent two sessions at this stage is roughly half an
+  artefact of oversubscribing the machine; on six P-cores it is 24.3%. It fits
+  the stage's shape — eleven rectangles of four scalar passes each is pure ALU
+  throughput with no stalls for a sibling to fill, so SMT halves the ports and
+  returns nothing. **A vectorised prefix-maximum inherits this**: it concentrates
+  the same work into denser ports, so it should be expected to be *more*
+  SMT-sensitive, and its 3.1x on a component will not survive intact in place.
 - **Hand-interleaving a chain costs the autovectoriser, and that can outweigh
   the chain.** Carrying four of the rank filter's block scans in flight — the
   same disjoint-reductions argument that was worth 2.4x on the reconstruction —
