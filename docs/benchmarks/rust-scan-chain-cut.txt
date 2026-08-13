@@ -1,0 +1,25 @@
+cpu: 13th Gen Intel(R) Core(TM) i7-13800H, RUSTFLAGS=-C target-cpu=x86-64-v3
+recorded: 2026-08-13
+fixture: CMU-1.svs at (27776, 5952), haematoxylin channel
+
+1920x1920, one real tile, single-threaded, minimum of 5 interleaved repetitions.
+Every row of the tile through every block-path rectangle, which is what
+one erosion's horizontal half does.
+
+The vector scan agrees with the scalar one bit for bit.
+
+                                            s      ns/px
+                   scan as written     0.0236       6.40
+           scan, chain cut (wrong)     0.0157       4.26
+       scan, no arithmetic (wrong)     0.0110       2.99
+             extend + combine only     0.0041       1.11
+    scan, log-depth AVX2 (correct)     0.0198       5.37
+
+        cutting the chain is worth                  1.50x
+       the log-depth scan is worth                  1.19x
+  removing the arithmetic entirely                  2.14x
+
+The first ratio is the ceiling on a log-depth SIMD scan: it keeps every
+load and store and removes only the dependency. If it is near 1.00x the
+scan is bound by its traffic and ROADMAP §4.9's remaining lever is not
+there.

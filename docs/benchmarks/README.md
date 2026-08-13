@@ -284,8 +284,24 @@ Three things follow, in the order §0 ranks them:
   pipeline has. Worth a further 1.1-1.9x over the in-place form in the table,
   which pays for one copy of the image.
 
-The horizontal pass switches to van Herk/Gil-Werman blocks above half-width 2,
-where its fixed four passes beat `2h+1` shifted maxima.
+The horizontal pass switches to van Herk/Gil-Werman blocks at half-width 7,
+where its fixed four passes beat `2h+1` shifted maxima. **Seven is measured,
+not counted**: counting passes says 3, but the two sides do not vectorise
+equally — the shift path is a slice-to-slice maximum that speeds up 10.7x under
+AVX2 while the block scheme, which carries a serial running maximum along each
+block, manages 3.1x. The crossover was swept inside one binary; see ROADMAP §4.
+
+**The serial scan inside those blocks has since been rewritten as a log-depth
+AVX2 prefix-maximum, and it is not in the shipped filter.** It works — three
+shift-and-max steps per eight lanes, bit-identical to the scalar scan over
+every span and length including `NaN` and both zeros, **1.19x on the scan**
+against a 1.50x ceiling from cutting the dependency outright. But the scan is
+~1.0 ns/px of a 19.37 ns/px filter, so it is ~1.05x on the erosion and
+**~1.013x on the pipeline**, which is below this machine's run-to-run spread
+and below the several-percent floor this file sets for a two-binary claim. It
+also needs `unsafe`, which the guidelines allow only behind a committed profile
+showing what it buys. `scan_chain_cut` is that profile; it prices the change
+out, and it is kept so the next reader does not rewrite it.
 
 ### What this is and is not
 

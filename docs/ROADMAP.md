@@ -172,6 +172,10 @@ RUSTFLAGS="-C target-cpu=x86-64-v3" \
     cargo run --release -p qupath-pipeline --example split_cost
 RUSTFLAGS="-C target-cpu=x86-64-v3" \
     cargo run --release -p qupath-pipeline --example erode_cost
+# the erosion's horizontal half: the chain-cut diagnostic and the log-depth
+# AVX2 scan that closes §4.9's last lever — see §4
+RUSTFLAGS="-C target-cpu=x86-64-v3" \
+    cargo run --release -p qupath-pipeline --example scan_chain_cut
 RUSTFLAGS="-C target-cpu=x86-64-v3" \
     cargo run --release -p qupath-pipeline --example reconstruct_rows
 RUSTFLAGS="-C target-cpu=x86-64-v3" \
@@ -871,13 +875,58 @@ measurements above actually name is the van Herk scan itself: a serial running
 maximum along each block of 33, which is a loop-carried dependency and so the
 one part of this filter SIMD does not help. Two things follow, neither tried:
 
-- **A vectorised prefix-maximum.** The running maximum within a block is a
-  scan, and a scan over 33 lanes has a standard log-depth SIMD form (shift by
-  1, 2, 4, 8, 16, taking a maximum each time). That replaces 33 serial
-  comparisons with five vector operations per block. It is the only change
-  identified here that attacks the 3.1x rather than the pass count, and it is
-  still untried — but see the entry below before reaching for it, because the
-  cheap version of the same idea backfired badly.
+- ~~**A vectorised prefix-maximum.**~~ — **written and measured, and it works;
+  it is still not worth shipping.** The running maximum within a block is a
+  scan, and a scan over eight lanes has a standard log-depth SIMD form (shift
+  by 1, 2 and 4, taking a maximum each time). It was the only change identified
+  here that attacks the 3.1x rather than the pass count, and it is the last
+  untried lever this section had.
+
+  `scan_chain_cut` carries all of it — the chain-cut diagnostic first, which
+  this repository's history says should always precede the rewrite, then the
+  rewrite itself. On a real 1920² tile, single-threaded, minimum of five
+  interleaved repetitions:
+
+  | | ns/px |
+  | --- | ---: |
+  | scan as written | 6.40 |
+  | scan, chain cut (wrong answer) | 4.26 |
+  | **scan, log-depth AVX2 (correct)** | **5.37** |
+  | scan, no arithmetic (wrong answer) | 2.99 |
+  | extend + combine only | 1.11 |
+
+  **The chain is real — cutting it is worth 1.50x — and the log-depth scan
+  collects 1.19x of it**, stable across five runs (1.16-1.19x), bit-identical to the scalar
+  path over every span and length including `NaN`, both zeros and both
+  infinities.
+
+  **And 1.19x on the scan is ~1.013x on the pipeline.** The scan saves ~1.0
+  ns/px where `erode_cost` measures the whole filter at 19.37, so it is ~1.05x
+  on the erosion, and the erosion is 28% of the saturated grid. That is below
+  this machine's run-to-run spread and far below §5's several-percent floor for
+  a two-binary claim, so **the change could not be shown to work in place even
+  though it demonstrably works in isolation** — and the entry three bullets
+  down is the case where a gain of exactly this size reversed sign at 25 tiles.
+  The prediction in §4.9's findings list was right on both counts: a vectorised
+  prefix-maximum inherits the SMT sensitivity, and its component gain does not
+  survive in place.
+
+  It also needs `unsafe`, which the workspace denies outright and which
+  `.claude/skills/ms-rust/SKILL.md` permits only behind "a committed profile
+  showing what it buys". The probe is that profile and it prices the change out.
+  **The erosion's horizontal half is now closed**: the pass count was argued
+  shut above, the block scheme's crossover was measured in `7270ed6`, and the
+  scan itself is this entry. What is left in the stage is the traffic, which is
+  §4.8's problem and not a loop's.
+
+  **One thing the probe caught that is worth keeping.** The first version
+  propagated `NaN`. `_mm256_max_ps(a, b)` returns `b` whenever either operand
+  is `NaN`, while the scalar fold's `value > acc` discards one — so the
+  accumulator must be the *first* operand at every step, and a `NaN` arriving
+  in the first lane of a block needs blending to `-inf` on load because no seed
+  protects it there. Both were found by the differential test on its first run,
+  neither by reading the code. A SIMD maximum is not a drop-in for a comparison
+  fold, and this repository's `NaN` convention is load-bearing.
 
   **Carrying several block chains at once does not work, and it is the obvious
   thing to try first.** Blocks are disjoint reductions, so four chains can run

@@ -115,6 +115,30 @@ as much as widening the other two was. None of the three needed SIMD.
 
 ### Faster this session
 
+**Nothing, and the session's result is a lever closed rather than opened.**
+ROADMAP §4.9's last untried idea — a log-depth SIMD prefix-maximum for the
+erosion's van Herk scan, the only change identified that attacks the 3.1x the
+horizontal half vectorises at rather than its pass count — was written and
+measured. It **works**: bit-identical to the scalar scan over every span and
+length including `NaN`, and **1.19x** on the scan against a 1.50x ceiling from
+cutting the dependency outright.
+
+**It is worth ~1.013x end to end, so it was not shipped.** The scan saves ~1.0
+ns/px where the whole filter costs 19.37, the erosion is 28% of the saturated
+grid, and the product is below this machine's noise. It needs `unsafe`, which
+the guidelines allow only behind a committed profile showing what it buys —
+`scan_chain_cut` is that profile and it prices the change out. **The erosion's
+horizontal half is now closed on all three fronts**: pass count, block-scheme
+crossover, and the scan itself.
+
+The differential test earned its keep on the first run: `_mm256_max_ps` returns
+its second operand on `NaN` where the scalar fold discards one, so the two
+paths disagreed until the accumulator was moved to the first operand and
+incoming `NaN`s were blended to `-inf` on load. Neither bug was visible by
+reading the code.
+
+### Faster the session before
+
 **~1.3%, from deleting memsets, and nothing else.** Seven tile buffers were
 cleared and zero-filled before the stage that overwrites every pixel of them —
 the background estimate, the Laplacian, the labels, the region map twice, the
@@ -140,7 +164,7 @@ erosion is not the problem". The stage this file has pointed three optimisation
 passes at, the reconstruction, is 10.8% there against 26.2% here. Read ROADMAP
 §4's new subsection before picking anything up.
 
-### Faster in the session before this one
+### Faster two sessions before
 
 **The region tracer, 1.1x, and nothing else.** The hole test walked each
 region's bounding box twice — once to flood the background in from the border,
@@ -156,7 +180,7 @@ the pipeline — inside this machine's run-to-run spread end to end.
 **Four things were tried and reverted** in that session too: see §4's second
 entry.
 
-### Faster two sessions ago
+### Faster three sessions ago
 
 **The reconstruction's raster pass, 2.42x**, which was the first end-to-end wall
 clock gain this project had: **1.19x** on a 9000x9000 region at 25 tiles on
@@ -169,7 +193,7 @@ cost was one loop-carried dependency, and the measurement that found it took ten
 minutes: feed the loop a constant instead of its left neighbour, accept that the
 answer is wrong, read the clock. 3.87 ns/px became 0.62.
 
-### Faster three sessions ago
+### Faster four sessions ago
 
 **One thing, worth 1.17x**, and only at saturation: the rank filter and the
 convolver were parallelising rows *inside* the per-tile rayon job. Removing that
@@ -359,12 +383,28 @@ Measured, not assumed:
    is a different algorithm rather than a tighter loop, and in place the stage is
    already running into §6.1's bandwidth wall (2.03x isolated, 1.71x at 25
    tiles). Not obviously the next thing to spend a day on.
-4. **Doing less work** — still the largest lever in the guidelines' own
-   ordering, and the only kind of change that has paid this session or any
-   other. `Slide::level_for_width` exists and nothing uses it; the profiled
+4. ~~**The erosion's van Herk scan**~~ — **closed.** It was the largest single
+   stage on the saturated grid at 28%, and 86% of it is the horizontal half.
+   All three ways in are now measured rather than open: the pass count is
+   argued shut (eleven rectangles is the minimum for an exact cover), the
+   block-scheme crossover was swept inside one binary, and the serial scan
+   itself was rewritten as a log-depth AVX2 prefix-maximum — which **works,
+   1.19x on the scan, and is ~1.013x on the pipeline**, below what this machine
+   can resolve. `scan_chain_cut` has the numbers. What remains in that stage is
+   traffic, which is entry 1, not a loop.
+5. **Doing less work** — still the largest lever in the guidelines' own
+   ordering, and the only kind of change that has paid in any session.
+   `Slide::level_for_width` exists and nothing uses it; the profiled
    region is 99% tissue but a whole slide is mostly glass. The tracer's 1.1x
    (§3) is the small version of the same idea: a pass that ran and was not
    needed.
+
+**Read 1 and 5 together, because four sessions now point the same way.** Every
+loop-level change measured since the tiling was corrected has come back between
+1.00x and 1.02x in place, including three that were genuinely faster in
+isolation and one that reversed sign. The stages are not stalling on
+arithmetic any more; they are waiting on DRAM. The next real gain is either
+touching less memory per tile or not processing the tile at all.
 
 ---
 
