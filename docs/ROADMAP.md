@@ -7,6 +7,10 @@ it can claim anything. Written to be picked up cold.
 orientation, including an honest accounting of what is genuinely faster and what
 only looks it. This file is the detail underneath that.
 
+`docs/VIEWER.md` is a separate project — a slide viewer on top of
+`qupath-slide`. It is not on the parity path and claims no speedup; it is
+tracked apart from this file for that reason.
+
 ## State of play
 
 Five crates, all five now with parity fixtures recorded from a real QuPath
