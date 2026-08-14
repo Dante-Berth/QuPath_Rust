@@ -26,6 +26,18 @@ The one real connection is §3: viewport-driven level selection is the same
 `Slide::level_for_width` the whole-slide speedup needs, and a viewer is a
 visual check that it is correct.
 
+**`Viewport::level` is now that function's first caller**, and the first number
+out of it is worth recording. On `CMU-1.svs` a 1024x768 view of the whole slide
+picks level 2 and needs **108 tiles against level 0's 23,220** — 215x fewer,
+for an image that is *better* than reading level 0 and throwing 99.5% of it
+away. That is `ROADMAP.md` §0's "do less work" in its purest form. It is not a
+pipeline speedup and is not claimed as one: it says the level table is wired
+up correctly, which is the prerequisite for the whole-slide work.
+
+`examples/dump.rs` prints the whole table across scales, and the overview PNG
+it writes makes the other half of the argument visible — most of a real slide
+is glass.
+
 ## 1. What the read side already gives us
 
 Better than expected, and none of it needs changing to start:
@@ -63,25 +75,61 @@ Note the workspace already depends on rayon, and the loader must **not** be a
 A dedicated pool for tile loading, separate from the detection pool, is the
 safe shape.
 
+## 2b. Running it
+
+Both examples take a slide path, defaulting to `data/CMU-1.svs`.
+
+```sh
+# A window with one tile from the slide. Escape or close to quit.
+cargo run -p qupath-viewer --example window --release -- data/CMU-1.svs
+
+# No window: writes viewer-dump.png (the whole slide at the level the viewport
+# picks) and viewer-dump-detail.png (1024x1024 at level 0, the profiled
+# region), then prints the level table across scales.
+cargo run -p qupath-viewer --example dump --release -- data/CMU-1.svs
+
+cargo test -p qupath-viewer
+```
+
+`--release` matters for both: a debug build decodes JPEG tiles slowly enough to
+be annoying.
+
+The window needs a display and a GPU. It runs on Vulkan here; wgpu will fall
+back to other backends but the fallback is untested. If it cannot find an
+adapter it panics at startup with `expect("adapter")` rather than opening a
+blank window, which is the intended failure — `dump` is the path that needs
+neither.
+
+Tests need no display and no GPU, by construction (§6). The integration tests
+need `data/CMU-1-Small-Region.svs` and return early without it.
+
 ## 3. Milestones
 
 Each one is something that can be looked at. No step is finished until the
 thing on screen is correct, not merely present.
 
-### 3.1 Window, wgpu, clear to a colour
+### 3.1 Window, wgpu, clear to a colour — **done**
 
-Boring, and it is where all the setup pain lives. Done when the window opens,
-resizes without panicking, and closes cleanly.
+`examples/window.rs`. winit 0.30 and wgpu 26, which is the pairing that
+resolves cleanly; winit's 0.31 is a beta. Vulkan on the Intel RPL-P here.
 
-### 3.2 One hardcoded tile on screen
+### 3.2 One hardcoded tile on screen — **done**
 
-**The real first milestone.** One `read_tile_into` at a fixed level, column and
-row, uploaded as a texture, drawn as a quad.
+`examples/window.rs` draws the centre tile of the level `Viewport::fit` picks,
+as a textured quad from a four-vertex strip with no vertex buffer.
 
-Done when the tile is recognisably the right part of the slide, the right way
-up, and the right colours — RGB8 from the decoder against whatever the surface
-format wants is the first place a bug hides here. Compare against the same
-region written to a PNG from `read_region_rgb`, which is already tested.
+Two things this settled that the plan had left open:
+
+- **Edge-tile padding.** Decided as §1 said to: `TileIndex::visible_size`
+  returns the cropped extent and the upload drops the padding, rather than the
+  reader changing. `an_edge_tile_reports_only_its_real_pixels` pins it.
+- **RGB8 reaching the GPU.** No GPU takes a three-byte texture — `wgpu` has no
+  `Rgb8Unorm` — so the upload expands to RGBA once. The decoder is untouched;
+  the detection pipeline reads the same tiles and wants no alpha channel. The
+  surface format also needs `add_srgb_suffix`, without which the tile is
+  visibly washed out, and that is the colour bug §3.2 was written to catch.
+
+`examples/dump.rs` is the reference to compare against: same pixels, no GPU.
 
 ### 3.3 Pan, zoom, and level selection
 
@@ -168,10 +216,12 @@ project draws pictures. What it means here:
 
 ## 7. Open questions
 
-- **Where the crate lives.** `crates/qupath-viewer` fits the workspace, but it
-  pulls winit/wgpu/egui into a workspace whose other five crates have four
-  dependencies between them. A separate workspace member is still the simplest
-  answer; revisit if build times get annoying.
+- **Where the crate lives — settled.** `crates/qupath-viewer`, and the
+  dependency worry was answered rather than accepted: winit, wgpu and png are
+  **dev-dependencies**, needed only by the examples that open a window. The
+  library itself depends on `qupath-slide` alone, so `cargo test -p
+  qupath-viewer` builds none of the graphics tree. That falls out of §6 — if
+  the tests need no GPU, the library does not need to link one.
 - **Whether `qupath-slide` needs a tile cache of its own.** Probably not — the
   viewer's texture cache sits above it and the detection pipeline streams. Do
   not add one speculatively.

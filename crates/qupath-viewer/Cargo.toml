@@ -1,0 +1,24 @@
+[package]
+name = "qupath-viewer"
+description = "A whole-slide viewer: coordinate spaces, viewport math, and a wgpu window."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+qupath-slide = { path = "../qupath-slide" }
+
+[lints]
+workspace = true
+
+# The window and the GPU are needed only by the examples that open one. Keeping
+# them out of [dependencies] means `cargo test -p qupath-viewer` builds the
+# viewport math without wgpu, winit or their transitive tree — which is most of
+# this crate's build time, and none of what the tests cover.
+[dev-dependencies]
+png = "0.18"
+pollster = "0.4"
+wgpu = "26"
+winit = "0.30"
