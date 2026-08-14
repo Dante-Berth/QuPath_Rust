@@ -1580,6 +1580,7 @@ dependencies = [
 name = "qupath-viewer"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "png",
  "pollster",
  "qupath-slide",

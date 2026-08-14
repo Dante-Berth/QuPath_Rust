@@ -16,7 +16,7 @@
 
 use qupath_slide::{Level, Slide};
 
-use crate::coords::{SlidePoint, TileIndex};
+use crate::coords::{ScreenPoint, SlidePoint, TileIndex};
 
 /// What the window is looking at: a centre in slide coordinates and a scale.
 ///
@@ -54,6 +54,114 @@ impl Viewport {
         }
     }
 
+    /// Where a screen point falls on the slide.
+    ///
+    /// The inverse of [`Viewport::to_screen`], and the two are tested against
+    /// each other — a viewer that disagrees with itself here zooms away from
+    /// the cursor instead of towards it.
+    #[must_use]
+    pub fn to_slide(self, point: ScreenPoint) -> SlidePoint {
+        let (left, top, _, _) = self.bounds();
+        SlidePoint::new(
+            left + f64::from(point.x) / self.scale,
+            top + f64::from(point.y) / self.scale,
+        )
+    }
+
+    /// Where a slide point lands in the window.
+    ///
+    /// May fall outside the window; culling is [`Viewport::visible_tiles`]'s
+    /// job, not this one's.
+    #[must_use]
+    pub fn to_screen(self, point: SlidePoint) -> ScreenPoint {
+        let (left, top, _, _) = self.bounds();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "screen space is f32 by definition; see coords::ScreenPoint"
+        )]
+        ScreenPoint::new(
+            ((point.x - left) * self.scale) as f32,
+            ((point.y - top) * self.scale) as f32,
+        )
+    }
+
+    /// Moves the view by a screen-space drag.
+    ///
+    /// The sign is the one a grab gesture wants: dragging right moves the
+    /// slide right, which means the centre moves *left*.
+    #[must_use]
+    pub fn pan(self, dx: f64, dy: f64) -> Self {
+        Self {
+            centre: SlidePoint::new(
+                self.centre.x - dx / self.scale,
+                self.centre.y - dy / self.scale,
+            ),
+            ..self
+        }
+    }
+
+    /// Zooms by `factor` about a fixed screen point.
+    ///
+    /// The slide point under `anchor` stays under `anchor`, which is what makes
+    /// scroll-to-zoom feel attached to the cursor rather than to the window
+    /// centre. `zoom_holds_the_anchor_still` is the test, and it is the whole
+    /// reason this is a method rather than two lines in the event handler.
+    ///
+    /// `scale` is clamped to a sane range: past about 32 px per slide pixel
+    /// there is nothing left to see, and below `1e-6` a whole slide is
+    /// sub-pixel and the tile arithmetic loses meaning.
+    #[must_use]
+    pub fn zoom_about(self, factor: f64, anchor: ScreenPoint) -> Self {
+        let target = self.to_slide(anchor);
+        let scale = (self.scale * factor).clamp(1e-6, 32.0);
+        // Solve for the centre that keeps `target` under `anchor` at the new
+        // scale: anchor is (target - left) * scale, and left is centre minus
+        // half the view, so centre = target - (anchor - half) / scale.
+        let half_width = f64::from(self.width) / scale / 2.0;
+        let half_height = f64::from(self.height) / scale / 2.0;
+        Self {
+            centre: SlidePoint::new(
+                target.x - (f64::from(anchor.x) / scale - half_width),
+                target.y - (f64::from(anchor.y) / scale - half_height),
+            ),
+            scale,
+            ..self
+        }
+    }
+
+    /// The view resized to a new window size, keeping the centre and scale.
+    #[must_use]
+    pub fn resize(self, width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            ..self
+        }
+    }
+
+    /// Where a tile lands in the window, as `(x, y, width, height)` in screen
+    /// pixels.
+    ///
+    /// Uses the tile's *visible* size, so the JPEG padding TIFF stores in edge
+    /// tiles is neither drawn nor allowed to stretch the quad — the same
+    /// decision [`TileIndex::visible_size`] records, carried through to the
+    /// geometry.
+    #[must_use]
+    pub fn tile_rect(self, tile: TileIndex, level: &Level) -> (f32, f32, f32, f32) {
+        let origin = tile.origin(level).to_slide(level);
+        let (visible_width, visible_height) = tile.visible_size(level);
+        let top_left = self.to_screen(origin);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "screen space is f32 by definition; see coords::ScreenPoint"
+        )]
+        let (width, height) = (
+            (f64::from(visible_width) * level.downsample * self.scale) as f32,
+            (f64::from(visible_height) * level.downsample * self.scale) as f32,
+        );
+        (top_left.x, top_left.y, width, height)
+    }
+
     /// The extent of the view in level-0 pixels, as `(left, top, right, bottom)`.
     ///
     /// May fall outside the slide — panning past an edge is allowed, and
@@ -72,32 +180,54 @@ impl Viewport {
 
     /// The level to read at this scale.
     ///
-    /// Asks for a level at least as wide as the view needs on screen, so the
-    /// chosen level is never *below* screen resolution — that would be visibly
-    /// soft. [`Slide::level_for_width`] returns the coarsest level meeting
-    /// that, which is the cheapest one that still looks right.
+    /// The criterion is **resolution per pixel**, not extent: a level is good
+    /// enough when one of its pixels covers no more than one screen pixel,
+    /// which is `downsample <= 1 / scale`. The coarsest such level is the
+    /// cheapest one that is not visibly soft.
+    ///
+    /// # The bug this had, which is worth keeping written down
+    ///
+    /// The first version asked [`Slide::level_for_width`] for `base.width *
+    /// scale` and so demanded a level's *whole extent* cover the slide at
+    /// screen scale. That is the same condition algebraically, but it fails on
+    /// the pyramid's own rounding: at scale 0.2536 a 46000 px slide wants
+    /// 11666 px, level 1 offers 11500, and the level is rejected over a **1.4%
+    /// shortfall** — so the viewer jumped from level 2 straight to level 0 and
+    /// decoded **221 tiles where 20 would do**, to show a window of glass.
+    /// Zooming *out* reached the same scale at level 1, so the same view picked
+    /// different levels depending on the direction of travel.
+    ///
+    /// Comparing downsamples directly is the honest form of the criterion, and
+    /// it takes the tolerance with it: a level within `TOLERANCE` of ideal is
+    /// not visibly soft, and refusing it costs an order of magnitude in tiles.
+    /// `the_level_is_the_same_whichever_way_the_scale_is_reached` and
+    /// `the_level_never_costs_more_tiles_than_the_one_below_it` pin both halves.
     #[must_use]
     pub fn level(self, slide: &Slide) -> &Level {
-        let base = &slide.levels()[0];
-        // How wide level 0 would be on screen at this scale. Clamped to at
-        // least 1 so a degenerate scale still names a level rather than
-        // underflowing the cast.
-        let on_screen = (f64::from(base.width) * self.scale).max(1.0);
-        // Saturating rather than wrapping: a very zoomed-in view asks for more
-        // than u32 can hold, and the answer there is level 0, which is what
-        // `level_for_width` returns for any width past the widest level.
-        let needed = if on_screen >= f64::from(u32::MAX) {
-            u32::MAX
+        /// How much coarser than ideal a level may be before it is rejected.
+        ///
+        /// Aperio pyramids are powers of two in practice, so the ideal
+        /// downsample almost never lands on a level exactly; without slack the
+        /// choice flips on floating-point noise. 5% is below what is visible
+        /// and well under the 4x gap between adjacent levels, so it can never
+        /// promote a level two steps too coarse.
+        const TOLERANCE: f64 = 1.05;
+
+        // One slide pixel per screen pixel is downsample 1/scale. Anything
+        // coarser than that is being magnified, which is what looks soft.
+        let ideal = if self.scale > 0.0 {
+            1.0 / self.scale
         } else {
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "the branch above excludes everything u32 cannot hold"
-            )]
-            {
-                on_screen as u32
-            }
+            f64::INFINITY
         };
-        slide.level_for_width(needed)
+
+        // The coarsest level that is not meaningfully softer than ideal. Levels
+        // are ordered finest first, so this walks from the cheap end.
+        slide
+            .levels()
+            .iter()
+            .rfind(|level| level.downsample <= ideal * TOLERANCE)
+            .unwrap_or(&slide.levels()[0])
     }
 
     /// Every tile of `level` the view touches, row-major.
@@ -232,6 +362,123 @@ mod tests {
         // Far to the left, and far below.
         assert!(viewport((-100_000.0, 1500.0), 1.0, (800, 600)).visible_tiles(&base).is_empty());
         assert!(viewport((2000.0, 100_000.0), 1.0, (800, 600)).visible_tiles(&base).is_empty());
+    }
+
+    #[test]
+    fn screen_and_slide_are_inverses() {
+        // A viewer that disagrees with itself here zooms away from the cursor.
+        let view = viewport((1000.0, 800.0), 0.35, (800, 600));
+        for point in [(0.0, 0.0), (400.0, 300.0), (799.0, 599.0), (123.0, 456.0)] {
+            let screen = ScreenPoint::new(point.0, point.1);
+            let back = view.to_screen(view.to_slide(screen));
+            assert!(
+                (back.x - screen.x).abs() < 1e-3 && (back.y - screen.y).abs() < 1e-3,
+                "{screen:?} round-tripped to {back:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn zoom_holds_the_anchor_still() {
+        // The invariant that makes scroll-to-zoom feel attached to the cursor:
+        // whatever slide point is under the anchor stays under it. Swept over
+        // anchors and factors, in and out, including the window corners.
+        let view = viewport((1000.0, 800.0), 0.25, (800, 600));
+        for anchor in [(0.0, 0.0), (400.0, 300.0), (800.0, 600.0), (137.0, 42.0)] {
+            let anchor = ScreenPoint::new(anchor.0, anchor.1);
+            let before = view.to_slide(anchor);
+            for factor in [1.1, 2.0, 8.0, 0.9, 0.5, 0.125] {
+                let after = view.zoom_about(factor, anchor).to_slide(anchor);
+                assert!(
+                    (after.x - before.x).abs() < 1e-6 && (after.y - before.y).abs() < 1e-6,
+                    "factor {factor} at {anchor:?} moved the slide point {before:?} -> {after:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zoom_clamps_rather_than_running_away() {
+        // Scrolling forever must not produce a degenerate or infinite scale;
+        // the tile arithmetic stops meaning anything at both ends.
+        let mut view = viewport((1000.0, 800.0), 1.0, (800, 600));
+        for _ in 0..200 {
+            view = view.zoom_about(2.0, ScreenPoint::new(400.0, 300.0));
+        }
+        assert!(view.scale <= 32.0 && view.scale.is_finite(), "{}", view.scale);
+
+        let mut view = viewport((1000.0, 800.0), 1.0, (800, 600));
+        for _ in 0..200 {
+            view = view.zoom_about(0.5, ScreenPoint::new(400.0, 300.0));
+        }
+        assert!(view.scale >= 1e-6 && view.scale.is_finite(), "{}", view.scale);
+    }
+
+    #[test]
+    fn panning_moves_the_slide_with_the_drag() {
+        // Drag right by 100 screen px at scale 0.5 moves the view 200 slide px
+        // left, so the content follows the cursor.
+        let view = viewport((1000.0, 800.0), 0.5, (800, 600));
+        let panned = view.pan(100.0, 50.0);
+        assert_eq!(panned.centre.x, 800.0);
+        assert_eq!(panned.centre.y, 700.0);
+        // And it is reversible, which a sign error in one axis would break.
+        let back = panned.pan(-100.0, -50.0);
+        assert!((back.centre.x - view.centre.x).abs() < 1e-9);
+        assert!((back.centre.y - view.centre.y).abs() < 1e-9);
+    }
+
+    #[test]
+    fn adjacent_tiles_are_placed_edge_to_edge() {
+        // A gap or an overlap here is a visible seam grid on screen, and it is
+        // the bug `tile_rect` is most likely to have: the placement comes from
+        // the tile origin and the size from the tile extent, computed
+        // separately, so they have to agree at every boundary.
+        let base = level(0, 4096, 4096, 1.0);
+        let view = viewport((1000.0, 1000.0), 0.5, (800, 600));
+        for row in 0..3 {
+            for column in 0..3 {
+                let (x, y, width, height) = view.tile_rect(TileIndex::new(column, row, 0), &base);
+                let (right_x, _, _, _) = view.tile_rect(TileIndex::new(column + 1, row, 0), &base);
+                let (_, below_y, _, _) = view.tile_rect(TileIndex::new(column, row + 1, 0), &base);
+                assert!(
+                    (x + width - right_x).abs() < 1e-3,
+                    "tile {column},{row} leaves a horizontal seam of {}",
+                    right_x - (x + width)
+                );
+                assert!(
+                    (y + height - below_y).abs() < 1e-3,
+                    "tile {column},{row} leaves a vertical seam of {}",
+                    below_y - (y + height)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_coarse_tile_is_drawn_larger_than_a_fine_one() {
+        // A tile from a 4x-downsampled level covers 4x the slide, so at the
+        // same scale it must be drawn 4x as wide. Getting this wrong is how a
+        // level change makes the image jump.
+        let view = viewport((2048.0, 2048.0), 0.25, (800, 600));
+        let base = level(0, 4096, 4096, 1.0);
+        let coarse = level(2, 1024, 1024, 4.0);
+        let (_, _, fine_width, _) = view.tile_rect(TileIndex::new(1, 1, 0), &base);
+        let (_, _, coarse_width, _) = view.tile_rect(TileIndex::new(1, 1, 2), &coarse);
+        assert!(
+            (coarse_width - fine_width * 4.0).abs() < 1e-3,
+            "coarse tile {coarse_width} against fine {fine_width}"
+        );
+    }
+
+    #[test]
+    fn resizing_keeps_the_centre_and_shows_more() {
+        let view = viewport((1000.0, 800.0), 0.5, (800, 600));
+        let bigger = view.resize(1600, 900);
+        assert_eq!(bigger.centre, view.centre);
+        assert_eq!(bigger.scale, view.scale);
+        let (left, _, right, _) = bigger.bounds();
+        assert_eq!(right - left, 3200.0);
     }
 
     #[test]

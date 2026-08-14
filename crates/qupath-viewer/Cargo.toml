@@ -18,6 +18,7 @@ workspace = true
 # viewport math without wgpu, winit or their transitive tree — which is most of
 # this crate's build time, and none of what the tests cover.
 [dev-dependencies]
+bytemuck = { version = "1", features = ["derive"] }
 png = "0.18"
 pollster = "0.4"
 wgpu = "26"

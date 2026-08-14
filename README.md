@@ -22,7 +22,8 @@ to reproduce its behaviour, which makes it a derivative work.
 
 ## Status
 
-Five crates, each checked against fixtures recorded from a real QuPath build:
+Five crates on the parity path, each checked against fixtures recorded from a
+real QuPath build:
 
 | Crate | Does | Parity |
 | --- | --- | --- |
@@ -31,6 +32,13 @@ Five crates, each checked against fixtures recorded from a real QuPath build:
 | `qupath-filters` | MIN/MAX rank filter, ImageJ Gaussian blur, convolution, morphological reconstruction | recorded, 42 + 22 + 22 + 24 cases |
 | `qupath-slide` | Aperio SVS / tiled TIFF reader, pure Rust | recorded, 5 regions |
 | `qupath-pipeline` | Tiles a region QuPath's way and runs every detection stage over it | colour deconvolution; object filters, 17 images; merge and split; boundary refinement |
+
+And one that is not on it: `qupath-viewer`, a slide viewer with pan, zoom and
+pyramid-level selection, tracked in [docs/VIEWER.md](docs/VIEWER.md). **It
+claims no parity and no speedup** — QuPath's viewer is not what is being
+ported, and nothing in it makes the detection pipeline faster. It is built
+because the read side had nothing looking at it. See
+[Viewing a slide](#viewing-a-slide).
 
 **The detection chain is closed.** Every stage `WatershedCellDetection` runs
 from the colour deconvolution to the objects it goes on to measure is ported and
@@ -142,6 +150,29 @@ place are in [docs/benchmarks/README.md](docs/benchmarks/README.md); what comes
 next is in [docs/ROADMAP.md](docs/ROADMAP.md). **New here? Start with
 [docs/MEMO.md](docs/MEMO.md)** — what is finished, what is genuinely faster, and
 what to distrust, in one page.
+
+## Viewing a slide
+
+```sh
+# Drag to pan, scroll to zoom, f to fit, escape to quit. The title bar shows
+# the pyramid level and the tile count.
+cargo run -p qupath-viewer --example window --release -- data/CMU-1.svs
+
+# No window and no GPU: writes the slide as a PNG at the level the viewport
+# picks, and prints the level table across scales.
+cargo run -p qupath-viewer --example dump --release -- data/CMU-1.svs
+```
+
+Level selection is the whole point, and it is worth one number: a 1024x768 view
+of the whole slide picks level 2 and reads **108 tiles against level 0's
+23,220**. That is doing less work rather than doing the same work faster, which
+is the first item in the guidelines' own ordering — though it is a property of
+the viewer, not a speedup of the detection pipeline.
+
+The viewer needs a display and a GPU; `dump` needs neither, and neither do its
+tests. [docs/VIEWER.md](docs/VIEWER.md) is the plan and the running account of
+what has gone wrong, including a level-selection bug that cost an 11x
+over-decode while every frame still looked correct.
 
 ## Building
 

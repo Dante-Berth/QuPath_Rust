@@ -173,6 +173,18 @@ impl Slide {
     /// Choosing the right level is the first item in §0 — doing less work beats
     /// doing the same work faster — so this exists to make the cheap choice the
     /// easy one.
+    ///
+    /// # This is an *extent* criterion, not a resolution one
+    ///
+    /// It answers "which level gives me at least this many pixels across". That
+    /// is the right question for reading a region at a known size, and the
+    /// wrong one for "what does a screen need", because it fails on the
+    /// pyramid's own rounding: a level 1.4% narrower than asked is rejected
+    /// outright even though nothing about it is visibly softer. `qupath-viewer`
+    /// hit exactly that and jumped two levels, decoding 221 tiles where 20 would
+    /// do; see `Viewport::level`, which compares [`Level::downsample`] against
+    /// the resolution it wants and keeps a tolerance. Pick the criterion that
+    /// matches the question rather than assuming this one covers both.
     #[must_use]
     pub fn level_for_width(&self, min_width: u32) -> &Level {
         self.levels
