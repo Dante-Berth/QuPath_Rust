@@ -603,12 +603,21 @@ mod tests {
         let expected = filled_regions(&values, &mut fresh, width, 0.5, f32::INFINITY);
 
         let mut tracer = RegionTracer::new();
-        tracer.trace_into(&values, &mut vec![0u32; values.len()], width, 0.5, f32::INFINITY);
+        tracer.trace_into(
+            &values,
+            &mut vec![0u32; values.len()],
+            width,
+            0.5,
+            f32::INFINITY,
+        );
         tracer.generation = u32::MAX - 1;
 
         let mut wrapped = vec![0u32; values.len()];
         let count = tracer.trace_into(&values, &mut wrapped, width, 0.5, f32::INFINITY);
-        assert_eq!(count, expected, "region count differs after the counter reset");
+        assert_eq!(
+            count, expected,
+            "region count differs after the counter reset"
+        );
         assert_eq!(wrapped, fresh, "region map differs after the counter reset");
         assert_eq!(
             tracer.generation,
@@ -629,7 +638,8 @@ mod tests {
         let expected = filled_regions(&values, &mut zeroed, width, 0.5, f32::INFINITY);
 
         let mut poisoned = vec![u32::MAX; values.len()];
-        let count = RegionTracer::new().trace_into(&values, &mut poisoned, width, 0.5, f32::INFINITY);
+        let count =
+            RegionTracer::new().trace_into(&values, &mut poisoned, width, 0.5, f32::INFINITY);
         assert_eq!(count, expected);
         assert_eq!(poisoned, zeroed);
 

@@ -516,7 +516,9 @@ mod tests {
     }
 
     fn tiles(count: u32) -> Vec<TileIndex> {
-        (0..count).map(|column| TileIndex::new(column, 0, 0)).collect()
+        (0..count)
+            .map(|column| TileIndex::new(column, 0, 0))
+            .collect()
     }
 
     #[test]
@@ -673,7 +675,11 @@ mod tests {
         let loader = TileLoader::new(&source, 4);
         loader.request(tiles(10_000));
         drop(loader);
-        assert_eq!(Arc::strong_count(&source), 1, "a worker outlived the loader");
+        assert_eq!(
+            Arc::strong_count(&source),
+            1,
+            "a worker outlived the loader"
+        );
     }
 
     #[test]

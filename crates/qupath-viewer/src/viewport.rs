@@ -370,7 +370,13 @@ mod tests {
         // scales and positions, including well past every edge.
         let base = level(0, 4096, 3000, 1.0);
         for scale in [4.0, 1.0, 0.5, 0.1, 0.01] {
-            for centre in [(0.0, 0.0), (2000.0, 1500.0), (4096.0, 3000.0), (-500.0, -500.0), (9000.0, 9000.0)] {
+            for centre in [
+                (0.0, 0.0),
+                (2000.0, 1500.0),
+                (4096.0, 3000.0),
+                (-500.0, -500.0),
+                (9000.0, 9000.0),
+            ] {
                 let view = viewport(centre, scale, (800, 600));
                 for tile in view.visible_tiles(&base) {
                     assert!(
@@ -386,8 +392,16 @@ mod tests {
     fn a_view_entirely_off_the_slide_sees_nothing() {
         let base = level(0, 4096, 3000, 1.0);
         // Far to the left, and far below.
-        assert!(viewport((-100_000.0, 1500.0), 1.0, (800, 600)).visible_tiles(&base).is_empty());
-        assert!(viewport((2000.0, 100_000.0), 1.0, (800, 600)).visible_tiles(&base).is_empty());
+        assert!(
+            viewport((-100_000.0, 1500.0), 1.0, (800, 600))
+                .visible_tiles(&base)
+                .is_empty()
+        );
+        assert!(
+            viewport((2000.0, 100_000.0), 1.0, (800, 600))
+                .visible_tiles(&base)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -431,13 +445,21 @@ mod tests {
         for _ in 0..200 {
             view = view.zoom_about(2.0, ScreenPoint::new(400.0, 300.0));
         }
-        assert!(view.scale <= 32.0 && view.scale.is_finite(), "{}", view.scale);
+        assert!(
+            view.scale <= 32.0 && view.scale.is_finite(),
+            "{}",
+            view.scale
+        );
 
         let mut view = viewport((1000.0, 800.0), 1.0, (800, 600));
         for _ in 0..200 {
             view = view.zoom_about(0.5, ScreenPoint::new(400.0, 300.0));
         }
-        assert!(view.scale >= 1e-6 && view.scale.is_finite(), "{}", view.scale);
+        assert!(
+            view.scale >= 1e-6 && view.scale.is_finite(),
+            "{}",
+            view.scale
+        );
     }
 
     #[test]

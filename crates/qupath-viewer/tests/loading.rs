@@ -18,7 +18,9 @@ use std::time::{Duration, Instant};
 
 use qupath_slide::Slide;
 use qupath_viewer::loader::expand_to_rgba_into;
-use qupath_viewer::{ScreenPoint, SlidePoint, SlideTiles, TileCache, TileIndex, TileLoader, Viewport};
+use qupath_viewer::{
+    ScreenPoint, SlidePoint, SlideTiles, TileCache, TileIndex, TileLoader, Viewport,
+};
 
 /// The small committed sample, if it is present.
 fn slide() -> Option<Slide> {
@@ -193,10 +195,7 @@ fn the_underlay_is_coarser_and_cheaper_than_the_level_it_backs() {
         return;
     }
     let base = &slide.levels()[0];
-    let centre = SlidePoint::new(
-        f64::from(base.width) / 2.0,
-        f64::from(base.height) / 2.0,
-    );
+    let centre = SlidePoint::new(f64::from(base.width) / 2.0, f64::from(base.height) / 2.0);
 
     let mut saw_one = false;
     for scale in [4.0, 2.0, 1.0, 0.5, 0.25, 0.1, 0.02] {

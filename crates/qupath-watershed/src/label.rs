@@ -264,6 +264,9 @@ mod tests {
         let a = labeller.label_into(&values, &mut zeroed, width, 0.0, Connectivity::Four);
         let b = labeller.label_into(&values, &mut poisoned, width, 0.0, Connectivity::Four);
         assert_eq!(a, b, "the label count differs");
-        assert_eq!(zeroed, poisoned, "a pixel of the label image was left unwritten");
+        assert_eq!(
+            zeroed, poisoned,
+            "a pixel of the label image was left unwritten"
+        );
     }
 }

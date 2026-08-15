@@ -46,7 +46,9 @@ use std::time::{Duration, Instant};
 use qupath_slide::{Level, Slide};
 use qupath_viewer::compose::{self, Framebuffer};
 use qupath_viewer::loader::expand_to_rgba_into;
-use qupath_viewer::{ScreenPoint, SlidePoint, SlideTiles, TileCache, TileIndex, TileLoader, Viewport};
+use qupath_viewer::{
+    ScreenPoint, SlidePoint, SlideTiles, TileCache, TileIndex, TileLoader, Viewport,
+};
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -106,7 +108,12 @@ fn main() {
         width,
         height,
     };
-    render_to_png(&mut renderer, &slide, detail, &out.replace(".png", "-detail.png"));
+    render_to_png(
+        &mut renderer,
+        &slide,
+        detail,
+        &out.replace(".png", "-detail.png"),
+    );
 
     // The interaction as a user performs it: start fitted, then scroll in on a
     // point. Every frame here crosses at least one level boundary.
@@ -212,7 +219,13 @@ fn decode_into(
             continue;
         }
         let (tile_width, tile_height) = tile.visible_size(level);
-        expand_to_rgba_into(&decoded, level.tile_width, tile_width, tile_height, &mut rgba);
+        expand_to_rgba_into(
+            &decoded,
+            level.tile_width,
+            tile_width,
+            tile_height,
+            &mut rgba,
+        );
         let (x, y, w, h) = view.tile_rect(tile, level);
         uploaded.push((
             renderer.upload(&rgba, tile_width, tile_height),
@@ -411,7 +424,11 @@ fn pan_once(
             && let Some(out) = out
         {
             {
-                let name = if use_underlay { "-pan-under" } else { "-pan-none" };
+                let name = if use_underlay {
+                    "-pan-under"
+                } else {
+                    "-pan-none"
+                };
                 write_png(
                     &out.replace(".png", &format!("{name}.png")),
                     &pixels,
@@ -582,9 +599,12 @@ impl Renderer {
                         continue;
                     };
                     let [x, y, width, height] = instance.rect;
-                    state
-                        .frame
-                        .draw_tile((x, y, width, height), &tile.pixels, tile.width, tile.height);
+                    state.frame.draw_tile(
+                        (x, y, width, height),
+                        &tile.pixels,
+                        tile.width,
+                        tile.height,
+                    );
                 }
                 state.composing += started.elapsed();
                 state.frames += 1;
@@ -631,15 +651,13 @@ impl Gpu {
             .await
         {
             Ok(adapter) => adapter,
-            Err(_) => {
-                instance
-                    .request_adapter(&wgpu::RequestAdapterOptions {
-                        force_fallback_adapter: true,
-                        ..Default::default()
-                    })
-                    .await
-                    .ok()?
-            }
+            Err(_) => instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    force_fallback_adapter: true,
+                    ..Default::default()
+                })
+                .await
+                .ok()?,
         };
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor::default())

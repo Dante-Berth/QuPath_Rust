@@ -271,7 +271,10 @@ impl ApplicationHandler for App {
         }
         let attributes = Window::default_attributes()
             .with_title("qupath-viewer")
-            .with_inner_size(winit::dpi::LogicalSize::new(self.view.width, self.view.height));
+            .with_inner_size(winit::dpi::LogicalSize::new(
+                self.view.width,
+                self.view.height,
+            ));
         let window = Arc::new(event_loop.create_window(attributes).expect("window"));
 
         let backend = Backend::new(&window, self.budget, self.force_cpu);
@@ -298,8 +301,7 @@ impl ApplicationHandler for App {
                 match event.logical_key {
                     Key::Named(NamedKey::Escape) => event_loop.exit(),
                     Key::Character(ref c) if c == "f" => {
-                        self.view =
-                            Viewport::fit(self.slide(), self.view.width, self.view.height);
+                        self.view = Viewport::fit(self.slide(), self.view.width, self.view.height);
                         self.redraw();
                     }
                     _ => {}
@@ -453,14 +455,12 @@ impl App {
         // as a short window and averaged: a single frame is dominated by
         // whatever the scheduler did to it, and a mean over half a second is
         // what a hand on the mouse actually perceives.
-        self.frame_times.push_back(started.elapsed().as_secs_f64() * 1000.0);
+        self.frame_times
+            .push_back(started.elapsed().as_secs_f64() * 1000.0);
         while self.frame_times.len() > 30 {
             self.frame_times.pop_front();
         }
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "at most 30 samples"
-        )]
+        #[expect(clippy::cast_precision_loss, reason = "at most 30 samples")]
         let mean = self.frame_times.iter().sum::<f64>() / self.frame_times.len() as f64;
 
         let title = format!(
@@ -781,15 +781,13 @@ async fn gpu(window: &Arc<Window>, budget: usize) -> Option<Graphics> {
         // Mesa's lavapipe where it is installed. Slower than the blit in
         // `compose` for what this viewer draws, but it keeps the real shader
         // path exercised, which is worth one attempt before giving it up.
-        Err(_) => {
-            instance
-                .request_adapter(&wgpu::RequestAdapterOptions {
-                    force_fallback_adapter: true,
-                    ..options
-                })
-                .await
-                .ok()?
-        }
+        Err(_) => instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                force_fallback_adapter: true,
+                ..options
+            })
+            .await
+            .ok()?,
     };
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor::default())

@@ -162,10 +162,7 @@ fn the_level_never_costs_more_tiles_than_the_one_below_it() {
     let base = &slide.levels()[0];
     for scale in [1.0, 0.5, 0.3, 0.2536, 0.1, 0.05, 0.02] {
         let view = Viewport {
-            centre: SlidePoint::new(
-                f64::from(base.width) / 2.0,
-                f64::from(base.height) / 2.0,
-            ),
+            centre: SlidePoint::new(f64::from(base.width) / 2.0, f64::from(base.height) / 2.0),
             scale,
             width: 1024,
             height: 768,

@@ -255,7 +255,9 @@ mod tests {
         // it must be loud rather than a silently wrong coordinate.
         let first = level(1, 11500, 8228, 4.0);
         let second = level(2, 2875, 2057, 16.0);
-        let _ = SlidePoint::new(4000.0, 800.0).to_level(&first).to_slide(&second);
+        let _ = SlidePoint::new(4000.0, 800.0)
+            .to_level(&first)
+            .to_slide(&second);
     }
 
     #[test]
@@ -263,12 +265,22 @@ mod tests {
         let level = level(0, 46000, 32914, 1.0);
         // Exactly on a tile boundary belongs to the tile starting there.
         assert_eq!(
-            LevelPoint { x: 256.0, y: 512.0, level: 0 }.tile(&level),
+            LevelPoint {
+                x: 256.0,
+                y: 512.0,
+                level: 0
+            }
+            .tile(&level),
             TileIndex::new(1, 2, 0)
         );
         // One pixel short belongs to the previous tile.
         assert_eq!(
-            LevelPoint { x: 255.9, y: 511.9, level: 0 }.tile(&level),
+            LevelPoint {
+                x: 255.9,
+                y: 511.9,
+                level: 0
+            }
+            .tile(&level),
             TileIndex::new(0, 1, 0)
         );
     }
@@ -281,7 +293,11 @@ mod tests {
         let level = level(0, 46000, 32914, 1.0);
         for (column, row) in [(0, 0), (1, 0), (0, 1), (37, 52), (179, 128)] {
             let tile = TileIndex::new(column, row, 0);
-            assert_eq!(tile.origin(&level).tile(&level), tile, "tile {column},{row}");
+            assert_eq!(
+                tile.origin(&level).tile(&level),
+                tile,
+                "tile {column},{row}"
+            );
         }
     }
 
@@ -291,7 +307,12 @@ mod tests {
         // a negative float is 0 in Rust but only because of saturating casts —
         // the clamp is explicit so it does not depend on that.
         let level = level(0, 46000, 32914, 1.0);
-        let tile = LevelPoint { x: -900.0, y: -1.0, level: 0 }.tile(&level);
+        let tile = LevelPoint {
+            x: -900.0,
+            y: -1.0,
+            level: 0,
+        }
+        .tile(&level);
         assert_eq!(tile, TileIndex::new(0, 0, 0));
     }
 

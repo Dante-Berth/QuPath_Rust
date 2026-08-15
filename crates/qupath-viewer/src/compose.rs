@@ -403,8 +403,16 @@ mod tests {
         for row in 0..32 {
             for column in 0..32 {
                 let inside = (8..24).contains(&column) && (8..24).contains(&row);
-                let expected = if inside { pack(200, 210, 220) } else { pack(10, 20, 30) };
-                assert_eq!(frame.pixels()[row * 32 + column], expected, "at {column},{row}");
+                let expected = if inside {
+                    pack(200, 210, 220)
+                } else {
+                    pack(10, 20, 30)
+                };
+                assert_eq!(
+                    frame.pixels()[row * 32 + column],
+                    expected,
+                    "at {column},{row}"
+                );
             }
         }
     }
@@ -451,7 +459,11 @@ mod tests {
         ] {
             let mut frame = Framebuffer::new(64, 64);
             frame.draw_tile(rect, &rgba, 16, 16);
-            assert_eq!(frame.fraction_matching(CLEAR), 1.0, "rect {rect:?} drew something");
+            assert_eq!(
+                frame.fraction_matching(CLEAR),
+                1.0,
+                "rect {rect:?} drew something"
+            );
         }
     }
 
