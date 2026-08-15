@@ -18,6 +18,11 @@ workspace = true
 # viewport math without wgpu, winit or their transitive tree — which is most of
 # this crate's build time, and none of what the tests cover.
 [dev-dependencies]
+# `examples/render.rs` draws real detections over a real slide, which is what
+# `docs/VIEWER.md` §3.5 is. A dev-dependency and not a dependency: the overlay
+# in the library takes lattice corners and a downsample and knows nothing about
+# where they came from, so the library still depends on `qupath-slide` alone.
+qupath-pipeline = { path = "../qupath-pipeline" }
 bytemuck = { version = "1", features = ["derive"] }
 png = "0.18"
 pollster = "0.4"

@@ -43,11 +43,12 @@ use std::io::BufWriter;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use qupath_pipeline as pipeline;
 use qupath_slide::{Level, Slide};
 use qupath_viewer::compose::{self, Framebuffer};
 use qupath_viewer::loader::expand_to_rgba_into;
 use qupath_viewer::{
-    ScreenPoint, SlidePoint, SlideTiles, TileCache, TileIndex, TileLoader, Viewport,
+    Overlay, ScreenPoint, SlidePoint, SlideTiles, TileCache, TileIndex, TileLoader, Viewport,
 };
 
 #[repr(C)]
@@ -57,6 +58,17 @@ struct Instance {
     window: [f32; 2],
     _padding: [f32; 2],
 }
+
+/// The colour an outline is drawn in, as the bytes the CPU path writes.
+///
+/// Orange, because it has to read against haematoxylin's blue-purple and
+/// eosin's pink and against the grey of glass, and because a colour that is
+/// also in the slide makes an overlay bug look like tissue. The GPU path
+/// carries the same colour in linear form inside `LINE_SHADER`; the two are
+/// stated separately because one is a byte triple and the other is what an sRGB
+/// target encodes from, and pretending they are the same number is the bug
+/// `compose::CLEAR` records.
+const OVERLAY_RGB: (u8, u8, u8) = (255, 128, 0);
 
 /// The colour an undrawn pixel keeps, in the linear space `wgpu` takes.
 const CLEAR: wgpu::Color = wgpu::Color {
@@ -99,9 +111,22 @@ fn main() {
     // reached by `zoom_about` rather than by constructing a viewport directly,
     // so the pan/zoom arithmetic is what places these pixels.
     let overview = Viewport::fit(&slide, width, height);
-    render_to_png(&mut renderer, &slide, overview, &out);
+    render_to_png(&mut renderer, &slide, overview, None, &out);
 
     let tissue = SlidePoint::new(27776.0 + 512.0, 5952.0 + 512.0);
+    // §3.5. The region is the one `docs/ROADMAP.md` profiles, and the detail
+    // view below is centred on it, so every frame from here on has real
+    // detections over real nuclei rather than an overlay drawn on glass.
+    let overlay = detect(
+        &path,
+        pipeline::Region {
+            x: 27776,
+            y: 5952,
+            width: 1024,
+            height: 1024,
+        },
+    );
+    let overlay = overlay.as_ref();
     let detail = Viewport {
         centre: tissue,
         scale: 1.0,
@@ -112,6 +137,7 @@ fn main() {
         &mut renderer,
         &slide,
         detail,
+        overlay,
         &out.replace(".png", "-detail.png"),
     );
 
@@ -129,6 +155,7 @@ fn main() {
             &mut renderer,
             &slide,
             zooming,
+            overlay,
             &out.replace(".png", &format!("-zoom{step}.png")),
         );
     }
@@ -163,10 +190,22 @@ fn main() {
             cost.as_secs_f64() * 1000.0
         );
     }
+    if let Some(cost) = renderer.overlay_cost() {
+        println!(
+            "  rasterising its outlines added {:.2} ms.",
+            cost.as_secs_f64() * 1000.0
+        );
+    }
 }
 
 /// Renders one viewport with everything decoded up front, and writes a PNG.
-fn render_to_png(renderer: &mut Renderer, slide: &Slide, view: Viewport, out: &str) {
+fn render_to_png(
+    renderer: &mut Renderer,
+    slide: &Slide,
+    view: Viewport,
+    overlay: Option<&Overlay>,
+    out: &str,
+) {
     let level = view.level(slide).clone();
     let underlay = view.underlay_level(slide).cloned();
     let tiles = view.visible_tiles(&level);
@@ -184,7 +223,17 @@ fn render_to_png(renderer: &mut Renderer, slide: &Slide, view: Viewport, out: &s
         .iter()
         .map(|(texture, instance)| (texture, *instance))
         .collect();
-    let pixels = renderer.draw(&draws);
+
+    // The cull and the projection, timed. This is the linear scan `overlay`'s
+    // module documentation declines to replace with a spatial index until there
+    // is a number saying it should be, so the number is printed rather than
+    // left to be guessed at.
+    let mut segments = Vec::new();
+    let culling = Instant::now();
+    let drawn = overlay.map(|overlay| overlay.segments_into(view, MIN_OVERLAY_PX, &mut segments));
+    let culling = culling.elapsed();
+
+    let pixels = renderer.draw(&draws, &segments);
     write_png(out, &pixels, view.width, view.height);
 
     println!(
@@ -198,6 +247,66 @@ fn render_to_png(renderer: &mut Renderer, slide: &Slide, view: Viewport, out: &s
         "    {:.1}% of the frame never drawn",
         100.0 * undrawn(&pixels)
     );
+    if let (Some(drawn), Some(overlay)) = (drawn, overlay) {
+        println!(
+            "    overlay: {drawn} of {} objects, {} segments, culled in {:.0} us",
+            overlay.len(),
+            segments.len() / 2,
+            culling.as_secs_f64() * 1e6
+        );
+    }
+}
+
+/// Screen pixels an object's bounding box must reach before it is drawn.
+///
+/// Below this an outline is a dot and the overlay is a smear; see `overlay`'s
+/// module documentation. Two rather than one so an object exactly on the limit
+/// still has an inside.
+const MIN_OVERLAY_PX: f32 = 2.0;
+
+/// Runs detection over `region` at level 0 and builds an overlay from it.
+///
+/// This is `docs/VIEWER.md` §3.5's whole point made runnable: the outlines here
+/// are real nuclei from the real pipeline, on the region `docs/ROADMAP.md`
+/// profiles, and not a synthetic shape that would prove nothing about either
+/// end of the path.
+fn detect(path: &str, region: pipeline::Region) -> Option<Overlay> {
+    let slide = Slide::open(path).ok()?;
+    let params = pipeline::Params {
+        level: 0,
+        ..pipeline::Params::default()
+    };
+    let started = Instant::now();
+    let (outcome, detections) = match pipeline::run_collecting(&slide, region, params) {
+        Ok(found) => found,
+        Err(error) => {
+            eprintln!("  detection failed: {error}");
+            return None;
+        }
+    };
+
+    // Level 0, so the downsample is 1.0 and the conversion is a copy — stated
+    // by reading the level table rather than by assuming it, because a run at
+    // any other level would place every object wrong and look fine.
+    let downsample = slide.levels()[detections.level()].downsample;
+    let mut overlay = Overlay::new();
+    for object in 0..detections.len() {
+        overlay.push_level_ring(detections.outline(object), downsample);
+    }
+    overlay.shrink_to_fit();
+
+    println!(
+        "\n  detection over {}x{} at {},{}: {} objects in {:.2} s, {} vertices, {} kB",
+        region.width,
+        region.height,
+        region.x,
+        region.y,
+        outcome.objects,
+        started.elapsed().as_secs_f64(),
+        overlay.vertex_count(),
+        overlay.bytes() / 1024
+    );
+    Some(overlay)
 }
 
 /// Decodes every visible tile of `level` and appends it to `uploaded`.
@@ -414,7 +523,7 @@ fn pan_once(
             .iter()
             .filter_map(|(tile, instance)| Some((cache.peek(*tile)?, *instance)))
             .collect();
-        let pixels = renderer.draw(&draws);
+        let pixels = renderer.draw(&draws, &[]);
         undrawn_per_frame.push(undrawn(&pixels));
 
         // One frame from the middle of each pass, where the pan is at speed and
@@ -519,6 +628,9 @@ enum Renderer {
 struct Software {
     frame: Framebuffer,
     composing: Duration,
+    /// Time spent rasterising overlay segments, kept apart from `composing` so
+    /// the tile figure keeps meaning what it meant before the overlay existed.
+    outlining: Duration,
     frames: u32,
 }
 
@@ -545,6 +657,7 @@ impl Renderer {
         Self::Cpu(Software {
             frame: Framebuffer::new(width, height),
             composing: Duration::ZERO,
+            outlining: Duration::ZERO,
             frames: 0,
         })
     }
@@ -554,6 +667,15 @@ impl Renderer {
         match self {
             Self::Gpu(_) => None,
             Self::Cpu(state) => (state.frames > 0).then(|| state.composing / state.frames),
+        }
+    }
+
+    /// Mean time spent rasterising overlay segments per frame, or `None` on the
+    /// GPU path.
+    fn overlay_cost(&self) -> Option<Duration> {
+        match self {
+            Self::Gpu(_) => None,
+            Self::Cpu(state) => (state.frames > 0).then(|| state.outlining / state.frames),
         }
     }
 
@@ -587,10 +709,10 @@ impl Renderer {
     /// Both paths return the same thing in the same format, which is what lets
     /// `undrawn` and `write_png` stay backend-agnostic — and what makes the two
     /// coverage tables comparable line by line.
-    fn draw(&mut self, draws: &[(&Texture, Instance)]) -> Vec<u8> {
+    fn draw(&mut self, draws: &[(&Texture, Instance)], segments: &[ScreenPoint]) -> Vec<u8> {
         let draws = &draws[..draws.len().min(MAX_TILES)];
         match self {
-            Self::Gpu(gpu) => gpu.draw(draws),
+            Self::Gpu(gpu) => gpu.draw(draws, segments),
             Self::Cpu(state) => {
                 let started = Instant::now();
                 state.frame.clear(compose::CLEAR);
@@ -608,6 +730,14 @@ impl Renderer {
                 }
                 state.composing += started.elapsed();
                 state.frames += 1;
+
+                // Timed apart from the tiles, because they answer different
+                // questions: the tile figure is what a frame costs at all, and
+                // this is what turning the overlay on adds to it.
+                let started = Instant::now();
+                let colour = compose::pack(OVERLAY_RGB.0, OVERLAY_RGB.1, OVERLAY_RGB.2);
+                state.frame.draw_segments(segments, colour);
+                state.outlining += started.elapsed();
 
                 let mut rgba = Vec::new();
                 state.frame.to_rgba(&mut rgba);
@@ -627,6 +757,12 @@ struct Gpu {
     target: wgpu::Texture,
     target_view: wgpu::TextureView,
     instances: wgpu::Buffer,
+    /// The overlay's line pipeline and its vertices. A second pipeline in the
+    /// same pass rather than a second pass: the lines go over the tiles because
+    /// they are recorded after them, which is the same back-to-front rule the
+    /// tiles already use among themselves.
+    line_pipeline: wgpu::RenderPipeline,
+    lines: wgpu::Buffer,
     readback: wgpu::Buffer,
     width: u32,
     height: u32,
@@ -635,8 +771,27 @@ struct Gpu {
     padded: u32,
 }
 
+/// One vertex of the overlay's line list.
+///
+/// The window size rides along per vertex rather than in a uniform, because
+/// this example has no bind group that is not a tile's texture and adding one
+/// for two floats is more machinery than it saves.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct LinePoint {
+    pixel: [f32; 2],
+    window: [f32; 2],
+}
+
 /// How many tiles one frame can draw, underlay included.
 const MAX_TILES: usize = 1024;
+
+/// How many overlay points one frame can draw, which is two per segment.
+///
+/// A few thousand nuclei at forty vertices each is the working figure, and past
+/// this the overlay is truncated rather than misdrawn — the same choice
+/// `MAX_TILES` makes, for the same reason.
+const MAX_OVERLAY_POINTS: usize = 1 << 20;
 
 impl Gpu {
     /// Builds the shader path, or `None` when there is no adapter for it.
@@ -745,6 +900,50 @@ impl Gpu {
             cache: None,
         });
 
+        let line_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("overlay"),
+            source: wgpu::ShaderSource::Wgsl(LINE_SHADER.into()),
+        });
+        let line_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("overlay"),
+            bind_group_layouts: &[],
+            push_constant_ranges: &[],
+        });
+        let line_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("overlay"),
+            layout: Some(&line_layout),
+            vertex: wgpu::VertexState {
+                module: &line_shader,
+                entry_point: Some("vertex"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<LinePoint>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
+                }],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &line_shader,
+                entry_point: Some("fragment"),
+                targets: &[Some(format.into())],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let lines = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("overlay"),
+            size: (MAX_OVERLAY_POINTS * std::mem::size_of::<LinePoint>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let instances = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("instances"),
             size: (MAX_TILES * std::mem::size_of::<Instance>()) as u64,
@@ -768,6 +967,8 @@ impl Gpu {
             target,
             target_view,
             instances,
+            line_pipeline,
+            lines,
             readback,
             width,
             height,
@@ -831,7 +1032,7 @@ impl Gpu {
     /// Anything that is not a GPU texture is skipped rather than asserted on:
     /// the two backends never mix in practice, and a frame that silently loses
     /// a tile is easier to see in the coverage number than a panic is to read.
-    fn draw(&self, draws: &[(&Texture, Instance)]) -> Vec<u8> {
+    fn draw(&self, draws: &[(&Texture, Instance)], segments: &[ScreenPoint]) -> Vec<u8> {
         // Every instance in one copy before the pass opens. `write_buffer`
         // queues its copy ahead of the whole submission rather than at the
         // point it appears in the recording, so interleaving writes with draws
@@ -840,6 +1041,20 @@ impl Gpu {
         if !instances.is_empty() {
             self.queue
                 .write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
+        }
+
+        let window = [self.width as f32, self.height as f32];
+        let points: Vec<LinePoint> = segments
+            .iter()
+            .take(MAX_OVERLAY_POINTS)
+            .map(|point| LinePoint {
+                pixel: [point.x, point.y],
+                window,
+            })
+            .collect();
+        if !points.is_empty() {
+            self.queue
+                .write_buffer(&self.lines, 0, bytemuck::cast_slice(&points));
         }
 
         let mut encoder = self
@@ -874,6 +1089,21 @@ impl Gpu {
                 )]
                 let slot = slot as u32;
                 pass.draw(0..4, slot..slot + 1);
+            }
+
+            // Recorded after every tile, so the overlay is over the slide
+            // rather than under it. Segments come in pairs and the topology is
+            // `LineList`, so this is one draw call however many objects there
+            // are.
+            if !points.is_empty() {
+                pass.set_pipeline(&self.line_pipeline);
+                pass.set_vertex_buffer(0, self.lines.slice(..));
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "bounded by MAX_OVERLAY_POINTS"
+                )]
+                let count = points.len() as u32;
+                pass.draw(0..count, 0..1);
             }
         }
 
@@ -933,6 +1163,32 @@ fn write_png(path: &str, rgba: &[u8], width: u32, height: u32) {
 }
 
 /// The same shader `window.rs` uses, so this renders what the window renders.
+/// One screen-space position per vertex, drawn as a `LineList`.
+///
+/// The window size arrives as a per-vertex attribute rather than a uniform for
+/// one reason: this example has no bind group that is not a tile's texture, and
+/// adding one for two floats would be more machinery than the saving. It is the
+/// same conversion the tile shader does on its own `window`.
+const LINE_SHADER: &str = r"
+struct Vertex {
+    @location(0) pixel: vec2<f32>,
+    @location(1) window: vec2<f32>,
+};
+
+@vertex
+fn vertex(vertex: Vertex) -> @builtin(position) vec4<f32> {
+    let clip = vertex.pixel / vertex.window * 2.0 - vec2<f32>(1.0, 1.0);
+    return vec4<f32>(clip.x, -clip.y, 0.0, 1.0);
+}
+
+@fragment
+fn fragment() -> @location(0) vec4<f32> {
+    // The overlay colour, in the linear space the sRGB target encodes from.
+    // OVERLAY_RGB is the same colour as the byte triple the CPU path writes.
+    return vec4<f32>(1.0, 0.216, 0.0, 1.0);
+}
+";
+
 const SHADER: &str = r"
 struct Instance {
     @location(0) rect: vec4<f32>,

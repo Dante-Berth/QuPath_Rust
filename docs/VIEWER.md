@@ -382,14 +382,112 @@ this size.
 Nothing here is parallelised, and it does not need to be yet. If it ever does,
 the rows are independent.
 
-### 3.5 Overlays
+### 3.5 Overlays — **done**
 
-Only now. Detected objects from `qupath-objects` drawn over the slide, in slide
-coordinates, culled to the viewport.
+Detected objects drawn over the slide, in slide coordinates, culled to the
+viewport. The half of it nobody had costed was upstream: **nothing in the
+repository could hand the viewer object geometry.** `qupath_pipeline::run`
+returned counts, and `Candidate`'s mask was private and built only for the few
+percent of objects that reach a tile seam. So this milestone begins in the
+pipeline and ends in the compositor.
 
-This is also the first point where the viewer earns something back for the
-port: `DIVERGENCES.md` D-008 is a claim about *geometry* — nucleus masks
-against smoothed cell polygons — and it has never been looked at directly.
+#### Getting objects out of a run
+
+Three pieces, in the pipeline crate and none of them the viewer's business.
+
+- **`contour`** traces a filled region to the polygon that bounds it. It follows
+  pixel **corners**, not centres, so one pixel comes back as its unit square
+  rather than as a degenerate point — and that is what makes the shoelace area
+  *exactly* the filled pixel count instead of approximately it. That identity is
+  the whole test suite: an outline wrong anywhere encloses the wrong number of
+  pixels, with no tolerance involved. The walk prefers a right turn to going
+  straight to a left turn, which walks *around* a diagonal pinch rather than
+  through it — `Wand.FOUR_CONNECTED`, the connectivity every trace here uses.
+- **`Detections`** is the columnar result, per `ROADMAP.md` §4. It gives
+  `qupath-objects::Table` its first producer anywhere in the workspace; that
+  crate was written for exactly this and then not reached for four milestones.
+  Geometry is kept apart from measurements because almost nothing touches both.
+- **`run_collecting`** is a second entry point rather than a flag on `run`,
+  because the two have different memory contracts: `run` is bounded by the
+  thread count and this one grows with the region. **322 bytes per object**,
+  measured on the fixture, five sixths of it outline.
+
+The assertion that matters is that `run` and `run_collecting` agree on every
+count, field by field — so collecting is a *read* of what the pipeline already
+did, not a second, differently-parameterised pass. And `Detections::len` equals
+`Outcome::objects`, which is the count *after* seam duplicates are removed, so
+an object whose candidate lost is gone from the geometry rather than merely
+uncounted. That test asserts its own premise: the region must resolve
+duplicates at all, or the check passes vacuously.
+
+#### Drawing them
+
+`overlay::Overlay` holds outlines in **slide** coordinates — level 0, §5's
+canonical frame — because that is the only frame that survives the viewer
+changing level underneath them. It knows nothing about the pipeline:
+`push_level_ring` takes lattice corners and a downsample, so §7's "the library
+depends on `qupath-slide` alone" is still true and `qupath-pipeline` is a
+dev-dependency of the example that needs it.
+
+`segments_into` is the same shape the tiles have — one draw list, and only the
+last step differs: a `LineList` vertex buffer on the GPU, `chunks_exact(2)` and
+a DDA on the CPU. Two culls, both from the bounding box alone: off screen, and
+under a floor in screen pixels. The second is not an optimisation in disguise.
+Zoomed out, a nucleus is a third of a pixel, and forty thousand sub-pixel rings
+are a grey smear that costs more than the tiles underneath and says less.
+
+The scan is **linear, with no spatial index**, and that is now a measurement
+rather than a shrug. On the profiled region — 1272 objects, 47,358 vertices,
+394 kB — culling and projecting a frame takes **183 µs**, and rasterising the
+result adds **0.03 ms** to the 1.27 ms a frame already costs. An index would be
+optimising 2% of composition. `M-HOTPATH` says profile first; this is what that
+looks like when the answer is "don't".
+
+| Frame | Objects drawn | Segments | Cull |
+| --- | --- | --- | --- |
+| detail, 1:1 | 1016 of 1272 | 37,994 | 183 µs |
+| zoom 0, level 1 | 1269 | 47,318 | 235 µs |
+| zoom 1, 2.9x | 156 | 5,616 | 30 µs |
+| zoom 2, 32x | 6 | 208 | 7 µs |
+
+Both backends produce that table identically, as they do the tile counts, the
+level choices and the coverage.
+
+#### Where the two backends stop agreeing, and why it is not a defect
+
+Tiles are byte-identical across the GPU and CPU paths (§3.4b). **Outlines are
+not**, and the reason is worth writing down because it looks like a bug and is
+not.
+
+On the detail frame the two agree on 90.8% of *all* pixels but on only **31.6%
+of the overlay pixels**. That number reads like something is misplaced. It is
+not: **99.9% of the pixels one backend lights and the other does not are one
+pixel away from the other's outline**, and the offsets are dominated by
+`(0, +1)` and `(+1, 0)`.
+
+That is the whole explanation. These contours follow pixel corners, so at 1:1
+every edge lies *exactly on a pixel boundary* — a horizontal edge at `y = 7.0`
+runs between row 6 and row 7, equidistant from both centres. Every edge is a
+rasterisation tie, and the two rasterisers break it in opposite directions:
+`compose` floors, and GPU line rasterisation is implementation-defined — the
+specification permits a range of rules, so two drivers may disagree here and
+neither is wrong.
+
+So the claim §3.4b makes for tiles does not extend to lines, and it is not
+extended. What stays assertable is *where an outline lands*, with no GPU:
+`an_outline_lands_on_the_tile_pixels_it_covers` draws a tile at 1:1, draws a
+segment along the slide coordinate of one of its rows, and asserts the lit
+pixels are the ones the tile put that row in — and that the row above is
+untouched, so the line is one pixel wide and on the row it was asked for.
+
+#### What this earns back for the port
+
+`DIVERGENCES.md` D-008 is a claim about *geometry* — nucleus masks against
+smoothed cell polygons — and it had never been looked at directly because the
+vertices did not exist. They exist now. D-008's two halves are still both open,
+and are now both **reachable**: the outlines here are the raw pixel boundary,
+where QuPath interpolates, smooths, interpolates again and simplifies before
+anything sees them.
 
 ## 4. The two things that will bite
 

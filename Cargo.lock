@@ -1728,6 +1728,7 @@ dependencies = [
  "bytemuck",
  "png",
  "pollster",
+ "qupath-pipeline",
  "qupath-slide",
  "softbuffer",
  "wgpu",
