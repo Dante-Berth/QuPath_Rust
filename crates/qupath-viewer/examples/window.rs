@@ -15,10 +15,18 @@
 //! away.
 //!
 //! The title bar carries the backend, the level, the tile count, resident
-//! megabytes and what the loader is still working on — the level selection and
-//! the cache made visible. Zooming out should *drop* the tile count as it
-//! crosses to a coarser level, not raise it, and a long pan should leave
-//! resident megabytes flat.
+//! megabytes, what the loader is still working on, and how long the last thirty
+//! frames took — the level selection and the cache made visible. Zooming out
+//! should *drop* the tile count as it crosses to a coarser level, not raise it,
+//! and a long pan should leave resident megabytes flat.
+//!
+//! The milliseconds are time spent in [`App::render`], which is the frame's
+//! cost on the main thread and not the whole story: on the GPU path handing the
+//! frame over is asynchronous, so it is submission time rather than how long
+//! the GPU took, and neither path counts the decode, which happens on the
+//! loader threads and is what a pan actually waits for. It is in the title
+//! because "does it stutter" is otherwise answered by looking, and this is the
+//! part of that question a number can answer.
 //!
 //! # Two backends
 //!
@@ -51,6 +59,7 @@
 //! Scratch tooling, not part of the library.
 #![allow(missing_docs, reason = "example binary")]
 
+use std::collections::VecDeque;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -147,6 +156,7 @@ fn main() {
         cursor: ScreenPoint::new(0.0, 0.0),
         requested: Vec::new(),
         incomplete: false,
+        frame_times: VecDeque::new(),
         window: None,
         backend: None,
     };
@@ -182,6 +192,14 @@ struct Software {
     /// held — so the two backends evict at the same points and the title bar's
     /// resident figure is comparable between them.
     resident: TileCache<Tile>,
+    /// Whether a failure to present has already been reported.
+    ///
+    /// A frame that cannot reach the window server is indistinguishable from a
+    /// frame that was never drawn, and dropping the error silently would make a
+    /// broken presentation look exactly like a blank slide. Reported once
+    /// rather than every frame, because the failure is a standing condition and
+    /// the window keeps trying.
+    reported: bool,
 }
 
 /// A decoded tile held in main memory, ready to blit.
@@ -231,6 +249,17 @@ struct App {
     /// Whether the last frame was missing a tile that is still coming. Drives
     /// the wake-up in [`ApplicationHandler::about_to_wait`].
     incomplete: bool,
+    /// How long the last few frames took on the main thread, in milliseconds.
+    ///
+    /// In the title bar because "does it stutter" is otherwise checked by
+    /// looking, and this is the one part of that question a number can answer.
+    /// Read it for what it is: time spent in `render`, which is uploading or
+    /// blitting whatever arrived, building the draw list, and handing the frame
+    /// over. On the GPU path handing it over is asynchronous, so this is
+    /// submission time and not how long the GPU took; on the CPU path the
+    /// composition is right there in it. Neither includes the decode, which
+    /// happens on the loader threads and is what a pan actually waits for.
+    frame_times: VecDeque<f64>,
     window: Option<Arc<Window>>,
     backend: Option<Backend>,
 }
@@ -357,6 +386,7 @@ impl App {
     }
 
     fn render(&mut self) {
+        let started = Instant::now();
         let slide = self.slide();
         let level = self.view.level(slide).clone();
         let underlay = self.view.underlay_level(slide).cloned();
@@ -417,8 +447,24 @@ impl App {
         }
         self.incomplete = was_busy || !self.loader.is_idle();
 
+        backend.present(&draws);
+
+        // Timed after the present, so the number covers the whole frame. Kept
+        // as a short window and averaged: a single frame is dominated by
+        // whatever the scheduler did to it, and a mean over half a second is
+        // what a hand on the mouse actually perceives.
+        self.frame_times.push_back(started.elapsed().as_secs_f64() * 1000.0);
+        while self.frame_times.len() > 30 {
+            self.frame_times.pop_front();
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "at most 30 samples"
+        )]
+        let mean = self.frame_times.iter().sum::<f64>() / self.frame_times.len() as f64;
+
         let title = format!(
-            "qupath-viewer — {} — level {} of {}, {:.3} px/px, {} tiles +{} under, {} MB, {} loading",
+            "qupath-viewer — {} — level {} of {}, {:.3} px/px, {} tiles +{} under, {} MB, {} loading, {mean:.1} ms",
             backend.name(),
             level.index,
             self.source.slide().levels().len(),
@@ -428,7 +474,6 @@ impl App {
             backend.resident_bytes() >> 20,
             self.loader.pending() + self.loader.in_flight(),
         );
-        backend.present(&draws);
         if let Some(window) = self.window.as_ref() {
             window.set_title(&title);
         }
@@ -627,20 +672,29 @@ fn present_cpu(state: &mut Software, draws: &[Draw]) {
     // Composing straight into it would save the copy and would mean holding the
     // surface borrowed across the whole draw; at 3 MB for a 1024x768 frame the
     // copy is well under a millisecond and not what a pan would stutter on.
+    //
+    // Both backends resize their surface every frame; softbuffer's is a
+    // no-op when the size has not changed, and doing it here rather than in
+    // `resize` means the buffer's length always matches the framebuffer's.
+    if let Err(error) = present_cpu_inner(state)
+        && !state.reported
+    {
+        state.reported = true;
+        eprintln!("could not present a frame: {error}");
+    }
+}
+
+fn present_cpu_inner(state: &mut Software) -> Result<(), softbuffer::SoftBufferError> {
     let (Some(width), Some(height)) = (
         NonZeroU32::new(state.frame.width()),
         NonZeroU32::new(state.frame.height()),
     ) else {
-        return;
+        return Ok(());
     };
-    if state.surface.resize(width, height).is_err() {
-        return;
-    }
-    let Ok(mut buffer) = state.surface.buffer_mut() else {
-        return;
-    };
+    state.surface.resize(width, height)?;
+    let mut buffer = state.surface.buffer_mut()?;
     buffer.copy_from_slice(state.frame.pixels());
-    drop(buffer.present());
+    buffer.present()
 }
 
 fn upload(state: &Graphics, rgba: &[u8], width: u32, height: u32) -> wgpu::BindGroup {
@@ -703,6 +757,7 @@ fn software(window: &Arc<Window>, budget: usize) -> Software {
         surface,
         frame: Framebuffer::new(size.width.max(1), size.height.max(1)),
         resident: TileCache::new(budget),
+        reported: false,
     }
 }
 

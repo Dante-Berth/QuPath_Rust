@@ -99,10 +99,11 @@ Both examples take a slide path, defaulting to `data/CMU-1.svs`.
 
 ```sh
 # The viewer. Drag to pan, scroll to zoom, f to fit, escape to quit. The title
-# bar carries the backend, the level, the tile count, resident texture memory
-# and what the loader is still working on -- the level selection and the cache
-# made visible. Zooming out should drop the tile count, never raise it, and a
-# long pan should leave resident megabytes flat.
+# bar carries the backend, the level, the tile count, resident texture memory,
+# what the loader is still working on, and the mean cost of the last thirty
+# frames on the main thread -- the level selection and the cache made visible.
+# Zooming out should drop the tile count, never raise it, and a long pan should
+# leave resident megabytes flat.
 #
 # The optional second argument is the texture budget in MB. It is the one knob
 # worth sweeping: set it low and the frame still draws, because the underlay
