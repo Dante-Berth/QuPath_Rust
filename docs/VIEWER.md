@@ -75,7 +75,9 @@ Known limits inherited from the crate, both fine for now:
 ## 2. Stack
 
 - **`winit` + `wgpu`** — window and rendering. The draw call is textured quads
-  in a grid; this does not need a game engine.
+  in a grid; this does not need a game engine. It turned out not to need a GPU
+  either — see §3.4b, which is what "textured quads in a grid" means once it is
+  taken literally.
 - **`egui`** via `egui-wgpu` for chrome. Immediate-mode suits a UI whose state
   is almost entirely derived from viewport state. `iced` is the retained-mode
   alternative and would fight harder for a custom GPU surface underneath.
@@ -97,26 +99,31 @@ Both examples take a slide path, defaulting to `data/CMU-1.svs`.
 
 ```sh
 # The viewer. Drag to pan, scroll to zoom, f to fit, escape to quit. The title
-# bar carries the level, the tile count, resident texture memory and what the
-# loader is still working on -- the level selection and the cache made visible.
-# Zooming out should drop the tile count, never raise it, and a long pan should
-# leave resident megabytes flat.
+# bar carries the backend, the level, the tile count, resident texture memory
+# and what the loader is still working on -- the level selection and the cache
+# made visible. Zooming out should drop the tile count, never raise it, and a
+# long pan should leave resident megabytes flat.
 #
 # The optional second argument is the texture budget in MB. It is the one knob
 # worth sweeping: set it low and the frame still draws, because the underlay
 # covers what was evicted.
 cargo run -p qupath-viewer --example window --release -- data/CMU-1.svs 256
 
+# The same window with no GPU: no adapter, no driver, no shader. This is also
+# what runs by itself when there is no adapter to be had (§3.4b).
+cargo run -p qupath-viewer --example window --release -- data/CMU-1.svs 256 --cpu
+
 # No window, no GPU: writes the whole slide at the level the viewport picks,
 # plus 1024x1024 at level 0 from the profiled region, then prints the level
 # table across scales.
 cargo run -p qupath-viewer --example dump --release -- data/CMU-1.svs
 
-# No window, but through the GPU: renders the same geometry the window renders
-# into an offscreen texture and writes it as a PNG, including a zoom sequence
-# anchored on tissue that crosses every level boundary, and a scripted pan
-# driven through the real loader and cache. This is what to run when the window
-# looks wrong and you need numbers instead of an impression.
+# No window: renders the same geometry the window renders into an offscreen
+# image and writes it as a PNG, including a zoom sequence anchored on tissue
+# that crosses every level boundary, and a scripted pan driven through the real
+# loader and cache. This is what to run when the window looks wrong and you
+# need numbers instead of an impression. `--cpu` here too, and running it both
+# ways is the cross-check §3.4b rests on.
 cargo run -p qupath-viewer --example render --release -- data/CMU-1.svs
 
 cargo test -p qupath-viewer
@@ -125,16 +132,13 @@ cargo test -p qupath-viewer
 `--release` matters for both: a debug build decodes JPEG tiles slowly enough to
 be annoying.
 
-The window needs a display and a GPU. It runs on Vulkan here; wgpu will fall
-back to other backends but the fallback is untested. If it cannot find an
-adapter it panics at startup with `expect("adapter")` rather than opening a
-blank window, which is the intended failure — `dump` is the path that needs
-neither.
-
-`render` needs a GPU but no display, which is the combination a headless machine
-usually has. Tests need neither, by construction (§6) — 47 of them, and none
-links `wgpu`. The integration tests need `data/CMU-1-Small-Region.svs` and
-return early without it.
+**The window needs a display. Nothing here needs a GPU.** It runs on Vulkan
+here; where there is no adapter at all the window composes on the CPU instead
+and says so, which used to be a panic at startup. `render` needs neither a
+display nor an adapter, which is the combination a headless machine usually has.
+Tests need neither, by construction (§6) — 57 of them now, and none links
+`wgpu`. The integration tests need `data/CMU-1-Small-Region.svs` and return
+early without it.
 
 ## 3. Milestones
 
@@ -300,6 +304,83 @@ window loads and draws the fit view of `CMU-1.svs` in 0.24 core-seconds and then
 consumes **zero** CPU until the next input, so the redraw-while-loading tick
 sleeps rather than spins.
 
+### 3.4b Composing without a GPU — **done**
+
+Not on the original list. It came from a question — *what does a user with no
+GPU do?* — and the answer turned out to be worth more than the question.
+
+`request_adapter(...).expect("adapter")` made a machine with no Vulkan or GL
+driver a panic at startup, and that is not a rare machine: a headless server, a
+VM with no passthrough, an ssh session, anything locked down. There are now
+three attempts and the last one always succeeds — a real adapter, then
+`force_fallback_adapter` for Mesa's lavapipe where it is installed, then
+`compose::Framebuffer`, which needs no driver at all. `--cpu` skips to the third
+on purpose, so the software path can be looked at on a machine that has a GPU.
+
+**The reason it is written out rather than delegated to lavapipe** is that this
+viewer's entire draw call is axis-aligned textured quads: no rotation, no
+blending, no depth. That is a scaled blit. Pushing it through a software Vulkan
+stack costs the user a driver install and buys nothing, where the blit is one
+source read per destination pixel.
+
+Two decisions, both recorded because either could have gone the other way:
+
+- **Coverage of a destination pixel is decided by its centre.** That makes
+  tiling exact by construction rather than by a rounding rule that has to be got
+  right twice: one tile's `span_end` is the next tile's `span_start`, the same
+  expression. It is also, it turns out, exactly the rule a GPU rasterises a quad
+  with — which is why the cross-check below comes out as cleanly as it does.
+- **Sampling is nearest**, where the shader filters linearly. It makes the 1:1
+  case exact rather than approximately exact, and at the scales level selection
+  produces — a tile drawn between 1x and about 1.05x its own size — there is
+  nothing for a filter to do. Where it shows is the underlay, magnified 16x or
+  more, which reads as blocky rather than soft while the real tiles load. That
+  is a placeholder either way.
+
+#### What the two backends agree on, which is the point
+
+`render` takes `--cpu`, so the same run can be made twice. Two rasterisers that
+share no code agree on the whole report: the scripted pan's undrawn fraction
+frame by frame and in the mean (7.3% against 57.6%), decoded, evicted, peak
+resident, every level choice and tile count in the zoom ladder.
+
+They agree at the pixel too. On the detail view — level 0, scale 1.0, integer
+offsets — the two frames are **byte-identical across all 786,432 pixels**.
+
+| Frame | Identical pixels | Mean difference |
+| --- | --- | --- |
+| detail, 1:1 | **100.0%** | 0 |
+| pan, 1:1 fractional offset | 87.8% of drawn | 0.32 / 255 |
+| overview, minified 2.8x | 72.3% | 1.48 / 255 |
+| zoom, magnified 32x | 1.0% | 5.20 / 255 |
+
+The gradient down that table is the sampling difference and nothing else: the
+more a tile is scaled, the more linear filtering has to do. Nothing is
+misplaced at any scale, which is the claim that matters — coverage is identical
+on every frame.
+
+**One unit, measured rather than assumed.** Undrawn pixels differ by exactly one
+in blue. The correct sRGB encoding of 0.09 linear is 84.62, `compose::CLEAR`
+holds the correctly rounded 85, and the Intel Vulkan driver here stores 84.
+Pinning the constant to 84 would pin it to one driver's rounding, so it stays
+correct and `render`'s GPU-side check keeps its one unit of slack. Worth writing
+down because it is the same family as §6's sRGB bug — a colour that was guessed
+rather than encoded — one rounding step further in.
+
+#### What it costs
+
+Composing one 1024x768 frame — clearing it and blitting every tile of the draw
+list — costs **1.27 ms** averaged over 86 frames, against 16.7 ms for a 60 Hz
+frame. That excludes the read-back, which is `render`'s overhead and not the
+window's, and it excludes the decode, which is identical on both paths and is
+what actually makes a pan wait. Presenting adds one 3 MB copy into `softbuffer`'s
+buffer; composing straight into it would save that and would mean holding the
+surface borrowed across the whole draw, which is not a trade worth making at
+this size.
+
+Nothing here is parallelised, and it does not need to be yet. If it ever does,
+the rows are independent.
+
 ### 3.5 Overlays
 
 Only now. Detected objects from `qupath-objects` drawn over the slide, in slide
@@ -365,9 +446,20 @@ project draws pictures. What it means here:
   lands, so cancellation cannot be observed against a real slide. The fake can
   be held shut on command, which turns "the queue is replaced" into 4 decodes
   where 503 were queued.
-- **What is *not* claimed by a test is appearance.** Colours, orientation and
-  smoothness are checked by looking, and that is stated rather than dressed up
-  as a test.
+- **Placement gets byte assertions, since §3.4b.** This is the concession above
+  taken back. The golden check no longer stops at the tile: at 1:1 on an integer
+  offset the compositor must be a *copy*, and a half-pixel anywhere in the
+  sampling shows up as a shifted image. Two tiles drawn edge to edge must
+  compose to the same pixels as one tile covering both, which is strictly
+  stronger than `adjacent_tiles_are_placed_edge_to_edge` — that asserts the
+  rectangles touch, this asserts the pixels do. And a fractional seam is swept
+  over sixteen subpixel offsets, because a pan leaves tile edges on fractional
+  positions essentially always and a rounding rule that works on integers is how
+  a grid of clear-colour lines appears. None of it links `wgpu`.
+- **What is *still* not claimed by a test is appearance.** Colours, orientation
+  and smoothness are checked by looking, and that is stated rather than dressed
+  up as a test. What §3.4b moved across the line is *where a tile landed*, not
+  what it looks like.
 
 ### `examples/render.rs`, and what it changed about the above
 
@@ -410,11 +502,18 @@ printing a passing grade for two milestones.
 ## 7. Open questions
 
 - **Where the crate lives — settled.** `crates/qupath-viewer`, and the
-  dependency worry was answered rather than accepted: winit, wgpu and png are
-  **dev-dependencies**, needed only by the examples that open a window. The
-  library itself depends on `qupath-slide` alone, so `cargo test -p
+  dependency worry was answered rather than accepted: winit, wgpu, softbuffer
+  and png are **dev-dependencies**, needed only by the examples that open a
+  window. The library itself depends on `qupath-slide` alone, so `cargo test -p
   qupath-viewer` builds none of the graphics tree. That falls out of §6 — if
-  the tests need no GPU, the library does not need to link one.
+  the tests need no GPU, the library does not need to link one. §3.4b did not
+  change it: `compose` draws pixels and still depends on nothing.
+- **What a user with no GPU does — settled, §3.4b.** They get the viewer. The
+  question was asked expecting an answer about fallbacks and produced a piece of
+  the library instead, because the draw call was simple enough that writing it
+  out was cheaper than delegating it. The unexpected part is that it paid §6
+  back: two independent rasterisers over the same draw list is a check neither
+  path could perform alone.
 - **Whether `qupath-slide` needs a tile cache of its own — settled, no.**
   `cache::TileCache` sits above it and the detection pipeline streams. §3.4
   built the viewer's cache and wanted nothing from the reader, which is the

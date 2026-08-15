@@ -155,16 +155,20 @@ what to distrust, in one page.
 
 ```sh
 # Drag to pan, scroll to zoom, f to fit, escape to quit. The title bar shows
-# the pyramid level, the tile count and resident texture memory. The optional
-# second argument is the texture budget in MB.
+# the backend, the pyramid level, the tile count and resident texture memory.
+# The optional second argument is the texture budget in MB.
 cargo run -p qupath-viewer --example window --release -- data/CMU-1.svs 256
+
+# The same window with no GPU involved at all: no adapter, no driver, no
+# shader. This is also what runs by itself when there is no adapter to be had.
+cargo run -p qupath-viewer --example window --release -- data/CMU-1.svs 256 --cpu
 
 # No window and no GPU: writes the slide as a PNG at the level the viewport
 # picks, and prints the level table across scales.
 cargo run -p qupath-viewer --example dump --release -- data/CMU-1.svs
 
-# No window, but through the GPU: renders the same geometry offscreen, writes
-# it as PNGs, and reports a scripted pan through the loader and the cache.
+# No window: renders the same geometry offscreen, writes it as PNGs, and
+# reports a scripted pan through the loader and the cache. Takes `--cpu` too.
 cargo run -p qupath-viewer --example render --release -- data/CMU-1.svs
 ```
 
@@ -180,8 +184,18 @@ underneath while the finer tiles arrive. That last part is worth its own
 number: over a scripted pan at 700 px per frame, **7.3% of the average frame is
 never drawn with the underlay against 57.6% without**, for the same decode work.
 
-The window needs a display and a GPU; `dump` needs neither, `render` needs a GPU
-but no display, and the tests need neither.
+**No GPU is required for any of it.** The viewer's whole draw call is
+axis-aligned textured quads — no rotation, no blending, no depth — which is a
+scaled blit, so it is written out on the CPU in the library and used whenever
+there is no adapter. That costs **1.27 ms** to compose a 1024x768 frame, against
+16.7 ms for a 60 Hz one. The window needs a display; nothing else needs
+anything.
+
+Having both paths is also a check rather than a courtesy. Run the same scripted
+pan through each and two rasterisers that share no code agree on every number in
+the report, and on the detail view — level 0, 1:1, integer offsets — the two
+frames are **byte-identical across all 786,432 pixels**.
+
 [docs/VIEWER.md](docs/VIEWER.md) is the plan and the running account of what has
 gone wrong, including a level-selection bug that cost an 11x over-decode while
 every frame still looked correct.

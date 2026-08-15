@@ -7,9 +7,10 @@
 //!
 //! # What is here
 //!
-//! Milestones 3.1 to 3.4 of `docs/VIEWER.md` — a window showing a real slide,
-//! pan and zoom, pyramid-level selection, and tiles loaded off the main thread
-//! into a cache with a hard byte budget.
+//! Milestones 3.1 to 3.4b of `docs/VIEWER.md` — a window showing a real slide,
+//! pan and zoom, pyramid-level selection, tiles loaded off the main thread into
+//! a cache with a hard byte budget, and a frame that can be composed with no
+//! GPU at all.
 //!
 //! The split is deliberate. [`coords`], [`viewport`], [`cache`], [`loader`] and
 //! [`compose`] are pure logic with no GPU and no window, so they carry the
