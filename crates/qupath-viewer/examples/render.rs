@@ -1,8 +1,17 @@
-//! Renders viewports offscreen through the GPU and writes them as PNGs.
+//! Renders viewports offscreen and writes them as PNGs.
 //!
 //! ```text
 //! cargo run -p qupath-viewer --example render --release -- data/CMU-1.svs out.png
+//! cargo run -p qupath-viewer --example render --release -- data/CMU-1.svs out.png --cpu
 //! ```
+//!
+//! `--cpu` composes through [`qupath_viewer::compose`] instead of the shader,
+//! and is what runs when there is no adapter. Everything else about the run is
+//! the same, which is the point: the tile counts, the level choices and the
+//! coverage numbers below are all properties of the viewport arithmetic and the
+//! loader, so the two backends must agree on them. Where they are *allowed* to
+//! differ is sampling — the shader filters linearly, `compose` takes the nearest
+//! pixel — so the PNGs are not byte-identical wherever a tile is magnified.
 //!
 //! # Why this exists
 //!
@@ -32,8 +41,10 @@
 use std::fs::File;
 use std::io::BufWriter;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use qupath_slide::{Level, Slide};
+use qupath_viewer::compose::{self, Framebuffer};
 use qupath_viewer::loader::expand_to_rgba_into;
 use qupath_viewer::{ScreenPoint, SlidePoint, SlideTiles, TileCache, TileIndex, TileLoader, Viewport};
 
@@ -54,9 +65,17 @@ const CLEAR: wgpu::Color = wgpu::Color {
 };
 
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let path = args.next().unwrap_or_else(|| "data/CMU-1.svs".to_owned());
-    let out = args.next().unwrap_or_else(|| "viewer-render.png".to_owned());
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let force_cpu = args.iter().any(|argument| argument == "--cpu");
+    let mut positional = args.iter().filter(|argument| !argument.starts_with("--"));
+    let path = positional
+        .next()
+        .cloned()
+        .unwrap_or_else(|| "data/CMU-1.svs".to_owned());
+    let out = positional
+        .next()
+        .cloned()
+        .unwrap_or_else(|| "viewer-render.png".to_owned());
 
     let slide = match Slide::open(&path) {
         Ok(slide) => slide,
@@ -72,13 +91,13 @@ fn main() {
     // One device for every frame below. Building an adapter per PNG worked and
     // was slow enough to discourage rendering a whole pan, which is the thing
     // 3.4 actually needed looking at.
-    let renderer = pollster::block_on(Renderer::new(width, height));
+    let mut renderer = Renderer::new(width, height, force_cpu);
 
     // Two views through the same path: the whole slide, and a zoomed-in detail
     // reached by `zoom_about` rather than by constructing a viewport directly,
     // so the pan/zoom arithmetic is what places these pixels.
     let overview = Viewport::fit(&slide, width, height);
-    render_to_png(&renderer, &slide, overview, &out);
+    render_to_png(&mut renderer, &slide, overview, &out);
 
     let tissue = SlidePoint::new(27776.0 + 512.0, 5952.0 + 512.0);
     let detail = Viewport {
@@ -87,7 +106,7 @@ fn main() {
         width,
         height,
     };
-    render_to_png(&renderer, &slide, detail, &out.replace(".png", "-detail.png"));
+    render_to_png(&mut renderer, &slide, detail, &out.replace(".png", "-detail.png"));
 
     // The interaction as a user performs it: start fitted, then scroll in on a
     // point. Every frame here crosses at least one level boundary.
@@ -100,7 +119,7 @@ fn main() {
             zooming = zooming.zoom_about(1.5, anchor);
         }
         render_to_png(
-            &renderer,
+            &mut renderer,
             &slide,
             zooming,
             &out.replace(".png", &format!("-zoom{step}.png")),
@@ -124,11 +143,23 @@ fn main() {
         view = view.zoom_about(0.25, ScreenPoint::new(512.0, 384.0));
     }
 
-    scripted_pan(&renderer, &path, &out);
+    scripted_pan(&mut renderer, &path, &out);
+
+    // Only on the software path, and only composition: clearing the frame and
+    // blitting every tile of the draw list, averaged over every frame above.
+    // What it is being weighed against is a 60 Hz frame at 16.7 ms, and what it
+    // leaves out is the decode, which is the same on both paths and is what
+    // actually makes a pan wait.
+    if let Some(cost) = renderer.compose_cost() {
+        println!(
+            "\n  composing one 1024x768 frame cost {:.2} ms on average.",
+            cost.as_secs_f64() * 1000.0
+        );
+    }
 }
 
 /// Renders one viewport with everything decoded up front, and writes a PNG.
-fn render_to_png(renderer: &Renderer, slide: &Slide, view: Viewport, out: &str) {
+fn render_to_png(renderer: &mut Renderer, slide: &Slide, view: Viewport, out: &str) {
     let level = view.level(slide).clone();
     let underlay = view.underlay_level(slide).cloned();
     let tiles = view.visible_tiles(&level);
@@ -142,9 +173,9 @@ fn render_to_png(renderer: &Renderer, slide: &Slide, view: Viewport, out: &str) 
     let under_count = uploaded.len();
     decode_into(renderer, slide, view, &level, &mut uploaded);
 
-    let draws: Vec<(&wgpu::BindGroup, Instance)> = uploaded
+    let draws: Vec<(&Texture, Instance)> = uploaded
         .iter()
-        .map(|(bind_group, instance)| (bind_group, *instance))
+        .map(|(texture, instance)| (texture, *instance))
         .collect();
     let pixels = renderer.draw(&draws);
     write_png(out, &pixels, view.width, view.height);
@@ -168,7 +199,7 @@ fn decode_into(
     slide: &Slide,
     view: Viewport,
     level: &Level,
-    uploaded: &mut Vec<(wgpu::BindGroup, Instance)>,
+    uploaded: &mut Vec<(Texture, Instance)>,
 ) {
     let window = [view.width as f32, view.height as f32];
     let mut decoded = Vec::new();
@@ -201,7 +232,7 @@ fn decode_into(
 /// land, which is the case the underlay exists for. Without it, a frame drawn
 /// before its tiles arrive is clear colour; with it, it is the coarsest level
 /// stretched. The difference between the two columns is the whole argument.
-fn scripted_pan(renderer: &Renderer, path: &str, out: &str) {
+fn scripted_pan(renderer: &mut Renderer, path: &str, out: &str) {
     // Deliberately tight: about three screens of tiles, so eviction runs.
     const BUDGET: usize = 48 * 256 * 256 * 4;
     const FRAMES: usize = 40;
@@ -292,7 +323,7 @@ struct PanReport {
 /// window taken out, deliberately: if the two drift apart the report stops
 /// meaning anything.
 fn pan_once(
-    renderer: &Renderer,
+    renderer: &mut Renderer,
     path: &str,
     use_underlay: bool,
     frames: usize,
@@ -309,13 +340,13 @@ fn pan_once(
             f64::from(base.height).min(5952.0),
         ),
         scale: 1.0,
-        width: renderer.width,
-        height: renderer.height,
+        width: renderer.width(),
+        height: renderer.height(),
     };
 
     let source = Arc::new(SlideTiles::new(Slide::open(path).expect("open")));
     let loader = TileLoader::new(&source, 4);
-    let mut cache: TileCache<wgpu::BindGroup> = TileCache::new(budget);
+    let mut cache: TileCache<Texture> = TileCache::new(budget);
     let mut requested: Vec<TileIndex> = Vec::new();
     let mut undrawn_per_frame = Vec::with_capacity(frames);
     let mut peak = 0;
@@ -333,8 +364,8 @@ fn pan_once(
 
         for loaded in loader.drain() {
             let bytes = loaded.pixels.len();
-            let bind_group = renderer.upload(&loaded.pixels, loaded.width, loaded.height);
-            cache.insert(loaded.tile, bind_group, bytes);
+            let texture = renderer.upload(&loaded.pixels, loaded.width, loaded.height);
+            cache.insert(loaded.tile, texture, bytes);
         }
         peak = peak.max(cache.bytes());
 
@@ -366,7 +397,7 @@ fn pan_once(
             loader.request(missing);
         }
 
-        let draws: Vec<(&wgpu::BindGroup, Instance)> = order
+        let draws: Vec<(&Texture, Instance)> = order
             .iter()
             .filter_map(|(tile, instance)| Some((cache.peek(*tile)?, *instance)))
             .collect();
@@ -438,8 +469,136 @@ fn srgb8(linear: f64) -> u8 {
     value
 }
 
-/// Everything needed to draw a frame, built once.
-struct Renderer {
+/// A decoded tile in whatever form the renderer draws from.
+///
+/// One enum rather than a generic renderer: the cache, the draw list and the
+/// coverage number are all the same on both paths, and only this and the last
+/// step differ.
+enum Texture {
+    Gpu(wgpu::BindGroup),
+    Cpu(Tile),
+}
+
+/// A decoded tile held in main memory, ready to blit.
+struct Tile {
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+/// Where a frame is drawn.
+enum Renderer {
+    Gpu(Box<Gpu>),
+    Cpu(Software),
+}
+
+/// The software path, with what it cost.
+///
+/// The cost is here because "will this stutter" is the first question a CPU
+/// compositor gets, and the honest answer is a number rather than an argument
+/// about how simple a blit is. It times the composition alone — clearing and
+/// blitting every tile of the draw list — and not the read-back, which is this
+/// tool's own overhead and not something the window does.
+struct Software {
+    frame: Framebuffer,
+    composing: Duration,
+    frames: u32,
+}
+
+impl Renderer {
+    /// The GPU path unless `force_cpu`, falling back to the software one when
+    /// there is no adapter.
+    ///
+    /// This used to be `expect("adapter")`, which made a headless machine a
+    /// panic. The point of the fallback is not politeness: the numbers this
+    /// tool prints — tile counts, level choices, coverage — are properties of
+    /// the viewport arithmetic and the loader, and none of them needs a GPU to
+    /// be true, so refusing to produce them without one was refusing for no
+    /// reason.
+    fn new(width: u32, height: u32, force_cpu: bool) -> Self {
+        if !force_cpu {
+            if let Some(gpu) = pollster::block_on(Gpu::new(width, height)) {
+                println!("  drawing through the shader");
+                return Self::Gpu(Box::new(gpu));
+            }
+            println!("  no GPU adapter; composing on the CPU");
+        } else {
+            println!("  composing on the CPU");
+        }
+        Self::Cpu(Software {
+            frame: Framebuffer::new(width, height),
+            composing: Duration::ZERO,
+            frames: 0,
+        })
+    }
+
+    /// Mean time to compose one frame, or `None` on the GPU path.
+    fn compose_cost(&self) -> Option<Duration> {
+        match self {
+            Self::Gpu(_) => None,
+            Self::Cpu(state) => (state.frames > 0).then(|| state.composing / state.frames),
+        }
+    }
+
+    fn width(&self) -> u32 {
+        match self {
+            Self::Gpu(gpu) => gpu.width,
+            Self::Cpu(state) => state.frame.width(),
+        }
+    }
+
+    fn height(&self) -> u32 {
+        match self {
+            Self::Gpu(gpu) => gpu.height,
+            Self::Cpu(state) => state.frame.height(),
+        }
+    }
+
+    fn upload(&self, rgba: &[u8], width: u32, height: u32) -> Texture {
+        match self {
+            Self::Gpu(gpu) => Texture::Gpu(gpu.upload(rgba, width, height)),
+            Self::Cpu(_) => Texture::Cpu(Tile {
+                pixels: rgba.to_vec(),
+                width,
+                height,
+            }),
+        }
+    }
+
+    /// Draws in order, back to front, and returns the frame as packed RGBA.
+    ///
+    /// Both paths return the same thing in the same format, which is what lets
+    /// `undrawn` and `write_png` stay backend-agnostic — and what makes the two
+    /// coverage tables comparable line by line.
+    fn draw(&mut self, draws: &[(&Texture, Instance)]) -> Vec<u8> {
+        let draws = &draws[..draws.len().min(MAX_TILES)];
+        match self {
+            Self::Gpu(gpu) => gpu.draw(draws),
+            Self::Cpu(state) => {
+                let started = Instant::now();
+                state.frame.clear(compose::CLEAR);
+                for (texture, instance) in draws {
+                    let Texture::Cpu(tile) = texture else {
+                        continue;
+                    };
+                    let [x, y, width, height] = instance.rect;
+                    state
+                        .frame
+                        .draw_tile((x, y, width, height), &tile.pixels, tile.width, tile.height);
+                }
+                state.composing += started.elapsed();
+                state.frames += 1;
+
+                let mut rgba = Vec::new();
+                state.frame.to_rgba(&mut rgba);
+                rgba
+            }
+        }
+    }
+}
+
+/// Everything needed to draw a frame through the shader, built once.
+struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     layout: wgpu::BindGroupLayout,
@@ -459,17 +618,33 @@ struct Renderer {
 /// How many tiles one frame can draw, underlay included.
 const MAX_TILES: usize = 1024;
 
-impl Renderer {
-    async fn new(width: u32, height: u32) -> Self {
+impl Gpu {
+    /// Builds the shader path, or `None` when there is no adapter for it.
+    ///
+    /// A software adapter — Mesa's lavapipe where it is installed — is tried
+    /// before giving up, because it still exercises the real shader, which is
+    /// the thing `compose` cannot check.
+    async fn new(width: u32, height: u32) -> Option<Self> {
         let instance = wgpu::Instance::default();
-        let adapter = instance
+        let adapter = match instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
-            .expect("adapter");
+        {
+            Ok(adapter) => adapter,
+            Err(_) => {
+                instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        force_fallback_adapter: true,
+                        ..Default::default()
+                    })
+                    .await
+                    .ok()?
+            }
+        };
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor::default())
             .await
-            .expect("device");
+            .ok()?;
 
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let target = device.create_texture(&wgpu::TextureDescriptor {
@@ -566,7 +741,7 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        Self {
+        Some(Self {
             device,
             queue,
             layout,
@@ -579,7 +754,7 @@ impl Renderer {
             width,
             height,
             padded,
-        }
+        })
     }
 
     fn upload(&self, rgba: &[u8], width: u32, height: u32) -> wgpu::BindGroup {
@@ -634,9 +809,11 @@ impl Renderer {
     }
 
     /// Draws `draws` in order, back to front, and reads the frame back as RGBA.
-    fn draw(&self, draws: &[(&wgpu::BindGroup, Instance)]) -> Vec<u8> {
-        let draws = &draws[..draws.len().min(MAX_TILES)];
-
+    ///
+    /// Anything that is not a GPU texture is skipped rather than asserted on:
+    /// the two backends never mix in practice, and a frame that silently loses
+    /// a tile is easier to see in the coverage number than a panic is to read.
+    fn draw(&self, draws: &[(&Texture, Instance)]) -> Vec<u8> {
         // Every instance in one copy before the pass opens. `write_buffer`
         // queues its copy ahead of the whole submission rather than at the
         // point it appears in the recording, so interleaving writes with draws
@@ -668,8 +845,11 @@ impl Renderer {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_vertex_buffer(0, self.instances.slice(..));
-            for (slot, (bind_group, _)) in draws.iter().enumerate() {
-                pass.set_bind_group(0, *bind_group, &[]);
+            for (slot, (texture, _)) in draws.iter().enumerate() {
+                let Texture::Gpu(bind_group) = texture else {
+                    continue;
+                };
+                pass.set_bind_group(0, bind_group, &[]);
                 #[expect(
                     clippy::cast_possible_truncation,
                     reason = "bounded by MAX_TILES, which is far below u32::MAX"

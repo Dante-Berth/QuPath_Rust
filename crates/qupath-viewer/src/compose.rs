@@ -64,7 +64,8 @@ pub struct Framebuffer {
     pixels: Vec<u32>,
 }
 
-/// The colour an undrawn pixel keeps, matching the window's GPU path exactly.
+/// The colour an undrawn pixel keeps, matching the window's GPU path to within
+/// a unit.
 ///
 /// The window clears to `(0.08, 0.08, 0.09)` and `wgpu` takes that as *linear*,
 /// then stores it into an `Rgba8UnormSrgb` surface — so what is actually in
@@ -74,9 +75,20 @@ pub struct Framebuffer {
 /// never matched, and reported a fully undrawn frame as fully drawn for two
 /// milestones.
 ///
-/// Here it is a constant rather than a guess, and
-/// [`Framebuffer::fraction_matching`] against it is exact — there is no encoding
-/// step on this path to be wrong about.
+/// # The last unit, which was measured rather than assumed
+///
+/// The exact encoding of 0.09 is 84.62, so 85 is the correctly rounded byte and
+/// is what this holds. **The Intel Vulkan driver here stores 84** — the same
+/// value rounded the other way, decided inside the driver and not by anything
+/// this crate can set. Rendering the same frame both ways puts the difference
+/// exactly there and nowhere else: coverage agrees pixel for pixel, and every
+/// undrawn pixel differs by one in blue.
+///
+/// Pinning this to 84 would pin it to one driver's rounding, so it stays at the
+/// correct value and `render`'s GPU-side check keeps its one unit of slack.
+/// [`Framebuffer::fraction_matching`] needs no slack, because on this path
+/// there is no encoding step between the clear and the read-back to be wrong
+/// about.
 pub const CLEAR: u32 = pack(80, 80, 85);
 
 /// Packs 8-bit channels into the `0x00RR_GGBB` a [`Framebuffer`] holds.
