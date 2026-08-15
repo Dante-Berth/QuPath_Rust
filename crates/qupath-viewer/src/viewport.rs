@@ -230,6 +230,32 @@ impl Viewport {
             .unwrap_or(&slide.levels()[0])
     }
 
+    /// The level to draw *underneath* while [`Viewport::level`]'s tiles load,
+    /// or `None` when there is nothing coarser to fall back to.
+    ///
+    /// This is the third piece of `docs/VIEWER.md` §3.4, and the one that is
+    /// usually skipped: without it a pan flashes the clear colour wherever a
+    /// tile has not landed yet, which reads as breakage rather than as loading.
+    /// Drawn first, the fine tiles paint over it as they arrive, so the view
+    /// degrades in *resolution* instead of in coverage.
+    ///
+    /// The coarsest level is the choice rather than the next one down, for two
+    /// reasons that both come from it being the cheapest thing in the pyramid:
+    /// a whole-screen view of it is a handful of tiles at any zoom, so it stays
+    /// resident in the cache across a pan that evicts everything else; and
+    /// having exactly one fallback level means the underlay is already loaded
+    /// by the time it is needed, which the next-level-down policy cannot
+    /// promise — that level is the one the *previous* frame was still loading.
+    ///
+    /// Back-to-front painting, not a texture-coordinate trick: each tile is
+    /// drawn at its own level's [`Viewport::tile_rect`], and the finer ones
+    /// cover the coarser ones because they are drawn after.
+    #[must_use]
+    pub fn underlay_level(self, slide: &Slide) -> Option<&Level> {
+        let coarsest = slide.levels().last()?;
+        (coarsest.index != self.level(slide).index).then_some(coarsest)
+    }
+
     /// Every tile of `level` the view touches, row-major.
     ///
     /// Clipped to the level, so panning past an edge yields fewer tiles rather
