@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 qupath-slide = { path = "../qupath-slide" }
 qupath-filters = { path = "../qupath-filters" }
+qupath-objects = { path = "../qupath-objects" }
 qupath-watershed = { path = "../qupath-watershed" }
 rayon.workspace = true
 thiserror.workspace = true

@@ -28,7 +28,7 @@
 //! origin comes back as the unit square `(0,0) (1,0) (1,1) (0,1)` rather than
 //! as the degenerate point `(0,0)`.
 //!
-//! That is what makes [`shoelace_area`] exactly the filled pixel count instead
+//! That is what makes [`shoelace_area_x2`] exactly the filled pixel count instead
 //! of approximately it, which is the assertion this module is tested with and
 //! is the same identity `overlaps.rs` relies on when it says counting shared
 //! pixels *is* the intersection area rather than an estimate of it.
@@ -40,7 +40,7 @@
 //! deliberate:
 //!
 //! - Vertices come out **clockwise** in image coordinates, where y runs down.
-//!   [`shoelace_area`] takes the absolute value, so nothing depends on this,
+//!   [`shoelace_area_x2`] takes the absolute value, so nothing depends on this,
 //!   but a caller feeding the ring to a fill rule does.
 //! - At a corner where the region touches itself only diagonally, preferring
 //!   the right turn walks *around* the pinch rather than through it — which

@@ -20,12 +20,19 @@
 //! measure: the merge, the shape split, the boundary refinement, and the area
 //! filter that runs on the objects those leave.
 //!
+//! **ROI vertices** used to be on that list and are not any more: [`contour`]
+//! traces a filled region to the polygon that bounds it, and
+//! [`run_collecting`] hands back [`Detections`] — outlines, bounding boxes and
+//! two measurements, columnar per §4. [`run`] is unchanged and still returns
+//! counts only, because it is the one that has to keep §6's memory bound.
+//!
 //! What is still absent:
 //!
-//! - **ROI vertices.** The masks are here; the polygons are not. QuPath's
-//!   `PathObject` geometry is the Wand's vertex list, so exporting objects needs
-//!   the contour and not just what it encloses.
 //! - **Cell expansion and measurement.** Neither changes the nucleus count.
+//! - **Boundary smoothing.** QuPath interpolates and simplifies each polygon
+//!   before anything else sees it; these outlines are the raw pixel boundary.
+//!   That is half of what `DIVERGENCES.md` D-008 is about, and having the
+//!   vertices is what makes it possible to look at for the first time.
 //!
 //! So [`Outcome::objects`] is now a count of the same objects QuPath's
 //! `roisNuclei` holds after its area filter — see `docs/ROADMAP.md` §1.5 for
@@ -43,6 +50,7 @@
 //! so that a test can assert it, as §6 requires.
 
 mod contour;
+mod detections;
 mod merge;
 mod objects;
 mod overlaps;
@@ -59,6 +67,7 @@ use qupath_watershed::{Connectivity, DistanceMap, Labeller, RegionTracer, Segmen
 use rayon::prelude::*;
 
 pub use contour::{shoelace_area_x2, trace_outline_into};
+pub use detections::{AREA, Detections, MEAN};
 pub use merge::{FOREGROUND, Merger};
 pub use objects::{Extent, ObjectFilter, RegionStats};
 pub use overlaps::{Candidate, resolve_overlaps};
@@ -438,6 +447,9 @@ struct Scratch {
     /// Bounding box and filled area of each traced candidate. Populated only
     /// when the region is tiled, since only a seam can need it.
     extents: Vec<Extent>,
+    /// One outline while it is being traced, reused for every object of every
+    /// tile. A `Vec` per object would be one allocation per detection.
+    ring: Vec<[u32; 2]>,
     blur: GaussianBlur,
     filter: RankFilter,
     convolver: Convolver,
@@ -483,6 +495,7 @@ impl Scratch {
             regions: Vec::new(),
             binary: Vec::new(),
             extents: Vec::new(),
+            ring: Vec::new(),
             blur: GaussianBlur::new(),
             // Sequential rows: this scratch is already inside one rayon job per
             // tile, and §6 forbids nesting. Nesting here also re-enters the
@@ -516,11 +529,54 @@ const LAPLACIAN: [f32; 9] = [0.0, -1.0, 0.0, -1.0, 4.0, -1.0, 0.0, -1.0, 0.0];
 /// accumulates across tiles, so peak memory is set by the thread count rather
 /// than by the size of the region.
 ///
+/// [`run_collecting`] is the same run with the objects kept.
+///
 /// # Errors
 ///
 /// Fails if the level does not exist, the region leaves it, or a tile cannot
 /// be decoded.
 pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, PipelineError> {
+    let (outcome, _) = run_inner(slide, region, params, false)?;
+    Ok(outcome)
+}
+
+/// The same run as [`run`], keeping the objects it found.
+///
+/// Every count in the returned [`Outcome`] is identical to what [`run`] gives
+/// for the same arguments — collecting changes nothing about what is detected,
+/// and `the_two_entry_points_agree_on_every_count` asserts it rather than
+/// asserting it in a comment. [`Detections::len`] equals [`Outcome::objects`],
+/// duplicates across tile seams already removed.
+///
+/// # Memory
+///
+/// This is the one function in the crate whose output grows with the region,
+/// which is why it is a separate entry point rather than a flag — see
+/// `detections`' module documentation. Budget roughly **250 bytes per object**
+/// and ask for a region rather than a slide.
+///
+/// # Errors
+///
+/// Fails if the level does not exist, the region leaves it, or a tile cannot
+/// be decoded.
+pub fn run_collecting(
+    slide: &Slide,
+    region: Region,
+    params: Params,
+) -> Result<(Outcome, Detections), PipelineError> {
+    let (outcome, detections) = run_inner(slide, region, params, true)?;
+    Ok((
+        outcome,
+        detections.expect("run_inner returns detections when asked for them"),
+    ))
+}
+
+fn run_inner(
+    slide: &Slide,
+    region: Region,
+    params: Params,
+    collect: bool,
+) -> Result<(Outcome, Option<Detections>), PipelineError> {
     let level = slide
         .levels()
         .get(params.level)
@@ -578,7 +634,7 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
     let padded: Vec<Region> = tiles.iter().map(|tile| tile.padded).collect();
 
     let started = Instant::now();
-    let outcomes: Result<Vec<Vec<Candidate>>, PipelineError> = tiles
+    let outcomes: Result<Vec<TileHarvest>, PipelineError> = tiles
         .par_iter()
         .enumerate()
         .map(|(index, tile)| {
@@ -717,53 +773,91 @@ pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, Pip
                 // thing a tile cannot decide alone: whether a neighbour found the
                 // same nucleus. Only objects reaching another tile's rectangle
                 // can, so only those get a mask built for them.
-                let seam =
-                    collect_seam_candidates(scratch, index, tile, &padded, width, found.nuclei);
-                Ok(seam)
+                Ok(harvest(
+                    scratch,
+                    index,
+                    tile,
+                    &padded,
+                    width,
+                    found.nuclei,
+                    collect.then_some(params.level),
+                ))
             })
         })
         .collect();
-    let seam_candidates = outcomes?;
+    let mut harvests = outcomes?;
 
     // `ParallelDetectionTileManager.postprocess`: every tile is done, so the
-    // duplicates in the overlap bands can now be resolved.
-    let mut seam_candidates: Vec<Candidate> = seam_candidates.into_iter().flatten().collect();
+    // duplicates in the overlap bands can now be resolved. The tiles' candidate
+    // lists are concatenated in tile order and each tile's offset into the
+    // result is kept, so a dead candidate can be traced back to the detection
+    // it came from.
+    let mut seam_candidates: Vec<Candidate> = Vec::new();
+    let mut offsets = Vec::with_capacity(harvests.len());
+    for harvest in &mut harvests {
+        offsets.push(seam_candidates.len());
+        seam_candidates.append(&mut harvest.seam);
+    }
     let duplicates = resolve_overlaps(&padded, &mut seam_candidates);
+
+    let detections = collect.then(|| {
+        let mut all = Detections::new(params.level);
+        for (harvest, &offset) in harvests.iter().zip(&offsets) {
+            let Some(tile) = harvest.detected.as_ref() else {
+                continue;
+            };
+            // Everything survives unless a seam candidate says otherwise, which
+            // is the same statement `Outcome::objects` makes by subtracting
+            // `duplicates` from a total.
+            let mut keep = vec![true; tile.len()];
+            for (at, &row) in harvest.seam_rows.iter().enumerate() {
+                if !seam_candidates[offset + at].alive() {
+                    keep[row as usize] = false;
+                }
+            }
+            all.append_kept(tile, &keep);
+        }
+        all.shrink_to_fit();
+        all
+    });
 
     let elapsed = started.elapsed().as_secs_f64();
 
-    Ok(Outcome {
-        tiles: tiles.len(),
-        pixels: pixels.load(Ordering::Relaxed),
-        markers: markers.load(Ordering::Relaxed),
-        labelled: labelled.load(Ordering::Relaxed),
-        regions: regions.load(Ordering::Relaxed),
-        candidates: candidates.load(Ordering::Relaxed),
-        merged: merged.load(Ordering::Relaxed),
-        nuclei: nuclei.load(Ordering::Relaxed),
-        objects: objects.load(Ordering::Relaxed) - u64::from(duplicates),
-        duplicates: u64::from(duplicates),
-        elapsed,
-        stages: Stages {
-            decode: seconds(&clocks.decode),
-            deconvolve: seconds(&clocks.deconvolve),
-            background: seconds(&clocks.background),
-            erode: seconds(&clocks.erode),
-            regrow: seconds(&clocks.regrow),
-            blur: seconds(&clocks.blur),
-            laplacian: seconds(&clocks.laplacian),
-            maxima: seconds(&clocks.maxima),
-            label: seconds(&clocks.label),
-            flood: seconds(&clocks.flood),
-            trace: seconds(&clocks.trace),
-            filter: seconds(&clocks.filter),
-            merge: seconds(&clocks.merge),
-            split: seconds(&clocks.split),
-            refine: seconds(&clocks.refine),
-            nuclei: seconds(&clocks.nuclei),
+    Ok((
+        Outcome {
+            tiles: tiles.len(),
+            pixels: pixels.load(Ordering::Relaxed),
+            markers: markers.load(Ordering::Relaxed),
+            labelled: labelled.load(Ordering::Relaxed),
+            regions: regions.load(Ordering::Relaxed),
+            candidates: candidates.load(Ordering::Relaxed),
+            merged: merged.load(Ordering::Relaxed),
+            nuclei: nuclei.load(Ordering::Relaxed),
+            objects: objects.load(Ordering::Relaxed) - u64::from(duplicates),
+            duplicates: u64::from(duplicates),
+            elapsed,
+            stages: Stages {
+                decode: seconds(&clocks.decode),
+                deconvolve: seconds(&clocks.deconvolve),
+                background: seconds(&clocks.background),
+                erode: seconds(&clocks.erode),
+                regrow: seconds(&clocks.regrow),
+                blur: seconds(&clocks.blur),
+                laplacian: seconds(&clocks.laplacian),
+                maxima: seconds(&clocks.maxima),
+                label: seconds(&clocks.label),
+                flood: seconds(&clocks.flood),
+                trace: seconds(&clocks.trace),
+                filter: seconds(&clocks.filter),
+                merge: seconds(&clocks.merge),
+                split: seconds(&clocks.split),
+                refine: seconds(&clocks.refine),
+                nuclei: seconds(&clocks.nuclei),
+            },
+            peak_resident_bytes: peak_resident_bytes(),
         },
-        peak_resident_bytes: peak_resident_bytes(),
-    })
+        detections,
+    ))
 }
 
 /// Gives `buffer` exactly `len` entries without rewriting the ones it already
@@ -950,7 +1044,27 @@ fn finish_objects(
     }
 }
 
-/// Builds the objects of one tile that another tile could also have found.
+/// What one tile hands back to the caller after every stage has run on it.
+///
+/// Two things, and only the first is ever needed: the candidates a neighbouring
+/// tile might have found a second copy of, and — when the caller asked for them
+/// — the objects themselves.
+struct TileHarvest {
+    /// Objects reaching another tile's rectangle, for [`resolve_overlaps`].
+    seam: Vec<Candidate>,
+    /// The row of [`TileHarvest::detected`] each entry of
+    /// [`TileHarvest::seam`] came from, in the same order.
+    ///
+    /// Empty when nothing was collected. This is the only thing tying a dead
+    /// candidate back to the detection it must delete, and the ordering is what
+    /// makes it a `u32` rather than a map: both lists are built in one pass.
+    seam_rows: Vec<u32>,
+    /// The tile's objects, when [`run_collecting`] asked for them.
+    detected: Option<Detections>,
+}
+
+/// Builds the objects of one tile that another tile could also have found, and
+/// optionally every object it found at all.
 ///
 /// A candidate matters to [`resolve_overlaps`] only if its bounding box reaches
 /// some other tile's rectangle. On this grid the overlap bands are 60 px of a
@@ -958,26 +1072,40 @@ fn finish_objects(
 /// without a mask — which is the difference between carrying pixel sets for
 /// every detection in the region and carrying them for the seams.
 ///
-/// Returns nothing at all for a single-tile run, where there is no seam.
-fn collect_seam_candidates(
+/// `collect` is the level to record detections in, or `None` to record none. It
+/// is a level rather than a `bool` because [`Detections`] is meaningless without
+/// knowing which pyramid level its coordinates are in.
+///
+/// Returns nothing at all for a single-tile run that asked for no detections,
+/// where there is neither a seam nor anything to keep.
+fn harvest(
     scratch: &mut Scratch,
     index: usize,
     tile: &Tile,
     padded: &[Region],
     width: usize,
     count: u32,
-) -> Vec<Candidate> {
-    if padded.len() < 2 {
-        return Vec::new();
+    collect: Option<usize>,
+) -> TileHarvest {
+    let seams_exist = padded.len() > 1;
+    let mut detected = collect.map(Detections::new);
+    if !seams_exist && detected.is_none() {
+        return TileHarvest {
+            seam: Vec::new(),
+            seam_rows: Vec::new(),
+            detected: None,
+        };
     }
 
     let mut extents = std::mem::take(&mut scratch.extents);
     scratch
         .objects
         .extents_into(&scratch.regions, width, count, &mut extents);
+    let mut ring = std::mem::take(&mut scratch.ring);
 
     let origin = (tile.padded.x, tile.padded.y);
     let mut seam = Vec::new();
+    let mut seam_rows = Vec::new();
     for (at, extent) in extents.iter().enumerate() {
         if !scratch.objects.kept()[at] || extent.area == 0 {
             continue;
@@ -988,14 +1116,33 @@ fn collect_seam_candidates(
             width: extent.width,
             height: extent.height,
         };
-        let reaches_a_seam = padded
-            .iter()
-            .enumerate()
-            .any(|(other, rect)| other != index && overlaps::intersect(bounds, *rect).is_some());
+        let region_index = u32::try_from(at + 1).expect("region count fits u32");
+
+        // Traced before the seam test, because a collected object is kept
+        // whether or not it reaches one and the two lists must stay aligned.
+        let row = detected.as_mut().map(|detected| {
+            ring.clear();
+            contour::trace_outline_into(
+                &scratch.regions,
+                width,
+                region_index,
+                *extent,
+                origin,
+                &mut ring,
+            );
+            // The mean the area filter already computed, not a second pass over
+            // the pixels: a detection's measurement and the reason it survived
+            // cannot then disagree.
+            detected.push(bounds, &ring, extent.area, scratch.objects.stats()[at].mean)
+        });
+
+        let reaches_a_seam = seams_exist
+            && padded.iter().enumerate().any(|(other, rect)| {
+                other != index && overlaps::intersect(bounds, *rect).is_some()
+            });
         if !reaches_a_seam {
             continue;
         }
-        let region_index = u32::try_from(at + 1).expect("region count fits u32");
         seam.push(Candidate::new(
             u32::try_from(index).expect("tile count fits u32"),
             region_index,
@@ -1004,10 +1151,18 @@ fn collect_seam_candidates(
             width,
             origin,
         ));
+        if let Some(row) = row {
+            seam_rows.push(u32::try_from(row).expect("object count fits u32"));
+        }
     }
 
     scratch.extents = extents;
-    seam
+    scratch.ring = ring;
+    TileHarvest {
+        seam,
+        seam_rows,
+        detected,
+    }
 }
 
 /// Estimates the background and subtracts it from `scratch.density`, in place.
