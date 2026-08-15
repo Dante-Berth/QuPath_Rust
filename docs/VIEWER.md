@@ -17,7 +17,8 @@ about that.
 - **Not a QuPath replacement.** No project format, no annotation editing, no
   scripting. If those are ever wanted they are a separate decision. There is an
   application now — `crates/qupath-app`, §3.6 — and it does not change this:
-  it opens a slide and looks at it.
+  it opens a slide, looks at it, and runs detection over what is on screen.
+  Nothing it finds is saved, exported or editable, which is the line.
 - **Not a performance lever.** The two remaining levers are in `ROADMAP.md` §4:
   pyramid-level selection on whole slides, and touching less memory per tile.
   This project *uses* the first one but does not deliver it.
@@ -123,6 +124,10 @@ take a slide path defaulting to `data/CMU-1.svs`.
 # The application. A toolbar, a file dialog, a status bar, and a message when a
 # slide will not open rather than an exit. A path on the command line is opened
 # at startup; without one it comes up asking for a slide.
+#
+# Drag to pan, scroll to zoom, f to fit. `d` detects cells in what is on screen
+# and `h` hides the outlines again; the run happens on another thread, so the
+# view keeps moving while it works.
 cargo run -p qupath-app --release
 cargo run -p qupath-app --release -- data/CMU-1.svs
 
@@ -520,9 +525,11 @@ anything sees them.
 ### 3.6 An application — **partly done**
 
 `crates/qupath-app`. The viewer with an interface rather than a title bar: a
-File menu with a dialog and a recent list, Fit / 1:1 / zoom buttons, a status
-bar carrying the level, the downsample, the cursor in slide pixels, the tiles
-drawn, resident megabytes, what the loader still owes, and the mean frame cost.
+File menu with a dialog and a recent list, Fit / 1:1 / zoom buttons, a
+`Detect cells` button, and a status bar carrying the level, the downsample, the
+cursor in slide pixels, the tiles drawn, resident megabytes, what the loader
+still owes, how many outlines the frame drew of how many were found, and the
+mean frame cost.
 
 Nothing about the viewer is reimplemented — `Viewport`, `TileLoader`,
 `TileCache` and `compose` come straight from the library, and what this crate
@@ -540,10 +547,71 @@ reason this is a separate crate rather than a flag on `window.rs`:
 - **No slide is a state, not a blank window.** An empty grey rectangle is the
   commonest way an idle application looks broken.
 
-Measured: it opens `CMU-1.svs`, draws the fit view, and then sits at **0% of one
-core** across three 3-second samples with the window up. The 98% a first
-measurement showed was `ps` reporting a lifetime average dominated by the
-startup decode, which is a reminder that `%cpu` is not an instantaneous figure.
+#### The idle claim, which was wrong twice
+
+This section first recorded **0% of one core** at rest, and that was measured
+with `ps`. It was wrong: the window was running at **90 frames a second and
+100% of one core** on a still picture, and had been since the chrome went in.
+
+The bug is worth stating exactly, because it is a shape that recurs.
+`egui_winit::State::on_window_event` was being handed *every* window event,
+`RedrawRequested` among them. `egui` answers that one with `repaint: true` — it
+is the answer to a redraw request, not a reason for one — so rendering a frame
+asked for the next: render, receive `RedrawRequested`, request a redraw. A loop
+that needs no input to keep itself running, which is exactly what
+`ControlFlow::Wait` is set to prevent.
+
+What let it stand was the instrument. `ps` reports `%cpu` as a *lifetime
+average*, and this section had already been caught by that once — the 98% a
+first measurement showed really was startup decode dominating the average. The
+correction drawn from it was "the number is inflated by startup", when the
+lesson available was "this number cannot answer this question at all". Read
+instead as a delta of `utime + stime` from `/proc/<pid>/stat` over a fixed
+interval, the spin is unmissable and the fix is verifiable: 0%, sustained,
+across four 3-second samples.
+
+A measurement that agrees with what you expected is not evidence that the
+instrument works. This one printed a passing grade for a milestone, and §6's
+`fraction_matching` did the same thing two milestones earlier.
+
+#### Detection, wired to a button
+
+`Detect cells` runs `run_collecting` over what the window is showing and draws
+the outlines it finds; `h` hides them without re-running, and `d` starts a run.
+The pipeline call and the `Overlay` are unchanged from what §3.5 built, so
+`crates/qupath-app/src/detect.rs` is two decisions and no new geometry.
+
+**The region is the view, at the level the viewer is showing it at** — not at
+level 0. That is what makes the button's cost independent of the zoom, and it
+is the whole reason the feature is usable: on `CMU-1.svs` a fitted view reads
+level 2, where the entire slide is 5.6 Mpx and the run takes **1.24 s**, while
+the same view at level 0 is 1.5 Gpx. A 1:1 view of tissue is 1.05 Mpx and
+**0.38 s** for 1357 nuclei. `region_for` is a pure function of a viewport and a
+level — the conversion into level pixels, the clip to the level, the cap, and a
+view panned off the slide are all unit tests with no slide and no window.
+
+The cap exists but does not fire in normal use, and the test says so rather
+than the comment: the viewer reads the level that matches the zoom, so the
+pixels behind a window stay near the window's own size at every scale.
+
+**A result must never outlive the slide it was found on.** Outlines are in that
+slide's coordinates, so drawing them over a different slide puts plausible
+nuclei in arbitrary places — wrong in the way that looks right, which is the
+failure this whole file is written against. `Detector::generation` closes it,
+the same device `loader` uses for tiles: opening or closing a slide bumps the
+generation, and a run that finishes afterwards is dropped unread.
+
+Verified against a real slide at three zooms: the overlay's extent lands inside
+the requested region in slide coordinates every time. That is the assertion
+that catches a downsample applied wrongly, which is otherwise invisible — every
+nucleus is drawn at a plausible-looking place that is not the right one.
+
+**What is not offered:** no cancellation and no progress fraction.
+`run_collecting` is one synchronous call with nothing to poll and nothing to
+interrupt, so the status bar reports what is actually known — a run is going,
+and how long it has been going. A bar advancing on a timer would be an
+invention, and starting a second run supersedes the first rather than stopping
+it.
 
 **What is not done**, stated rather than left to be discovered:
 
@@ -552,12 +620,17 @@ startup decode, which is a reminder that `%cpu` is not an instantaneous figure.
   until they are moved together; the software path needs no wgpu at all, so it
   went first. Composition is 1.27 ms against a 16.7 ms frame (§3.4b), so this
   is a missing optimisation and not a missing feature.
-- **No detection button.** `run_collecting` and `Overlay` exist and
-  `examples/render.rs` drives them end to end, so what is left is a background
-  thread and a progress bar rather than anything unknown.
+- **Detection cannot be interrupted**, per above. A run over a region the cap
+  had to shrink is the case that would want it, and that case is currently
+  unreachable from the interface.
+- **A coarse run gives coarse outlines.** A nucleus detected at level 2 is
+  traced in level-2 pixels and scaled up, so it is blocky when zoomed back in.
+  This is honest — the run never read the detail — but it means the outlines
+  and the tiles under them can disagree in resolution, and nothing says so in
+  the window beyond the level in the status line.
 - **Appearance is unchecked**, as everything in §6 says it is. The window opens,
-  holds its tiles, reports its numbers and idles; how it *looks* has not been
-  seen.
+  holds its tiles, reports its numbers, draws its outlines and idles; how it
+  *looks* has not been seen.
 
 ## 4. The two things that will bite
 
@@ -667,6 +740,25 @@ than the intent. The clear colour is now encoded exactly the way the GPU encodes
 it and matched with one unit of slack. The lesson is not about sRGB: a check
 that has never failed has never been shown to work, and this one had been
 printing a passing grade for two milestones.
+
+#### The same failure, with a different instrument
+
+§3.6's idle-CPU number was the second instance, and it is here because two
+instances make a pattern rather than an anecdote. The window was spinning at
+100% of one core; `ps` reported 0%, and 0% was believed because it was the
+answer expected.
+
+The two share a shape. Neither check could *fail* — `fraction_matching`
+compared against a value nothing could ever equal, and `ps` averages over a
+process's lifetime so a spin that starts after a slow launch is diluted away.
+Both were read as confirmations for as long as they agreed with the intent, and
+in both cases the disagreement, once looked at, took minutes to find.
+
+The rule this yields is narrower than "test more" and is worth stating: **before
+trusting a measurement, know what value would have made it fail, and check that
+that value is reachable.** For the coverage check, no byte value was. For `ps`,
+no idle process is — its `%cpu` cannot distinguish "asleep now" from "was busy
+once". A number that cannot come out wrong is not evidence.
 
 ## 7. Open questions
 
