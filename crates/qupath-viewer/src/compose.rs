@@ -238,6 +238,89 @@ impl Framebuffer {
         }
     }
 
+    /// Draws line segments in `colour`, clipped to the frame.
+    ///
+    /// `segments` is what [`crate::Overlay::segments_into`] produces: pairs of
+    /// screen-space points, `segments[0]` to `segments[1]` being one line. A
+    /// trailing odd point is ignored rather than joined to anything.
+    ///
+    /// Lines are one pixel wide and unblended, and a pixel is set when the line
+    /// passes through it — the same "which pixel does this point fall in" rule
+    /// [`Framebuffer::draw_tile`] uses, so an outline and the tile beneath it
+    /// cannot be a half pixel apart.
+    ///
+    /// # What this deliberately does not match
+    ///
+    /// The GPU path draws these as a `LineList`, and GPU line rasterisation is
+    /// implementation-defined — the specification allows a *range* of rules, so
+    /// two drivers may light different pixels for the same segment and neither
+    /// is wrong. Tiles are byte-identical across the two backends
+    /// (`docs/VIEWER.md` §3.4b) and outlines are **not**, and that is a
+    /// property of lines rather than a defect here. What stays assertable is
+    /// where an outline lands, which is what the tests below check.
+    pub fn draw_segments(&mut self, segments: &[crate::ScreenPoint], colour: u32) {
+        for pair in segments.chunks_exact(2) {
+            self.draw_line(pair[0], pair[1], colour);
+        }
+    }
+
+    /// One clipped line, by a DDA over the longer axis.
+    fn draw_line(&mut self, from: crate::ScreenPoint, to: crate::ScreenPoint, colour: u32) {
+        if self.width == 0 || self.height == 0 {
+            return;
+        }
+        let (mut x0, mut y0) = (f64::from(from.x), f64::from(from.y));
+        let (mut x1, mut y1) = (f64::from(to.x), f64::from(to.y));
+        if !(x0.is_finite() && y0.is_finite() && x1.is_finite() && y1.is_finite()) {
+            return;
+        }
+
+        // Clipped *before* stepping, not by testing each pixel. A viewport
+        // zoomed far in puts an outline's endpoints millions of pixels outside
+        // the window, and a DDA that walks from one to the other spends the
+        // frame discarding pixels it never had any chance of drawing.
+        if !clip_to(&mut x0, &mut y0, &mut x1, &mut y1, self.width, self.height) {
+            return;
+        }
+
+        let (dx, dy) = (x1 - x0, y1 - y0);
+        // One step per pixel of the longer axis, so no pixel of the line is
+        // skipped and none is written more than twice.
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "both deltas are clipped to the frame, so this is below its diagonal"
+        )]
+        let steps = dx.abs().max(dy.abs()).ceil() as usize;
+        for step in 0..=steps {
+            let along = if steps == 0 {
+                0.0
+            } else {
+                step as f64 / steps as f64
+            };
+            self.set(x0 + dx * along, y0 + dy * along, colour);
+        }
+    }
+
+    /// Sets the pixel a screen-space point falls in, if it is on the frame.
+    fn set(&mut self, x: f64, y: f64, colour: u32) {
+        // `floor` and not a cast: a cast truncates towards zero, so everything
+        // in `-1.0..0.0` would land in column 0 and an outline just off the left
+        // edge would smear down it.
+        let (column, row) = (x.floor(), y.floor());
+        if column < 0.0 || row < 0.0 {
+            return;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "non-negative, and compared against the frame size below"
+        )]
+        let (column, row) = (column as usize, row as usize);
+        if column >= self.width as usize || row >= self.height as usize {
+            return;
+        }
+        self.pixels[row * self.width as usize + column] = colour;
+    }
+
     /// The fraction of the frame holding `colour`, in `0.0..=1.0`.
     ///
     /// Against [`CLEAR`] this is "how much of this frame was never drawn", which
@@ -270,6 +353,63 @@ impl Framebuffer {
             ]);
         }
     }
+}
+
+/// Clips a segment to the frame in place, returning whether any of it survives.
+///
+/// Liang–Barsky, which trims the parameter range rather than walking the
+/// endpoints in: one pass over four half-planes, no iteration, and it cannot
+/// loop forever on a segment whose endpoints are both far outside.
+///
+/// The box is the frame's pixel area — `0..width` by `0..height` — because
+/// [`Framebuffer::set`] floors a coordinate into a pixel, so a point at exactly
+/// `width` is one past the end and a point at `width - 0.001` is the last
+/// column.
+fn clip_to(
+    x0: &mut f64,
+    y0: &mut f64,
+    x1: &mut f64,
+    y1: &mut f64,
+    width: u32,
+    height: u32,
+) -> bool {
+    let (dx, dy) = (*x1 - *x0, *y1 - *y0);
+    let (mut enter, mut leave) = (0.0f64, 1.0f64);
+    for (edge, distance) in [
+        (-dx, *x0),
+        (dx, f64::from(width) - *x0),
+        (-dy, *y0),
+        (dy, f64::from(height) - *y0),
+    ] {
+        if edge == 0.0 {
+            // Parallel to this edge: either wholly inside it or wholly outside.
+            if distance < 0.0 {
+                return false;
+            }
+            continue;
+        }
+        let at = distance / edge;
+        if edge < 0.0 {
+            if at > leave {
+                return false;
+            }
+            enter = enter.max(at);
+        } else {
+            if at < enter {
+                return false;
+            }
+            leave = leave.min(at);
+        }
+    }
+    if enter > leave {
+        return false;
+    }
+    let (from_x, from_y) = (*x0, *y0);
+    *x1 = from_x + dx * leave;
+    *y1 = from_y + dy * leave;
+    *x0 = from_x + dx * enter;
+    *y0 = from_y + dy * enter;
+    true
 }
 
 /// The first destination pixel whose centre is at or past `edge`, clamped to
@@ -491,6 +631,185 @@ mod tests {
             #[expect(clippy::cast_possible_truncation, reason = "source is below 16")]
             let expected = pack(source as u8, 0, source as u8);
             assert_eq!(frame.pixels()[column as usize], expected, "at {column}");
+        }
+    }
+
+    fn point(x: f32, y: f32) -> crate::ScreenPoint {
+        crate::ScreenPoint::new(x, y)
+    }
+
+    /// Which pixels of a frame are not the clear colour, as `(column, row)`.
+    fn lit(frame: &Framebuffer) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        for row in 0..frame.height() {
+            for column in 0..frame.width() {
+                if frame.pixels()[(row * frame.width() + column) as usize] != CLEAR {
+                    out.push((column, row));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn an_axis_aligned_segment_lights_exactly_the_pixels_it_crosses() {
+        // The one case with a single right answer, so it is asserted as an
+        // equality rather than as a property. Anything else — an inclusive end,
+        // a truncating cast, a half-pixel offset — changes this list.
+        let mut frame = Framebuffer::new(8, 4);
+        frame.draw_segments(&[point(2.5, 1.5), point(5.5, 1.5)], pack(255, 0, 0));
+        assert_eq!(lit(&frame), vec![(2, 1), (3, 1), (4, 1), (5, 1)]);
+
+        let mut frame = Framebuffer::new(4, 8);
+        frame.draw_segments(&[point(1.5, 6.5), point(1.5, 3.5)], pack(255, 0, 0));
+        assert_eq!(lit(&frame), vec![(1, 3), (1, 4), (1, 5), (1, 6)]);
+    }
+
+    #[test]
+    fn a_segment_is_drawn_the_same_way_round_either_way() {
+        // A ring is walked in one direction and its edges in another; a
+        // rasteriser whose output depends on the order of the endpoints leaves
+        // a seam wherever two objects share one.
+        let ends = [point(1.2, 0.8), point(6.7, 3.4)];
+        let mut forwards = Framebuffer::new(8, 5);
+        forwards.draw_segments(&ends, pack(0, 255, 0));
+        let mut backwards = Framebuffer::new(8, 5);
+        backwards.draw_segments(&[ends[1], ends[0]], pack(0, 255, 0));
+        assert_eq!(lit(&forwards), lit(&backwards));
+    }
+
+    #[test]
+    fn a_segment_has_no_gaps() {
+        // A DDA that steps the shorter axis skips pixels on the longer one, and
+        // the result is a dashed outline that reads as a rendering artefact.
+        // Every lit pixel must touch the next along the major axis.
+        for (from, to) in [
+            (point(0.5, 0.5), point(31.5, 7.5)),
+            (point(0.5, 7.5), point(31.5, 0.5)),
+            (point(0.5, 0.5), point(31.5, 31.5)),
+            (point(30.9, 1.1), point(1.1, 30.9)),
+        ] {
+            let mut frame = Framebuffer::new(32, 32);
+            frame.draw_segments(&[from, to], pack(255, 255, 255));
+            let mut columns: Vec<u32> = lit(&frame).iter().map(|&(x, _)| x).collect();
+            columns.sort_unstable();
+            columns.dedup();
+            for pair in columns.windows(2) {
+                assert_eq!(pair[1] - pair[0], 1, "column gap in {from:?}..{to:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_segment_outside_the_frame_writes_nothing() {
+        // Panning puts most of an overlay off screen on every frame, and a
+        // viewport zoomed in puts the endpoints millions of pixels away.
+        for (from, to) in [
+            (point(-50.0, -50.0), point(-10.0, -10.0)),
+            (point(100.0, 5.0), point(200.0, 5.0)),
+            (point(5.0, -100.0), point(5.0, -1.0)),
+            (point(-1e9, 4.0), point(-1e6, 4.0)),
+            (point(f32::NAN, 0.0), point(4.0, 4.0)),
+            (point(0.0, 0.0), point(f32::INFINITY, 4.0)),
+        ] {
+            let mut frame = Framebuffer::new(16, 16);
+            frame.draw_segments(&[from, to], pack(255, 0, 0));
+            assert_eq!(
+                frame.fraction_matching(CLEAR),
+                1.0,
+                "{from:?}..{to:?} drew something"
+            );
+        }
+    }
+
+    #[test]
+    fn a_segment_crossing_the_frame_is_clipped_rather_than_wrapped() {
+        // The stride bug in its overlay form: a line running off the right edge
+        // reappearing on the left of the next row. Every lit pixel must be on
+        // the row the line actually passes through.
+        let mut frame = Framebuffer::new(16, 16);
+        frame.draw_segments(&[point(-1000.0, 8.5), point(1000.0, 8.5)], pack(255, 0, 0));
+        assert_eq!(
+            lit(&frame),
+            (0..16).map(|column| (column, 8)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_far_away_segment_costs_no_more_than_a_near_one() {
+        // What the clip is for. Without it the DDA walks from one endpoint to
+        // the other regardless of where they are, and an outline at 32x zoom
+        // takes millions of steps to draw the four pixels it covers. Asserted
+        // as time because the cost is the whole point and nothing else observes
+        // it.
+        let mut frame = Framebuffer::new(64, 64);
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            frame.draw_segments(&[point(-4e7, 32.5), point(4e7, 32.5)], pack(1, 2, 3));
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "1000 clipped segments took {elapsed:?}, so the clip is not running"
+        );
+    }
+
+    #[test]
+    fn a_degenerate_segment_lights_one_pixel() {
+        let mut frame = Framebuffer::new(8, 8);
+        frame.draw_segments(&[point(3.5, 4.5), point(3.5, 4.5)], pack(255, 0, 0));
+        assert_eq!(lit(&frame), vec![(3, 4)]);
+    }
+
+    #[test]
+    fn an_odd_trailing_point_is_ignored() {
+        // `segments_into` always produces pairs, but this is public and a
+        // caller building its own list should not get a line from the last
+        // point to nowhere.
+        let mut frame = Framebuffer::new(8, 8);
+        frame.draw_segments(
+            &[point(1.5, 1.5), point(5.5, 1.5), point(3.5, 6.5)],
+            pack(9, 9, 9),
+        );
+        assert_eq!(lit(&frame), vec![(1, 1), (2, 1), (3, 1), (4, 1), (5, 1)]);
+    }
+
+    #[test]
+    fn an_outline_lands_on_the_tile_pixels_it_covers() {
+        // The claim `docs/VIEWER.md` §6 can actually make about an overlay:
+        // not that it looks right, but that it is *where the slide says*. A
+        // tile is drawn at 1:1 and a segment is drawn along the slide
+        // coordinate of one of its rows; the lit pixels must be the ones the
+        // tile put that row in.
+        let mut rgba = Vec::new();
+        for row in 0..8u8 {
+            for column in 0..8u8 {
+                rgba.extend_from_slice(&[column, row, 0, 255]);
+            }
+        }
+        let mut frame = Framebuffer::new(16, 16);
+        frame.draw_tile((4.0, 4.0, 8.0, 8.0), &rgba, 8, 8);
+
+        // Tile row 3 occupies frame row 7, so a segment along its centre must
+        // light exactly the frame pixels holding that row of the tile.
+        frame.draw_segments(&[point(4.5, 7.5), point(11.5, 7.5)], pack(255, 0, 255));
+        for column in 4..12u32 {
+            assert_eq!(
+                frame.pixels()[(7 * 16 + column) as usize],
+                pack(255, 0, 255),
+                "the outline missed frame column {column}"
+            );
+        }
+        // And the tile row above it is untouched, so the line is one pixel wide
+        // and on the row it was asked for.
+        for column in 4..12u32 {
+            #[expect(clippy::cast_possible_truncation, reason = "columns run 4..12")]
+            let expected = pack((column - 4) as u8, 2, 0);
+            assert_eq!(
+                frame.pixels()[(6 * 16 + column) as usize],
+                expected,
+                "the outline bled onto frame column {column} of the row above"
+            );
         }
     }
 
