@@ -13,10 +13,9 @@
 //! reimplemented; what this crate adds is chrome and the event loop that drives
 //! it.
 //!
-//! Detection is **not** wired to a button. `qupath_pipeline::run_collecting`
-//! and [`qupath_viewer::Overlay`] exist and `examples/render.rs` drives them end
-//! to end, so the remaining work is a background thread and a progress bar
-//! rather than anything unknown.
+//! Detection is a button, and [`detect`] is what it presses: a run of
+//! `qupath_pipeline::run_collecting` over what the window is showing, on a
+//! thread, drawn as a [`qupath_viewer::Overlay`] when it lands.
 //!
 //! # Why the interface is drawn twice
 //!
@@ -42,6 +41,7 @@
 //! decodes JPEG tiles slowly enough to be annoying.
 
 mod chrome;
+mod detect;
 mod state;
 
 use std::sync::Arc;

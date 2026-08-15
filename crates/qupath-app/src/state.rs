@@ -27,6 +27,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::Window;
 
 use crate::chrome::{self, Command};
+use crate::detect::Detector;
 
 /// Texture budget, in bytes. Roughly two thousand tiles.
 const BUDGET: usize = 512 << 20;
@@ -39,6 +40,24 @@ const WINDOW: usize = 30;
 
 /// How many slides the recent list keeps.
 const RECENT: usize = 8;
+
+/// Screen pixels an object's bounding box must reach before its outline is
+/// drawn.
+///
+/// The same value `examples/render.rs` uses, and for the reason `overlay`'s
+/// module documentation gives: below this an outline is a dot, and a screenful
+/// of them is a smear that costs more than the tiles underneath it and says
+/// less.
+const MIN_OVERLAY_PX: f32 = 2.0;
+
+/// The colour outlines are drawn in.
+///
+/// Yellow-green, which is what QuPath defaults a detection to and is chosen the
+/// same way: H&E is pink and purple, so an outline in this never disappears
+/// into the tissue it is drawn on. Packed through `compose::pack` rather than
+/// written as a literal, so the channel order is the compositor's statement of
+/// it and not this module's guess.
+const OVERLAY_COLOUR: u32 = compose::pack(200, 255, 0);
 
 /// One tile and where it goes, in window pixels — the draw list, in the same
 /// shape `examples/window.rs` builds it.
@@ -154,6 +173,19 @@ pub struct App {
     cursor: ScreenPoint,
     costs: Vec<Duration>,
     pub show_overlay: bool,
+    /// Detection, and what the last run found.
+    ///
+    /// On [`App`] rather than on [`Open`] because it outlives one: a run
+    /// started against a slide that is then closed still has a thread to finish
+    /// and a result to discard, and [`Detector::clear`] is what makes closing
+    /// the slide discard it rather than draw it over the next one.
+    pub detector: Detector,
+    /// Screen-space line segments of the visible outlines, rebuilt every frame
+    /// and reused across them — `segments_into` clears rather than appends, so
+    /// this allocates once and then holds its capacity.
+    segments: Vec<ScreenPoint>,
+    /// Objects the last frame drew an outline for, for the status bar.
+    pub outlined: usize,
 }
 
 impl App {
@@ -174,6 +206,9 @@ impl App {
             cursor: ScreenPoint::new(0.0, 0.0),
             costs: Vec::new(),
             show_overlay: true,
+            detector: Detector::new(),
+            segments: Vec::new(),
+            outlined: 0,
         }
     }
 
@@ -209,6 +244,10 @@ impl App {
         let (width, height) = self.size();
         match Open::new(path.clone(), width, height) {
             Ok(open) => {
+                // Before the slide is replaced, not after. Outlines are in the
+                // *old* slide's coordinates, and a set of nuclei drawn over a
+                // different slide is wrong in the way that looks right.
+                self.detector.clear();
                 let name = display_name(&open.path);
                 self.message = format!("{name} — {}", describe(open.slide()));
                 self.recent.retain(|recent| recent != &path);
@@ -253,6 +292,12 @@ impl App {
     /// picture.
     pub fn wants_another_frame(&self) -> bool {
         self.pending.is_some()
+            // A run in flight sends nothing until it finishes, so there is no
+            // event to wake the loop on: the frames while one is going are what
+            // turns the spinner and, at the end, what notices the result. This
+            // is the one thing in the application that spends CPU to show that
+            // something is happening.
+            || self.detector.is_running()
             || self
                 .open
                 .as_ref()
@@ -326,6 +371,10 @@ impl App {
                 true
             }
             Key::Character("d") => {
+                self.run(Command::Detect, window);
+                true
+            }
+            Key::Character("h") => {
                 self.show_overlay = !self.show_overlay;
                 true
             }
@@ -366,8 +415,16 @@ impl App {
             }
             Command::Close => {
                 self.open = None;
+                self.detector.clear();
                 self.message = String::from("Open a slide to begin.");
             }
+            Command::Detect => {
+                if let Some(open) = &self.open {
+                    let level = open.view.level(open.slide()).clone();
+                    self.detector.start(&open.path, &level, open.view);
+                }
+            }
+            Command::ToggleOverlay => self.show_overlay = !self.show_overlay,
             Command::Fit => {
                 if let Some(open) = &mut self.open {
                     let (width, height) = (open.view.width, open.view.height);
@@ -402,6 +459,11 @@ impl App {
             return;
         }
         self.request_tiles();
+        // Before the interface is laid out, so a run that finished since the
+        // last frame is reported by *this* frame's status bar rather than the
+        // next one — the same reason the interface is laid out before the frame
+        // is drawn.
+        self.detector.poll();
 
         // The interface is laid out *before* the frame is drawn, because the
         // commands it produces change what the frame shows — a fit pressed this
@@ -506,6 +568,19 @@ impl App {
         }
         let drawn = draws.len();
 
+        // The overlay's segments, projected before the framebuffer is borrowed
+        // for the same reason the tiles are: the detector and the surface are
+        // both fields of `self`, and drawing straight out of one into the other
+        // borrows all of it.
+        let mut outlined = 0;
+        if let (true, Some(open), Some(overlay)) =
+            (self.show_overlay, &self.open, &self.detector.overlay)
+        {
+            outlined = overlay.segments_into(open.view, MIN_OVERLAY_PX, &mut self.segments);
+        } else {
+            self.segments.clear();
+        }
+
         let Some(state) = &mut self.surface else {
             return;
         };
@@ -516,6 +591,11 @@ impl App {
                 .draw_tile(*rect, &tile.pixels, tile.width, tile.height);
         }
         drop(draws);
+        // Over the tiles and under the chrome. A panel drawn first would have
+        // outlines run across it, which is the one ordering mistake here that
+        // looks like a rendering bug rather than a layering one.
+        state.frame.draw_segments(&self.segments, OVERLAY_COLOUR);
+        self.outlined = outlined;
         if let Some(open) = &mut self.open {
             open.drawn = drawn;
         }

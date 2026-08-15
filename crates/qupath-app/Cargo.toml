@@ -11,6 +11,7 @@ rust-version.workspace = true
 bytemuck = "1"
 egui = "0.33"
 egui-winit = "0.33"
+qupath-pipeline = { version = "0.1.0", path = "../qupath-pipeline" }
 qupath-slide = { version = "0.1.0", path = "../qupath-slide" }
 qupath-viewer = { version = "0.1.0", path = "../qupath-viewer" }
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }

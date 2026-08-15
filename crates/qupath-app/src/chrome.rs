@@ -30,6 +30,10 @@ pub enum Command {
     Zoom(i32),
     /// One screen pixel per slide pixel.
     Actual,
+    /// Detect cells in what the view is showing, replacing any run going.
+    Detect,
+    /// Show or hide the outlines of what was detected, without re-running.
+    ToggleOverlay,
 }
 
 /// Sets the look once, at startup.
@@ -101,6 +105,9 @@ pub fn draw(context: &egui::Context, app: &App) -> Command {
             });
 
             ui.separator();
+            detection(ui, app, &mut command);
+
+            ui.separator();
             ui.label(
                 egui::RichText::new(match &app.open {
                     Some(open) => display_name(&open.path),
@@ -148,6 +155,27 @@ pub fn draw(context: &egui::Context, app: &App) -> Command {
                     ui.label(format!("{outstanding} loading"));
                 }
 
+                if let Some(overlay) = &app.detector.overlay
+                    && app.show_overlay
+                {
+                    ui.separator();
+                    // Drawn against found, not just found. The gap between them
+                    // is the culling in `Overlay::segments_into` doing its job,
+                    // and it is the number that explains why zooming out stops
+                    // showing outlines rather than leaving it to look like a
+                    // bug.
+                    ui.label(format!("{} of {} outlined", app.outlined, overlay.len()))
+                        .on_hover_text(
+                            "Objects whose outline this frame drew, against how many the \
+                             last run found. Objects off screen, or too small to see, are \
+                             not drawn.",
+                        );
+                }
+                if let Some(detection) = &app.detector.message {
+                    ui.separator();
+                    ui.label(egui::RichText::new(detection).weak());
+                }
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some(cost) = app.frame_cost() {
                         // Main-thread time only, and said so: it excludes the
@@ -185,6 +213,51 @@ pub fn draw(context: &egui::Context, app: &App) -> Command {
         });
 
     command
+}
+
+/// The detection controls: run it, and show or hide what it found.
+///
+/// The button is disabled while a run is going *and* says so in its label,
+/// because a control that is merely greyed out is indistinguishable from one
+/// that is broken. The elapsed time is what stands in for a progress fraction:
+/// `run_collecting` reports nothing until it returns, and a bar that advanced
+/// on a timer would be an invention rather than a measurement — see `detect`'s
+/// module documentation.
+fn detection(ui: &mut egui::Ui, app: &App, command: &mut Command) {
+    let running = app.detector.is_running();
+    ui.add_enabled_ui(app.open.is_some() && !running, |ui| {
+        if ui
+            .button("Detect cells")
+            .on_hover_text(
+                "Run cell detection over what is on screen (d). \
+                 It runs on another thread, so the view keeps moving.",
+            )
+            .clicked()
+        {
+            *command = Command::Detect;
+        }
+    });
+
+    if running {
+        ui.add(egui::Spinner::new().size(14.0));
+        if let Some(elapsed) = app.detector.elapsed() {
+            ui.label(
+                egui::RichText::new(format!("detecting… {:.0} s", elapsed.as_secs_f64())).weak(),
+            );
+        }
+    } else if let Some(overlay) = &app.detector.overlay {
+        // Only once there is something to show or hide. A toggle for an overlay
+        // that does not exist is a control with no effect, which is worse than
+        // an absent one.
+        let mut shown = app.show_overlay;
+        if ui
+            .checkbox(&mut shown, "Outlines")
+            .on_hover_text(format!("Show the {} detected outlines (h)", overlay.len()))
+            .changed()
+        {
+            *command = Command::ToggleOverlay;
+        }
+    }
 }
 
 /// What fills the window before a slide is open.
