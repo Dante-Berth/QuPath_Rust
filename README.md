@@ -155,12 +155,17 @@ what to distrust, in one page.
 
 ```sh
 # Drag to pan, scroll to zoom, f to fit, escape to quit. The title bar shows
-# the pyramid level and the tile count.
-cargo run -p qupath-viewer --example window --release -- data/CMU-1.svs
+# the pyramid level, the tile count and resident texture memory. The optional
+# second argument is the texture budget in MB.
+cargo run -p qupath-viewer --example window --release -- data/CMU-1.svs 256
 
 # No window and no GPU: writes the slide as a PNG at the level the viewport
 # picks, and prints the level table across scales.
 cargo run -p qupath-viewer --example dump --release -- data/CMU-1.svs
+
+# No window, but through the GPU: renders the same geometry offscreen, writes
+# it as PNGs, and reports a scripted pan through the loader and the cache.
+cargo run -p qupath-viewer --example render --release -- data/CMU-1.svs
 ```
 
 Level selection is the whole point, and it is worth one number: a 1024x768 view
@@ -169,10 +174,17 @@ of the whole slide picks level 2 and reads **108 tiles against level 0's
 is the first item in the guidelines' own ordering — though it is a property of
 the viewer, not a speedup of the detection pipeline.
 
-The viewer needs a display and a GPU; `dump` needs neither, and neither do its
-tests. [docs/VIEWER.md](docs/VIEWER.md) is the plan and the running account of
-what has gone wrong, including a level-selection bug that cost an 11x
-over-decode while every frame still looked correct.
+Tiles decode on a thread pool whose queue a pan *cancels* rather than appends
+to, into a cache with a hard byte budget, with the coarsest pyramid level drawn
+underneath while the finer tiles arrive. That last part is worth its own
+number: over a scripted pan at 700 px per frame, **7.3% of the average frame is
+never drawn with the underlay against 57.6% without**, for the same decode work.
+
+The window needs a display and a GPU; `dump` needs neither, `render` needs a GPU
+but no display, and the tests need neither.
+[docs/VIEWER.md](docs/VIEWER.md) is the plan and the running account of what has
+gone wrong, including a level-selection bug that cost an 11x over-decode while
+every frame still looked correct.
 
 ## Building
 

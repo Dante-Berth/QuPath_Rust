@@ -51,13 +51,18 @@ is glass.
 Better than expected, and none of it needs changing to start:
 
 - `Slide` holds a `File` and reads tiles through positioned reads, so it is
-  `Sync` and a loader pool needs no lock around it.
+  `Sync` and a loader pool needs no lock around it. Step 3.4 depends on this
+  outright: four workers share one open file and never contend.
 - `Slide::read_tile_into` fills a caller-owned `Vec<u8>`, so a loader thread
-  allocates nothing per tile once warm.
+  allocates nothing per tile once warm. That survived contact: `TileSource::load`
+  keeps a per-worker decode scratch for exactly this reason. The one allocation
+  left per tile is the packed RGBA handed to the main thread, which has to be
+  given away and so cannot be reused. A recycling channel would close it and has
+  not been written, because the cost has not been measured — `ROADMAP.md` §5.
 - `Level` carries `columns`, `rows`, `tile_width`, `tile_height` and a computed
   `downsample` — every number the viewport math needs.
-- `Slide::level_for_width` exists and nothing calls it. Step 3 is its first
-  caller.
+- `Slide::level_for_width` exists and nothing calls it. Step 3 was meant to be
+  its first caller and turned out to be the wrong caller; §3.3 is what happened.
 
 Known limits inherited from the crate, both fine for now:
 
@@ -77,6 +82,9 @@ Known limits inherited from the crate, both fine for now:
 - **A thread pool + channels** for tile loading, not async. Decode is
   CPU-bound; what is actually needed is a request queue with **cancellation**,
   because panning makes half the in-flight requests garbage before they land.
+  Built in §3.4 as `loader::TileLoader`, and the shape held: cancellation is
+  "replace the queue", which needs no generation check on the worker side
+  because a dropped request never reaches one.
 
 Note the workspace already depends on rayon, and the loader must **not** be a
 `par_iter` nested inside anything (`ROADMAP.md` §5: "Do not nest `par_iter`").
@@ -89,9 +97,15 @@ Both examples take a slide path, defaulting to `data/CMU-1.svs`.
 
 ```sh
 # The viewer. Drag to pan, scroll to zoom, f to fit, escape to quit. The title
-# bar carries the level and the tile count, which is the level selection made
-# visible -- zooming out should drop the tile count, never raise it.
-cargo run -p qupath-viewer --example window --release -- data/CMU-1.svs
+# bar carries the level, the tile count, resident texture memory and what the
+# loader is still working on -- the level selection and the cache made visible.
+# Zooming out should drop the tile count, never raise it, and a long pan should
+# leave resident megabytes flat.
+#
+# The optional second argument is the texture budget in MB. It is the one knob
+# worth sweeping: set it low and the frame still draws, because the underlay
+# covers what was evicted.
+cargo run -p qupath-viewer --example window --release -- data/CMU-1.svs 256
 
 # No window, no GPU: writes the whole slide at the level the viewport picks,
 # plus 1024x1024 at level 0 from the profiled region, then prints the level
@@ -100,8 +114,9 @@ cargo run -p qupath-viewer --example dump --release -- data/CMU-1.svs
 
 # No window, but through the GPU: renders the same geometry the window renders
 # into an offscreen texture and writes it as a PNG, including a zoom sequence
-# anchored on tissue that crosses every level boundary. This is what to run
-# when the window looks wrong and you need numbers instead of an impression.
+# anchored on tissue that crosses every level boundary, and a scripted pan
+# driven through the real loader and cache. This is what to run when the window
+# looks wrong and you need numbers instead of an impression.
 cargo run -p qupath-viewer --example render --release -- data/CMU-1.svs
 
 cargo test -p qupath-viewer
@@ -116,8 +131,10 @@ adapter it panics at startup with `expect("adapter")` rather than opening a
 blank window, which is the intended failure — `dump` is the path that needs
 neither.
 
-Tests need no display and no GPU, by construction (§6). The integration tests
-need `data/CMU-1-Small-Region.svs` and return early without it.
+`render` needs a GPU but no display, which is the combination a headless machine
+usually has. Tests need neither, by construction (§6) — 47 of them, and none
+links `wgpu`. The integration tests need `data/CMU-1-Small-Region.svs` and
+return early without it.
 
 ## 3. Milestones
 
@@ -197,19 +214,91 @@ in both directions and demands the same answer at every rung, and
 `the_level_never_costs_more_tiles_than_the_one_below_it` forbids a coarser
 level from costing more tiles than a finer one.
 
-### 3.4 Async loading, LRU cache, keep-old-level-while-loading
+### 3.4 Async loading, LRU cache, keep-old-level-while-loading — **done**
 
-Where it starts feeling like a viewer rather than a demo.
+Where it starts feeling like a viewer rather than a demo. All three pieces are
+in the library, none of them needs a GPU, and all three carry tests.
 
-Three pieces, and the third is the one that is usually skipped and shouldn't
-be: requests go to the pool with a **generation counter** so a pan cancels what
-it invalidated; decoded tiles land in a texture cache with a **hard byte
-budget**; and the previous level's tiles stay drawn underneath until the new
-level's have arrived, so panning degrades in resolution instead of flashing
-white.
+- **`loader::TileLoader`** — a pool of decoding threads fed by a queue that
+  `request` **replaces** rather than appends to. That is the cancellation: a
+  fast pan decodes the frame it stopped on, not every frame it passed through,
+  and the only work that survives is the one tile per worker already claimed.
+- **`cache::TileCache<T>`** — an LRU with a hard byte budget. Resident bytes
+  never exceed the budget after any operation, which is the assertion §6 asks
+  for. Generic over the value, so the window stores a `wgpu::BindGroup` and the
+  tests store nothing at all through the same eviction arithmetic.
+- **`Viewport::underlay_level`** — the coarsest level, drawn beneath the chosen
+  one, back to front. Not a texture-coordinate trick: each tile is drawn at its
+  own level's `tile_rect` and the finer ones cover the coarser ones because
+  they come later.
 
-Done when a sustained pan at full zoom neither stutters visibly nor grows RSS
-without bound.
+The RGBA expansion moved onto the worker along the way. It is per-pixel work on
+a tile that is still warm in that thread's cache, and doing it between frames is
+exactly what makes a pan stutter.
+
+#### Why the coarsest level and not the next one down
+
+Both were plausible; the coarsest wins on two counts, and both come from it
+being the cheapest thing in the pyramid. A whole-screen view of it is a handful
+of tiles at any zoom, so it survives the pan that evicts everything else. And
+having exactly *one* fallback level means the underlay is already loaded by the
+time it is needed — the next-level-down policy cannot promise that, because
+that level is the one the previous frame was still loading.
+
+#### What it is worth, as a number
+
+`render`'s scripted pan is the check, and it is the reason that example exists.
+It drives a pan through the real loader and cache, once with the underlay and
+once without, and reports how much of each frame was never drawn. On `CMU-1.svs`
+at 700 px per frame with a 12 MB budget:
+
+| Pass | Mean frame never drawn | Tiles decoded | Peak resident |
+| --- | --- | --- | --- |
+| with underlay | **7.3%** | 489 | 12 MB |
+| without | **57.6%** | 479 | 12 MB |
+
+The 57.6% is one frame of latency made visible: a 700 px step across a 1024 px
+window leaves most of the screen new, and the tiles requested this frame arrive
+after it is drawn. Frame 0 is 100% in both columns and that is not a defect —
+the underlay has to be decoded too. It helps from the second frame on, which is
+every frame of a drag after the first.
+
+#### Three bugs, all about *when* state becomes visible
+
+None was arithmetic, and the second two would have been invisible to a reader.
+
+- **A worker released its claim on a tile before sending the result.** Between
+  the two the tile was neither in flight nor delivered, so a redraw landing in
+  that window re-queued a tile that was already decoded and on its way.
+  `a_stationary_view_decodes_each_tile_once` caught it decoding ten tiles for a
+  nine-tile view. The claim is now released after the hand-off, and the render
+  loop asks "is the loader busy" *before* draining for the same reason.
+- **A tile that failed to decode was never remembered**, so a caller driving
+  requests from what is not resident would ask for it again every redraw,
+  forever — a busy core and a frame rate that quietly halves, with nothing on
+  screen to say why. Failures are recorded and refused.
+- **The comparison above had no warm-up pass**, and reported the underlay as
+  *worse*. The first pass over a region reads it from disk and the second finds
+  it in the page cache, so whichever ran second looked better for a reason that
+  had nothing to do with the feature. That is `ROADMAP.md` §5's rule about what
+  a measurement may claim, applied to a comparison instead of a ratio: the
+  confound was the measurement, not the thing measured.
+
+#### What is honestly not shown
+
+`cancelled` comes out **0** in that report, and the report says so rather than
+letting a zero read as a working feature. A frame there ends with a blocking GPU
+readback, which gives four workers long enough to drain the queue before the
+next request arrives, so nothing is ever left to cancel. Cancellation is pinned
+deterministically by `a_superseded_request_is_never_decoded` instead — one
+worker, a source held shut on command, and 500 queued tiles that must come out
+as 4 decodes rather than 503.
+
+The "neither stutters visibly" half of the original done-condition is checked by
+looking, and is stated that way rather than dressed up. What *is* measured: the
+window loads and draws the fit view of `CMU-1.svs` in 0.24 core-seconds and then
+consumes **zero** CPU until the next input, so the redraw-while-loading tick
+sleeps rather than spins.
 
 ### 3.5 Overlays
 
@@ -222,10 +311,14 @@ against smoothed cell polygons — and it has never been looked at directly.
 
 ## 4. The two things that will bite
 
-- **Texture memory.** A naive "upload every tile you see" viewer dies within
-  about ten seconds of panning. The LRU budget belongs in step 3.4, not after
-  the first time it falls over. This is the same failure mode as `map_init` in
-  `ROADMAP.md` §5 — invisible at small scale, unbounded at real scale.
+- **Texture memory — handled, in `cache::TileCache`.** A naive "upload every
+  tile you see" viewer dies within about ten seconds of panning. The budget went
+  in with step 3.4 rather than after the first time it fell over, which was the
+  point of writing this down in advance: it is the same failure mode as
+  `map_init` in `ROADMAP.md` §5, invisible at small scale and unbounded at real
+  scale. It is a **hard** budget, not a target — resident bytes never exceed it
+  after any operation, and a tile larger than the whole budget is refused rather
+  than allowed to evict everything and still not fit.
 - **Coordinate spaces.** There are four — slide (level-0) coordinates, level
   coordinates, tile indices, and screen pixels — and mixing them is the source
   of essentially every viewer bug. Newtype them rather than passing `(f64, f64)`
@@ -262,7 +355,16 @@ project draws pictures. What it means here:
   corresponding region. That is an assertion on bytes, and it is the one that
   catches an off-by-one in tile indexing.
 - **The cache gets a budget test.** Pan a scripted path, assert resident bytes
-  never exceed the budget.
+  never exceed the budget. Written as stated, in
+  `a_scripted_pan_stays_inside_the_budget`, with the budget set deliberately
+  below the path's footprint so eviction actually runs — a budget test that
+  passes by never filling up proves nothing, and that assertion is itself
+  asserted.
+- **The loader gets a fake source.** `TileSource` is a trait for one reason: a
+  real JPEG decodes far too fast to still be running when the next request
+  lands, so cancellation cannot be observed against a real slide. The fake can
+  be held shut on command, which turns "the queue is replaced" into 4 decodes
+  where 503 were queued.
 - **What is *not* claimed by a test is appearance.** Colours, orientation and
   smoothness are checked by looking, and that is stated rather than dressed up
   as a test.
@@ -282,10 +384,28 @@ at anything. The frames it writes are also how a seam or a stretched tile would
 be caught — both were checked over tissue rather than glass, because a defect
 on glass is invisible.
 
-It prints two numbers per frame that need no eyes: the fraction of the output
-that is opaque, and the fraction still holding the clear colour. Those say
-whether the frame was drawn at all, which is a weaker claim than "it looks
-right" and an honest one.
+It prints one number per frame that needs no eyes: the fraction of the output
+still holding the clear colour. That says whether the frame was drawn at all,
+which is a weaker claim than "it looks right" and an honest one. It is also what
+makes §3.4's underlay measurable, since "keep the old level while loading" is
+precisely a claim about how much of a frame is undrawn.
+
+#### The check that could not see a blank frame
+
+Worth keeping, because it is the failure mode this whole section is about. That
+coverage number was **wrong from the day it was written**, and wrong in the
+reassuring direction: it compared a guessed byte threshold against the *linear*
+clear colour, but the render target is `Rgba8UnormSrgb`, so `wgpu` stores the
+encoded form and 0.08 linear arrives as **80**, not 20. Nothing ever matched. An
+entirely undrawn frame reported `0.0% still clear colour` — the worst possible
+answer from a check whose only job is to say whether anything was drawn.
+
+It was found by running the tool on a viewport that was off the slide, noticing
+it claimed a fully-drawn frame from zero tiles, and following the number rather
+than the intent. The clear colour is now encoded exactly the way the GPU encodes
+it and matched with one unit of slack. The lesson is not about sRGB: a check
+that has never failed has never been shown to work, and this one had been
+printing a passing grade for two milestones.
 
 ## 7. Open questions
 
@@ -295,8 +415,16 @@ right" and an honest one.
   library itself depends on `qupath-slide` alone, so `cargo test -p
   qupath-viewer` builds none of the graphics tree. That falls out of §6 — if
   the tests need no GPU, the library does not need to link one.
-- **Whether `qupath-slide` needs a tile cache of its own.** Probably not — the
-  viewer's texture cache sits above it and the detection pipeline streams. Do
-  not add one speculatively.
-- **`missing_docs` and `unsafe_code = "deny"`.** wgpu needs no unsafe from us at
-  this level. Keep both lints on and find out early if that is wrong.
+- **Whether `qupath-slide` needs a tile cache of its own — settled, no.**
+  `cache::TileCache` sits above it and the detection pipeline streams. §3.4
+  built the viewer's cache and wanted nothing from the reader, which is the
+  answer this was waiting for.
+- **`missing_docs` and `unsafe_code = "deny"` — settled, both stay on.** Four
+  milestones in, wgpu has needed no unsafe from us and every public item carries
+  a doc comment. The thread pool in §3.4 was the one place it looked like it
+  might bite, and it did not: `Slide` is already `Sync`, and `Mutex` plus
+  `Condvar` needed nothing beyond safe code.
+- **Whether the loader should recycle its output buffers.** Open. Each delivered
+  tile is one fresh allocation of packed RGBA, because the buffer is given to
+  the main thread and cannot be reused. A return channel would close it. It has
+  not been measured, so it has not been written.
