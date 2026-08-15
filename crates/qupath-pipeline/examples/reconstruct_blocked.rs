@@ -46,8 +46,10 @@ fn blocked_phase(
         let from = top.saturating_sub(1) * width;
         let to = bottom * width;
         for _ in 0..rounds {
-            changes += reconstructor.raster_pass(&mut marker[from..to], &mask[from..to], width, false);
-            changes += reconstructor.raster_pass(&mut marker[from..to], &mask[from..to], width, true);
+            changes +=
+                reconstructor.raster_pass(&mut marker[from..to], &mask[from..to], width, false);
+            changes +=
+                reconstructor.raster_pass(&mut marker[from..to], &mask[from..to], width, true);
         }
         top = bottom;
     }
@@ -58,8 +60,10 @@ fn blocked_phase(
         let to = (bottom + 1).min(height) * width;
         let from = top * width;
         for _ in 0..rounds {
-            changes += reconstructor.raster_pass(&mut marker[from..to], &mask[from..to], width, true);
-            changes += reconstructor.raster_pass(&mut marker[from..to], &mask[from..to], width, false);
+            changes +=
+                reconstructor.raster_pass(&mut marker[from..to], &mask[from..to], width, true);
+            changes +=
+                reconstructor.raster_pass(&mut marker[from..to], &mask[from..to], width, false);
         }
         bottom = top;
     }
@@ -177,7 +181,10 @@ fn main() {
                 best_raster = best_raster.min(raster);
                 sweeps = phases * rounds * 4;
                 queued = settle.last_queued();
-                assert_eq!(working, expected, "blocked phase reached a different fixed point");
+                assert_eq!(
+                    working, expected,
+                    "blocked phase reached a different fixed point"
+                );
             }
             println!(
                 "{strip:>8} {rounds:>7} {sweeps:>8} {:>12.1} {queued:>10} {:>8.1}",

@@ -42,6 +42,7 @@
 //! across tiles. [`Outcome::peak_resident_bytes`] reports the high-water mark
 //! so that a test can assert it, as §6 requires.
 
+mod contour;
 mod merge;
 mod objects;
 mod overlaps;
@@ -57,6 +58,7 @@ use qupath_slide::{Slide, SlideError};
 use qupath_watershed::{Connectivity, DistanceMap, Labeller, RegionTracer, Segmenter, Watershed};
 use rayon::prelude::*;
 
+pub use contour::{shoelace_area_x2, trace_outline_into};
 pub use merge::{FOREGROUND, Merger};
 pub use objects::{Extent, ObjectFilter, RegionStats};
 pub use overlaps::{Candidate, resolve_overlaps};

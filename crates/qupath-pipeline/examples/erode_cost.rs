@@ -87,7 +87,13 @@ fn main() {
     let mut out = vec![0.0f32; density.len()];
     let mut filter = RankFilter::new().with_parallel_rows(false);
     // Warm the plan and the buffers.
-    filter.apply_into(&density, &mut out, width, params.background_radius, RankOp::Min);
+    filter.apply_into(
+        &density,
+        &mut out,
+        width,
+        params.background_radius,
+        RankOp::Min,
+    );
 
     let mut whole = f64::INFINITY;
     let mut floor = f64::INFINITY;
@@ -119,11 +125,7 @@ fn main() {
         "33 folded rows alone",
         per_pixel(floor)
     );
-    println!(
-        "\n{:>28} {:>21.2}x",
-        "the filter costs",
-        whole / floor
-    );
+    println!("\n{:>28} {:>21.2}x", "the filter costs", whole / floor);
     println!(
         "\nThe second row is the vertical half of the decomposition and nothing\n\
          else: the same 33 source rows per output row, folded into an\n\
