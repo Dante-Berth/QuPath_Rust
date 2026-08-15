@@ -91,6 +91,16 @@ struct Queue {
     queued: HashSet<TileIndex>,
     /// Claimed by a worker and not yet delivered.
     claimed: HashSet<TileIndex>,
+    /// Delivered into the channel and not yet drained by the caller.
+    ///
+    /// The state between "a worker is done with it" and "the caller has it",
+    /// which is invisible to everything else: the tile is not claimed, and the
+    /// caller cannot have made it resident because it has not seen it yet. A
+    /// request landing in that window re-queues a tile that is already decoded,
+    /// which is the same bug the delivery order below is written to avoid, one
+    /// step further along. Entered under the same lock that releases the claim,
+    /// so a tile is never in neither set.
+    delivered: HashSet<TileIndex>,
     /// Tiles that failed to decode, so they are never asked for again. A
     /// caller drives requests from what is *not* resident, and a tile that can
     /// never become resident would otherwise be re-decoded every redraw.
@@ -140,6 +150,7 @@ impl TileLoader {
                 pending: VecDeque::new(),
                 queued: HashSet::new(),
                 claimed: HashSet::new(),
+                delivered: HashSet::new(),
                 failed: HashSet::new(),
                 shutdown: false,
                 decoded: 0,
@@ -188,7 +199,9 @@ impl TileLoader {
         queue.queued.clear();
 
         for tile in tiles {
-            let known = queue.claimed.contains(&tile) || queue.failed.contains(&tile);
+            let known = queue.claimed.contains(&tile)
+                || queue.delivered.contains(&tile)
+                || queue.failed.contains(&tile);
             if !known && queue.queued.insert(tile) {
                 queue.pending.push_back(tile);
             }
@@ -208,6 +221,15 @@ impl TileLoader {
         let mut loaded = Vec::new();
         while let Ok(tile) = self.done.try_recv() {
             loaded.push(tile);
+        }
+        if !loaded.is_empty() {
+            // The caller has them now, so they stop being the loader's problem
+            // and a later request for one is a genuine request. One lock for
+            // the whole batch, not one per tile.
+            let mut queue = self.shared.lock();
+            for tile in &loaded {
+                queue.delivered.remove(&tile.tile);
+            }
         }
         loaded
     }
@@ -285,6 +307,17 @@ impl Drop for TileLoader {
     }
 }
 
+/// What became of one tile a worker claimed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// Decoded and handed to the caller, who has not drained it yet.
+    Delivered,
+    /// Undecodable, and recorded so it is never asked for again.
+    Failed,
+    /// The caller has gone: the receiver is dropped and this worker is done.
+    Abandoned,
+}
+
 /// One worker: claim a tile, decode it, deliver it, repeat.
 fn work<S: TileSource>(shared: &Arc<Shared>, source: &S, done: &Sender<Loaded>) {
     let mut scratch = Vec::new();
@@ -320,32 +353,48 @@ fn work<S: TileSource>(shared: &Arc<Shared>, source: &S, done: &Sender<Loaded>) 
         // on its way. That window is small and a redraw hits it constantly:
         // `a_stationary_view_decodes_each_tile_once` caught it decoding ten
         // tiles for a nine-tile view.
-        let sent = match size {
-            Ok((width, height)) => done
-                .send(Loaded {
+        // Three outcomes, and they are kept apart because each leaves the tile
+        // in a different set: a decoded tile is the caller's until it drains,
+        // an undecodable one is refused forever, and a closed channel means the
+        // loader is being dropped and this thread is finished.
+        let outcome = match size {
+            Ok((width, height)) => {
+                let sent = done.send(Loaded {
                     tile,
                     generation,
                     width,
                     height,
                     pixels: std::mem::take(&mut out),
-                })
-                .is_ok(),
+                });
+                if sent.is_ok() {
+                    Outcome::Delivered
+                } else {
+                    Outcome::Abandoned
+                }
+            }
             Err(_) => {
                 // One bad tile is a hole in the frame, not a stalled queue —
                 // but it must not be a hole the caller asks about forever, so
                 // it is remembered rather than retried on the next redraw.
                 shared.lock().failed.insert(tile);
-                true
+                Outcome::Failed
             }
         };
 
         {
             let mut queue = shared.lock();
+            // Into `delivered` before out of `claimed`, under one lock, so
+            // there is no instant at which the tile is in neither and a request
+            // could queue it a second time. A failed tile is not entered: it is
+            // in `failed` already, and nothing will ever drain it back out.
+            if outcome == Outcome::Delivered {
+                queue.delivered.insert(tile);
+            }
             queue.claimed.remove(&tile);
             queue.decoded += 1;
         }
 
-        if !sent {
+        if outcome == Outcome::Abandoned {
             return;
         }
     }
@@ -537,6 +586,71 @@ mod tests {
         let columns: Vec<u32> = delivered.iter().map(|loaded| loaded.tile.column).collect();
         assert_eq!(columns, (0..64).collect::<Vec<_>>());
         assert_eq!(source.decodes(), 64);
+    }
+
+    #[test]
+    fn a_delivered_tile_is_not_decoded_again_before_it_is_drained() {
+        // The last window in the hand-off, and the one that survived the fix
+        // the delivery order above records. That fix moved the release of the
+        // claim to *after* the send, which closes the gap between "decoded" and
+        // "sent" — but not the gap between "sent" and "the caller has looked".
+        //
+        // A caller decides what to request from what is resident, and a tile
+        // sitting in the channel is not resident yet. So it asks again, and
+        // before `delivered` existed the loader had no reason to say no.
+        //
+        // This is deterministic where the symptom was not: the flake it fixes
+        // is `a_stationary_view_decodes_each_tile_once` in `tests/loading.rs`,
+        // which passes alone and fails under a loaded `cargo test --workspace`
+        // because the window is only ever hit when a worker finishes at exactly
+        // the wrong moment. Waiting for `is_idle` puts the tile in that window
+        // on purpose rather than by luck.
+        let source = Fake::open();
+        let loader = TileLoader::new(&source, 1);
+
+        loader.request(tiles(1));
+        until("the tile to be delivered", || loader.is_idle());
+        assert_eq!(source.decodes(), 1);
+
+        // Requested again, undrained. `request` decides synchronously under the
+        // lock, so `pending` is the whole answer and no sleep is involved.
+        loader.request(tiles(1));
+        assert_eq!(loader.pending(), 0, "a delivered tile was queued again");
+        assert_eq!(source.decodes(), 1);
+
+        // And once drained it belongs to the caller, so asking is a real
+        // request again — otherwise an evicted tile could never be reloaded,
+        // which is a worse bug than the one being fixed.
+        assert_eq!(loader.drain().len(), 1);
+        loader.request(tiles(1));
+        until("the second decode", || {
+            loader.is_idle() && source.decodes() == 2
+        });
+    }
+
+    #[test]
+    fn a_failed_tile_is_not_held_as_delivered() {
+        // A tile that failed is refused by `failed`, and must not *also* be
+        // entered into `delivered` — nothing ever drains it back out, so it
+        // would sit there for the life of the loader. Invisible from the
+        // outside, which is why it is asserted from the inside.
+        let source = Arc::new(Fake {
+            decodes: AtomicU64::new(0),
+            gate: Mutex::new(true),
+            opened: Condvar::new(),
+            failing_column: 0,
+        });
+        let loader = TileLoader::new(&source, 1);
+        loader.request(tiles(1));
+        until("the failure to be recorded", || {
+            loader.is_idle() && loader.failed() == 1
+        });
+
+        assert!(loader.drain().is_empty());
+        assert!(
+            loader.shared.lock().delivered.is_empty(),
+            "a failed tile was left in the delivered set"
+        );
     }
 
     #[test]
