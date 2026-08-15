@@ -15,7 +15,9 @@ about that.
 ## 0. What this is not
 
 - **Not a QuPath replacement.** No project format, no annotation editing, no
-  scripting. If those are ever wanted they are a separate decision.
+  scripting. If those are ever wanted they are a separate decision. There is an
+  application now — `crates/qupath-app`, §3.6 — and it does not change this:
+  it opens a slide and looks at it.
 - **Not a performance lever.** The two remaining levers are in `ROADMAP.md` §4:
   pyramid-level selection on whole slides, and touching less memory per tile.
   This project *uses* the first one but does not deliver it.
@@ -78,9 +80,28 @@ Known limits inherited from the crate, both fine for now:
   in a grid; this does not need a game engine. It turned out not to need a GPU
   either — see §3.4b, which is what "textured quads in a grid" means once it is
   taken literally.
-- **`egui`** via `egui-wgpu` for chrome. Immediate-mode suits a UI whose state
-  is almost entirely derived from viewport state. `iced` is the retained-mode
-  alternative and would fight harder for a custom GPU surface underneath.
+- **`egui`** for chrome. Immediate-mode suits a UI whose state is almost
+  entirely derived from viewport state. `iced` is the retained-mode alternative
+  and would fight harder for a custom GPU surface underneath.
+
+  The plan said `egui-wgpu`, and that turned out to **contradict §3.4b**: it
+  needs an adapter, and §7 records that a machine without one still gets the
+  viewer. Both are kept instead. `egui` tessellates its whole interface to
+  triangles carrying a position, a texture coordinate and a premultiplied
+  colour, so `compose::Framebuffer::draw_mesh` rasterises the same interface
+  with no driver installed. That is §3.4b's argument applied a second time, and
+  it came out the same way: the draw call was simple enough that writing it out
+  was cheaper than requiring a driver for it.
+
+  The one thing that needed care is the **fill rule**. A quad is two triangles
+  sharing a diagonal, and on an axis-aligned quad at integer coordinates the
+  pixel centres along that diagonal land *exactly* on it. Three inclusive edge
+  tests draw those pixels twice, which puts a bright diagonal through every
+  translucent panel; three exclusive ones draw them zero times and leave a
+  hairline. The top-left rule decides it, and both cases are pinned — the
+  adjacent-panel test puts a shared border at `x = 4.5` on purpose, because at
+  an integer boundary no pixel centre ever lands on the edge and a rasteriser
+  can be wrong while looking correct on every rectangle it is shown.
 - **A thread pool + channels** for tile loading, not async. Decode is
   CPU-bound; what is actually needed is a request queue with **cancellation**,
   because panning makes half the in-flight requests garbage before they land.
@@ -95,9 +116,16 @@ safe shape.
 
 ## 2b. Running it
 
-Both examples take a slide path, defaulting to `data/CMU-1.svs`.
+`qupath-app` is the application; the rest are the library's examples, which
+take a slide path defaulting to `data/CMU-1.svs`.
 
 ```sh
+# The application. A toolbar, a file dialog, a status bar, and a message when a
+# slide will not open rather than an exit. A path on the command line is opened
+# at startup; without one it comes up asking for a slide.
+cargo run -p qupath-app --release
+cargo run -p qupath-app --release -- data/CMU-1.svs
+
 # The viewer. Drag to pan, scroll to zoom, f to fit, escape to quit. The title
 # bar carries the backend, the level, the tile count, resident texture memory,
 # what the loader is still working on, and the mean cost of the last thirty
@@ -488,6 +516,48 @@ vertices did not exist. They exist now. D-008's two halves are still both open,
 and are now both **reachable**: the outlines here are the raw pixel boundary,
 where QuPath interpolates, smooths, interpolates again and simplifies before
 anything sees them.
+
+### 3.6 An application — **partly done**
+
+`crates/qupath-app`. The viewer with an interface rather than a title bar: a
+File menu with a dialog and a recent list, Fit / 1:1 / zoom buttons, a status
+bar carrying the level, the downsample, the cursor in slide pixels, the tiles
+drawn, resident megabytes, what the loader still owes, and the mean frame cost.
+
+Nothing about the viewer is reimplemented — `Viewport`, `TileLoader`,
+`TileCache` and `compose` come straight from the library, and what this crate
+adds is chrome and an event loop. The split inside it is the one an
+immediate-mode interface wants: `chrome` is a pure function of the state that
+returns a `Command`, and `state` is the only thing that acts on one. "Where a
+button lives" and "what a button does" do not grow into each other.
+
+Two things an application owes that an example does not, and both are the
+reason this is a separate crate rather than a flag on `window.rs`:
+
+- **A slide that will not open is a message, not an exit.** `data/CMU-1-JP2K-33005.svs`
+  puts its `UndecodableCodec` in the status bar and leaves the window up, and a
+  failed open leaves the previous slide open rather than closing it.
+- **No slide is a state, not a blank window.** An empty grey rectangle is the
+  commonest way an idle application looks broken.
+
+Measured: it opens `CMU-1.svs`, draws the fit view, and then sits at **0% of one
+core** across three 3-second samples with the window up. The 98% a first
+measurement showed was `ps` reporting a lifetime average dominated by the
+startup decode, which is a reminder that `%cpu` is not an instantaneous figure.
+
+**What is not done**, stated rather than left to be discovered:
+
+- **No GPU backend.** The app composes on the CPU only. `egui-wgpu` 0.33 wants
+  `wgpu` 27 where the examples are on 26, so the two cannot share a device
+  until they are moved together; the software path needs no wgpu at all, so it
+  went first. Composition is 1.27 ms against a 16.7 ms frame (§3.4b), so this
+  is a missing optimisation and not a missing feature.
+- **No detection button.** `run_collecting` and `Overlay` exist and
+  `examples/render.rs` drives them end to end, so what is left is a background
+  thread and a progress bar rather than anything unknown.
+- **Appearance is unchecked**, as everything in §6 says it is. The window opens,
+  holds its tiles, reports its numbers and idles; how it *looks* has not been
+  seen.
 
 ## 4. The two things that will bite
 
