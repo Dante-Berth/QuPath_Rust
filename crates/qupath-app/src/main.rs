@@ -94,9 +94,25 @@ impl ApplicationHandler for App {
             return;
         };
 
-        // The interface gets every event first and says whether it wants it.
-        // Without this a drag that started on a slider also pans the slide, and
-        // a scroll over a panel zooms the view underneath it.
+        // `RedrawRequested` is not input, and must never reach `egui`.
+        //
+        // It is the *answer* to a redraw request rather than a reason for one,
+        // and `egui_winit` answers it with `repaint: true` — so passing it on
+        // closes a loop that needs no input to sustain itself: render, receive
+        // `RedrawRequested`, ask to render again. Measured at **90 frames a
+        // second and 100% of one core** on a window sitting still, which is
+        // precisely what `ControlFlow::Wait` is set to prevent.
+        //
+        // It is handled here, ahead of `egui`, rather than by testing the event
+        // twice. See `docs/VIEWER.md` §3.6.
+        if matches!(event, WindowEvent::RedrawRequested) {
+            self.render(&window);
+            return;
+        }
+
+        // Every *other* event goes to the interface first, which says whether
+        // it wants it. Without this a drag that started on a slider also pans
+        // the slide, and a scroll over a panel zooms the view underneath it.
         let Some(egui) = self.egui.as_mut() else {
             return;
         };
@@ -111,7 +127,6 @@ impl ApplicationHandler for App {
                 self.resize(size.width, size.height);
                 window.request_redraw();
             }
-            WindowEvent::RedrawRequested => self.render(&window),
             other => {
                 if self.input(&window, &other, response.consumed) {
                     window.request_redraw();

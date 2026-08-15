@@ -428,6 +428,12 @@ impl App {
         if self.costs.len() > WINDOW {
             self.costs.remove(0);
         }
+        // `egui` asking for an immediate repaint — a tooltip fading in, a
+        // spinner turning. A *delay* rather than zero is `egui` asking for one
+        // later, and is deliberately not honoured: nothing here animates on a
+        // timer, and scheduling a wake-up for it is one of the two ways a
+        // window that should be asleep stays awake. The other was
+        // `RedrawRequested` being fed back into `egui`; see `main.rs`.
         if output
             .viewport_output
             .values()
