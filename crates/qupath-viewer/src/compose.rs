@@ -355,6 +355,311 @@ impl Framebuffer {
     }
 }
 
+/// One vertex of a user-interface mesh.
+///
+/// # Why this shape exactly
+///
+/// This is `epaint::Vertex`'s layout, field for field, and that is deliberate:
+/// the app hands `egui`'s tessellated vertices straight to
+/// [`Framebuffer::draw_mesh`] with no per-frame conversion, and this crate still
+/// does not depend on `egui`. A UI produces tens of thousands of these a frame
+/// and copying them into a second representation would cost more than
+/// rasterising them.
+///
+/// If `epaint` ever changes its layout the cast stops being sound, so the app
+/// asserts the two sizes and alignments agree rather than assuming it.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeshVertex {
+    /// Position in window pixels.
+    pub position: [f32; 2],
+    /// Texture coordinate, `0.0..=1.0` over the whole texture.
+    pub uv: [f32; 2],
+    /// Colour, **premultiplied** and in sRGB bytes, as `egui`'s `Color32` is.
+    pub colour: [u8; 4],
+}
+
+/// A texture a mesh samples: premultiplied RGBA8, row-major.
+///
+/// Premultiplied because that is what `egui` produces and what makes bilinear
+/// sampling correct — interpolating a straight-alpha texture across a glyph edge
+/// darkens the fringe towards black, which is the classic halo around text.
+#[derive(Debug, Clone, Default)]
+pub struct Texture {
+    /// Width in texels.
+    pub width: u32,
+    /// Height in texels.
+    pub height: u32,
+    /// `width * height` texels, row-major.
+    pub pixels: Vec<[u8; 4]>,
+}
+
+impl Texture {
+    /// A one-texel opaque white texture, which is what an untextured mesh
+    /// samples.
+    #[must_use]
+    pub fn white() -> Self {
+        Self {
+            width: 1,
+            height: 1,
+            pixels: vec![[255, 255, 255, 255]],
+        }
+    }
+
+    /// Whether the texture has any texels at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.width == 0
+            || self.height == 0
+            || self.pixels.len() < (self.width * self.height) as usize
+    }
+
+    /// Bilinearly samples at `uv`, in premultiplied `0.0..=1.0` channels.
+    ///
+    /// Coordinates are clamped rather than wrapped: a glyph at the edge of the
+    /// atlas must not pick up the one on the far side.
+    fn sample(&self, u: f32, v: f32) -> [f32; 4] {
+        let (width, height) = (self.width as usize, self.height as usize);
+        // Texel centres sit at half-integers, so the continuous coordinate of
+        // texel `i` is `i + 0.5`; going the other way is `uv * size - 0.5`.
+        let x = (u * self.width as f32 - 0.5).clamp(0.0, (width - 1) as f32);
+        let y = (v * self.height as f32 - 0.5).clamp(0.0, (height - 1) as f32);
+        let (x0, y0) = (x.floor(), y.floor());
+        let (fx, fy) = (x - x0, y - y0);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "clamped into the texture on the two lines above"
+        )]
+        let (x0, y0) = (x0 as usize, y0 as usize);
+        let (x1, y1) = ((x0 + 1).min(width - 1), (y0 + 1).min(height - 1));
+
+        let mut out = [0.0f32; 4];
+        for (texel, weight) in [
+            (self.pixels[y0 * width + x0], (1.0 - fx) * (1.0 - fy)),
+            (self.pixels[y0 * width + x1], fx * (1.0 - fy)),
+            (self.pixels[y1 * width + x0], (1.0 - fx) * fy),
+            (self.pixels[y1 * width + x1], fx * fy),
+        ] {
+            for channel in 0..4 {
+                out[channel] += f32::from(texel[channel]) / 255.0 * weight;
+            }
+        }
+        out
+    }
+}
+
+impl Framebuffer {
+    /// Draws an indexed triangle mesh, clipped to `clip` and to the frame.
+    ///
+    /// This is what makes `docs/VIEWER.md` §3.4b's promise survive the app
+    /// having chrome: `egui` tessellates its whole interface to triangles with a
+    /// position, a texture coordinate and a premultiplied colour, so a machine
+    /// with no adapter gets the same interface rather than a bare window.
+    ///
+    /// `clip` is `(left, top, right, bottom)` in window pixels — `egui`'s
+    /// `ClippedPrimitive::clip_rect`. `indices` are triples; a trailing partial
+    /// triangle is ignored.
+    ///
+    /// # Coverage, blending and colour
+    ///
+    /// A pixel is covered when **its centre** is inside the triangle, which is
+    /// the same rule [`Framebuffer::draw_tile`] uses and the same rule a GPU
+    /// uses, so the two backends put a widget's edge in the same place.
+    ///
+    /// The source colour is the vertex colour times the sampled texel, both
+    /// premultiplied, and the blend is `dst = src + dst * (1 - src.a)`. That is
+    /// `egui`'s own fragment shader and its own blend state, done in sRGB bytes
+    /// rather than in linear — which is what `egui` asks for when it is told the
+    /// framebuffer is not linear, and what this frame is, because `softbuffer`
+    /// presents these bytes untouched.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an index is past the end of `vertices`, which would mean the
+    /// tessellator and this disagree about the mesh.
+    pub fn draw_mesh(
+        &mut self,
+        clip: (f32, f32, f32, f32),
+        vertices: &[MeshVertex],
+        indices: &[u32],
+        texture: &Texture,
+    ) {
+        if texture.is_empty() || self.width == 0 || self.height == 0 {
+            return;
+        }
+        // The clip rectangle, snapped outwards to whole pixels and intersected
+        // with the frame. Outwards so a widget is never trimmed by a rounding
+        // step, and once here rather than per triangle.
+        let left = clip.0.max(0.0).floor();
+        let top = clip.1.max(0.0).floor();
+        let right = clip.2.min(self.width as f32).ceil();
+        let bottom = clip.3.min(self.height as f32).ceil();
+        if !(right > left && bottom > top) {
+            return;
+        }
+
+        for triangle in indices.chunks_exact(3) {
+            let corners = [
+                vertices[triangle[0] as usize],
+                vertices[triangle[1] as usize],
+                vertices[triangle[2] as usize],
+            ];
+            self.triangle(&corners, (left, top, right, bottom), texture);
+        }
+    }
+
+    /// One triangle, already clipped to a whole-pixel rectangle.
+    fn triangle(
+        &mut self,
+        corners: &[MeshVertex; 3],
+        clip: (f32, f32, f32, f32),
+        texture: &Texture,
+    ) {
+        // Twice the signed area. Zero means the triangle is degenerate — the
+        // tessellator emits those at the ends of thin strokes — and dividing by
+        // it would put NaN in every barycentric coordinate, which the inside
+        // test below would then pass for every pixel of the bounding box.
+        let [a, b, c] = corners.map(|corner| corner.position);
+        let area = edge(a, b, c);
+        if !area.is_finite() || area == 0.0 {
+            return;
+        }
+
+        // Normalised to one winding, because `egui` emits both and two inside
+        // tests kept in agreement by hand is how half a user interface goes
+        // missing. Positive area is clockwise on screen, where y runs down.
+        let order = if area > 0.0 { [0, 1, 2] } else { [0, 2, 1] };
+        let corners = order.map(|at| corners[at]);
+        let v = corners.map(|corner| corner.position);
+        let area = area.abs();
+
+        // The top-left rule, which is the whole reason this is not three
+        // `>= 0.0` comparisons.
+        //
+        // A quad is two triangles sharing a diagonal, and on an axis-aligned
+        // quad at integer coordinates the pixel centres along that diagonal
+        // land *exactly* on it — (0.5, 0.5), (1.5, 1.5), and so on. An
+        // inclusive test on every edge draws those pixels twice, which for an
+        // opaque widget is invisible and for a translucent panel is a bright
+        // diagonal line through it. An exclusive test draws them zero times and
+        // leaves a hairline instead.
+        //
+        // So an edge is inclusive when it runs downwards, or is horizontal and
+        // runs leftwards. An edge and its reverse can never both satisfy that,
+        // so a shared edge belongs to exactly one of the two triangles — and
+        // the same holds for two adjacent widgets sharing a border.
+        let inclusive = [
+            is_top_left(v[1], v[2]),
+            is_top_left(v[2], v[0]),
+            is_top_left(v[0], v[1]),
+        ];
+
+        let min_x = v[0][0].min(v[1][0]).min(v[2][0]).max(clip.0);
+        let max_x = v[0][0].max(v[1][0]).max(v[2][0]).min(clip.2);
+        let min_y = v[0][1].min(v[1][1]).min(v[2][1]).max(clip.1);
+        let max_y = v[0][1].max(v[1][1]).max(v[2][1]).min(clip.3);
+        if !(max_x > min_x && max_y > min_y) {
+            return;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "clamped to the clip rectangle, which is inside the frame"
+        )]
+        let (first_column, last_column) = (min_x.floor() as u32, max_x.ceil() as u32);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "clamped to the clip rectangle, which is inside the frame"
+        )]
+        let (first_row, last_row) = (min_y.floor() as u32, max_y.ceil() as u32);
+
+        let inverse = 1.0 / area;
+        for row in first_row..last_row.min(self.height) {
+            for column in first_column..last_column.min(self.width) {
+                let point = [column as f32 + 0.5, row as f32 + 0.5];
+                // Tested before the division, so a coordinate exactly on an
+                // edge is exactly zero here rather than a rounding step away
+                // from it — which is precisely the case the rule above decides.
+                let raw = [
+                    edge(v[1], v[2], point),
+                    edge(v[2], v[0], point),
+                    edge(v[0], v[1], point),
+                ];
+                if raw
+                    .iter()
+                    .zip(inclusive)
+                    .any(|(&w, inclusive)| w < 0.0 || (w == 0.0 && !inclusive))
+                {
+                    continue;
+                }
+
+                let mut uv = [0.0f32; 2];
+                let mut colour = [0.0f32; 4];
+                for (corner, weight) in corners.iter().zip(raw.map(|w| w * inverse)) {
+                    uv[0] += corner.uv[0] * weight;
+                    uv[1] += corner.uv[1] * weight;
+                    for (channel, out) in colour.iter_mut().enumerate() {
+                        *out += f32::from(corner.colour[channel]) / 255.0 * weight;
+                    }
+                }
+
+                let texel = texture.sample(uv[0], uv[1]);
+                // `egui`'s fragment shader: the vertex colour times the texel,
+                // both premultiplied, so the product is premultiplied too.
+                let source = [
+                    colour[0] * texel[0],
+                    colour[1] * texel[1],
+                    colour[2] * texel[2],
+                    colour[3] * texel[3],
+                ];
+                if source[3] <= 0.0 {
+                    continue;
+                }
+                self.blend(column, row, source);
+            }
+        }
+    }
+
+    /// `dst = src + dst * (1 - src.a)`, with `src` premultiplied.
+    fn blend(&mut self, column: u32, row: u32, source: [f32; 4]) {
+        let at = row as usize * self.width as usize + column as usize;
+        let destination = self.pixels[at];
+        let keep = (1.0 - source[3]).clamp(0.0, 1.0);
+        let mut out = [0u8; 3];
+        for (channel, byte) in out.iter_mut().enumerate() {
+            let under = ((destination >> (16 - 8 * channel)) & 0xff) as f32 / 255.0;
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "clamped to [0, 255] on the line above the cast"
+            )]
+            let value = ((source[channel] + under * keep) * 255.0)
+                .round()
+                .clamp(0.0, 255.0) as u8;
+            *byte = value;
+        }
+        self.pixels[at] = pack(out[0], out[1], out[2]);
+    }
+}
+
+/// Twice the signed area of the triangle `from`, `to`, `point` — positive when
+/// `point` is to the right of `from -> to`, with y running down.
+///
+/// The one primitive the mesh rasteriser is made of: it is the signed area when
+/// given three corners, and the edge function when given an edge and a pixel.
+/// Writing it once means the inside test and the barycentric weights cannot
+/// disagree about which side is inside.
+fn edge(from: [f32; 2], to: [f32; 2], point: [f32; 2]) -> f32 {
+    (to[0] - from[0]) * (point[1] - from[1]) - (to[1] - from[1]) * (point[0] - from[0])
+}
+
+/// Whether an edge owns the pixels lying exactly on it: down, or horizontal and
+/// leftwards.
+///
+/// See [`Framebuffer::triangle`] for why this exists at all. The property that
+/// makes it work is that an edge and its reverse can never both satisfy it.
+fn is_top_left(from: [f32; 2], to: [f32; 2]) -> bool {
+    to[1] > from[1] || (to[1] == from[1] && to[0] < from[0])
+}
+
 /// Clips a segment to the frame in place, returning whether any of it survives.
 ///
 /// Liang–Barsky, which trims the parameter range rather than walking the
@@ -811,6 +1116,227 @@ mod tests {
                 "the outline bled onto frame column {column} of the row above"
             );
         }
+    }
+
+    /// A quad covering `(x0, y0)..(x1, y1)` in one flat colour, as the two
+    /// triangles a tessellator would emit.
+    fn quad(rect: (f32, f32, f32, f32), colour: [u8; 4]) -> (Vec<MeshVertex>, Vec<u32>) {
+        let (x0, y0, x1, y1) = rect;
+        let corner = |x, y| MeshVertex {
+            position: [x, y],
+            uv: [0.5, 0.5],
+            colour,
+        };
+        (
+            vec![
+                corner(x0, y0),
+                corner(x1, y0),
+                corner(x1, y1),
+                corner(x0, y1),
+            ],
+            vec![0, 1, 2, 0, 2, 3],
+        )
+    }
+
+    const WHOLE: (f32, f32, f32, f32) = (0.0, 0.0, 1e6, 1e6);
+
+    #[test]
+    fn an_opaque_quad_covers_exactly_the_pixels_whose_centres_are_inside() {
+        // The same coverage rule as `draw_tile`, and the same rule a GPU
+        // rasterises with, so a widget's edge lands in the same place on both
+        // backends. Asserted as an equality over every pixel: a half-pixel
+        // anywhere in the barycentric arithmetic changes this list.
+        let mut frame = Framebuffer::new(8, 8);
+        let (vertices, indices) = quad((2.0, 3.0, 6.0, 5.0), [255, 255, 255, 255]);
+        frame.draw_mesh(WHOLE, &vertices, &indices, &Texture::white());
+
+        for row in 0..8u32 {
+            for column in 0..8u32 {
+                let inside = (2..6).contains(&column) && (3..5).contains(&row);
+                let pixel = frame.pixels()[(row * 8 + column) as usize];
+                assert_eq!(pixel != CLEAR, inside, "at {column},{row}: {pixel:06x}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_two_triangles_of_a_quad_leave_no_seam_and_no_double_blend() {
+        // The failure mode of a shared edge: a pixel on the diagonal drawn by
+        // neither triangle shows as a hairline through every button, and one
+        // drawn by both blends twice, which a translucent panel makes obvious.
+        // Half alpha makes the second visible — a doubly-blended pixel is a
+        // different colour, not merely a redrawn one.
+        let mut frame = Framebuffer::new(16, 16);
+        frame.clear(pack(0, 0, 0));
+        let (vertices, indices) = quad((1.0, 1.0, 15.0, 15.0), [128, 128, 128, 128]);
+        frame.draw_mesh(WHOLE, &vertices, &indices, &Texture::white());
+
+        let mut seen = std::collections::BTreeSet::new();
+        for row in 1..15u32 {
+            for column in 1..15u32 {
+                seen.insert(frame.pixels()[(row * 16 + column) as usize]);
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            1,
+            "the quad is not one flat colour: {seen:06x?}"
+        );
+    }
+
+    #[test]
+    fn two_adjacent_quads_do_not_blend_their_shared_border_twice() {
+        // The other half of what the top-left rule is for, and the one a
+        // diagonal test cannot see: two panels sharing a border. The edge is at
+        // x = 4.5 so that column 4's pixel centres land exactly on it — at an
+        // integer boundary no centre ever does, which is why a rasteriser can
+        // look correct on every rectangle it is shown and still be wrong.
+        let mut frame = Framebuffer::new(8, 4);
+        frame.clear(pack(0, 0, 0));
+        for rect in [(0.0, 0.0, 4.5, 4.0), (4.5, 0.0, 8.0, 4.0)] {
+            let (vertices, indices) = quad(rect, [128, 128, 128, 128]);
+            frame.draw_mesh(WHOLE, &vertices, &indices, &Texture::white());
+        }
+
+        for column in 0..8u32 {
+            assert_eq!(
+                frame.pixels()[(8 + column) as usize],
+                pack(128, 128, 128),
+                "column {column} was drawn twice or not at all"
+            );
+        }
+    }
+
+    #[test]
+    fn a_premultiplied_colour_blends_over_what_is_there() {
+        // `dst = src + dst * (1 - src.a)`, which is `egui`'s blend state. Half
+        // alpha white premultiplied is (128, 128, 128, 128), so over black it
+        // is 128 and over white it is 128 + 255 * (1 - 128/255) = 255.
+        for (under, expected) in [(pack(0, 0, 0), 128), (pack(255, 255, 255), 255)] {
+            let mut frame = Framebuffer::new(4, 4);
+            frame.clear(under);
+            let (vertices, indices) = quad((0.0, 0.0, 4.0, 4.0), [128, 128, 128, 128]);
+            frame.draw_mesh(WHOLE, &vertices, &indices, &Texture::white());
+            assert_eq!(frame.pixels()[5], pack(expected, expected, expected));
+        }
+
+        // And a fully transparent mesh changes nothing at all, which is what
+        // every pixel of a glyph's bounding box outside the glyph is.
+        let mut frame = Framebuffer::new(4, 4);
+        let (vertices, indices) = quad((0.0, 0.0, 4.0, 4.0), [0, 0, 0, 0]);
+        frame.draw_mesh(WHOLE, &vertices, &indices, &Texture::white());
+        assert_eq!(frame.fraction_matching(CLEAR), 1.0);
+    }
+
+    #[test]
+    fn the_clip_rectangle_is_obeyed() {
+        // Every scrolling panel in a UI is a clip rectangle, and a rasteriser
+        // that ignores it draws the list through the window frame.
+        let mut frame = Framebuffer::new(16, 16);
+        let (vertices, indices) = quad((0.0, 0.0, 16.0, 16.0), [255, 255, 255, 255]);
+        frame.draw_mesh(
+            (4.0, 4.0, 12.0, 8.0),
+            &vertices,
+            &indices,
+            &Texture::white(),
+        );
+
+        for row in 0..16u32 {
+            for column in 0..16u32 {
+                let inside = (4..12).contains(&column) && (4..8).contains(&row);
+                assert_eq!(
+                    frame.pixels()[(row * 16 + column) as usize] != CLEAR,
+                    inside,
+                    "at {column},{row}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_texture_is_sampled_where_the_uv_says() {
+        // Text is a font atlas sampled by uv, so an atlas read at the wrong
+        // coordinate is every glyph being the wrong glyph. A two-by-one texture
+        // and a quad over each half is the smallest statement of it.
+        let texture = Texture {
+            width: 2,
+            height: 1,
+            pixels: vec![[255, 0, 0, 255], [0, 0, 255, 255]],
+        };
+        for (uv, expected) in [(0.25, pack(255, 0, 0)), (0.75, pack(0, 0, 255))] {
+            let mut frame = Framebuffer::new(4, 4);
+            let mut vertices = quad((0.0, 0.0, 4.0, 4.0), [255, 255, 255, 255]).0;
+            for vertex in &mut vertices {
+                vertex.uv = [uv, 0.5];
+            }
+            frame.draw_mesh(WHOLE, &vertices, &[0, 1, 2, 0, 2, 3], &texture);
+            assert_eq!(frame.pixels()[5], expected, "uv {uv}");
+        }
+    }
+
+    #[test]
+    fn a_degenerate_triangle_draws_nothing_rather_than_dividing_by_zero() {
+        // The tessellator emits zero-area triangles at the ends of thin
+        // strokes. Dividing by the area would put NaN in every barycentric
+        // coordinate, and `NaN < 0.0` is false — so every pixel of the bounding
+        // box would pass the inside test and the widget would be a filled
+        // rectangle.
+        let mut frame = Framebuffer::new(8, 8);
+        let flat = |x: f32| MeshVertex {
+            position: [x, 4.0],
+            uv: [0.5, 0.5],
+            colour: [255, 255, 255, 255],
+        };
+        frame.draw_mesh(
+            WHOLE,
+            &[flat(0.0), flat(4.0), flat(8.0)],
+            &[0, 1, 2],
+            &Texture::white(),
+        );
+        assert_eq!(frame.fraction_matching(CLEAR), 1.0);
+    }
+
+    #[test]
+    fn winding_does_not_change_what_is_drawn() {
+        // `egui` emits both windings. One inside-test normalised by the signed
+        // area serves either; two tests kept in agreement by hand is how half a
+        // UI goes missing.
+        let mut clockwise = Framebuffer::new(8, 8);
+        let (vertices, _) = quad((1.0, 1.0, 7.0, 7.0), [255, 255, 255, 255]);
+        clockwise.draw_mesh(WHOLE, &vertices, &[0, 1, 2, 0, 2, 3], &Texture::white());
+
+        let mut anticlockwise = Framebuffer::new(8, 8);
+        anticlockwise.draw_mesh(WHOLE, &vertices, &[2, 1, 0, 3, 2, 0], &Texture::white());
+
+        assert_eq!(clockwise.pixels(), anticlockwise.pixels());
+    }
+
+    #[test]
+    fn a_mesh_off_the_frame_writes_nothing() {
+        for rect in [
+            (-100.0, -100.0, -50.0, -50.0),
+            (900.0, 0.0, 950.0, 50.0),
+            (0.0, 0.0, 0.0, 16.0),
+        ] {
+            let mut frame = Framebuffer::new(16, 16);
+            let (vertices, indices) = quad(rect, [255, 255, 255, 255]);
+            frame.draw_mesh(WHOLE, &vertices, &indices, &Texture::white());
+            assert_eq!(frame.fraction_matching(CLEAR), 1.0, "rect {rect:?}");
+        }
+
+        // And an empty texture is refused rather than indexed into.
+        let mut frame = Framebuffer::new(16, 16);
+        let (vertices, indices) = quad((0.0, 0.0, 16.0, 16.0), [255, 255, 255, 255]);
+        frame.draw_mesh(WHOLE, &vertices, &indices, &Texture::default());
+        assert_eq!(frame.fraction_matching(CLEAR), 1.0);
+    }
+
+    #[test]
+    fn a_trailing_partial_triangle_is_ignored() {
+        let mut frame = Framebuffer::new(8, 8);
+        let (vertices, _) = quad((1.0, 1.0, 7.0, 7.0), [255, 255, 255, 255]);
+        frame.draw_mesh(WHOLE, &vertices, &[0, 1], &Texture::white());
+        assert_eq!(frame.fraction_matching(CLEAR), 1.0);
     }
 
     #[test]
