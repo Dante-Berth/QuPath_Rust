@@ -5,6 +5,7 @@
 //! ```text
 //! cargo run -p qupath-viewer --example window --release -- data/CMU-1.svs
 //! cargo run -p qupath-viewer --example window --release -- data/CMU-1.svs 64
+//! cargo run -p qupath-viewer --example window --release -- data/CMU-1.svs 64 --cpu
 //! ```
 //!
 //! Drag to pan, scroll to zoom, `f` to fit the whole slide, escape to quit. The
@@ -13,10 +14,25 @@
 //! while the frame still draws, because the underlay covers what was thrown
 //! away.
 //!
-//! The title bar carries the level, the tile count, resident megabytes and
-//! what the loader is still working on — the level selection and the cache made
-//! visible. Zooming out should *drop* the tile count as it crosses to a coarser
-//! level, not raise it, and a long pan should leave resident megabytes flat.
+//! The title bar carries the backend, the level, the tile count, resident
+//! megabytes and what the loader is still working on — the level selection and
+//! the cache made visible. Zooming out should *drop* the tile count as it
+//! crosses to a coarser level, not raise it, and a long pan should leave
+//! resident megabytes flat.
+//!
+//! # Two backends
+//!
+//! The GPU path is the default and is what §3.1 to §3.4 were built on. `--cpu`
+//! forces the software one, which draws the same rectangles through
+//! [`qupath_viewer::compose`] and presents them with `softbuffer` — no adapter,
+//! no driver, no shader. It is also what happens automatically when there is no
+//! adapter to be had, which used to be a panic at startup.
+//!
+//! Both take the same route as far as the draw list: same viewport, same level
+//! selection, same loader, same cache, same rectangles from
+//! [`Viewport::tile_rect`]. Only the last step differs, which is what makes
+//! `--cpu` worth having on a machine that *does* have a GPU — the two frames
+//! should differ in sampling and in nothing else.
 //!
 //! # What this is checking
 //!
@@ -25,7 +41,8 @@
 //! nor grows without bound. `docs/VIEWER.md` §6 is explicit that appearance is
 //! checked by looking rather than by a test, so the parts that *can* be
 //! asserted live in the library and are tested there — `TileCache`'s budget,
-//! `TileLoader`'s cancellation, and the viewport geometry.
+//! `TileLoader`'s cancellation, the viewport geometry, and now where a tile
+//! lands in a frame.
 //!
 //! # What is not here
 //!
@@ -34,11 +51,13 @@
 //! Scratch tooling, not part of the library.
 #![allow(missing_docs, reason = "example binary")]
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use qupath_slide::Slide;
-use qupath_viewer::{ScreenPoint, SlideTiles, TileCache, TileIndex, TileLoader, Viewport};
+use qupath_viewer::compose::{self, Framebuffer};
+use qupath_viewer::{Loaded, ScreenPoint, SlideTiles, TileCache, TileIndex, TileLoader, Viewport};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -67,10 +86,29 @@ const MAX_TILES: usize = 1024;
 /// Texture budget when none is given, in bytes. Roughly two thousand tiles.
 const DEFAULT_BUDGET: usize = 512 << 20;
 
+/// The colour an undrawn pixel keeps.
+///
+/// `wgpu` takes this as linear and stores it into an sRGB surface, so what ends
+/// up in memory is the encoded form — `(80, 80, 84)` on the driver here, where
+/// [`compose::CLEAR`] holds the correctly rounded `(80, 80, 85)`. One unit in
+/// blue, decided inside the driver; the two backends clear to the same colour
+/// rather than to two colours that happen to look similar.
+const CLEAR: wgpu::Color = wgpu::Color {
+    r: 0.08,
+    g: 0.08,
+    b: 0.09,
+    a: 1.0,
+};
+
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let path = args.next().unwrap_or_else(|| "data/CMU-1.svs".to_owned());
-    let budget = args
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let force_cpu = args.iter().any(|argument| argument == "--cpu");
+    let mut positional = args.iter().filter(|argument| !argument.starts_with("--"));
+    let path = positional
+        .next()
+        .cloned()
+        .unwrap_or_else(|| "data/CMU-1.svs".to_owned());
+    let budget = positional
         .next()
         .and_then(|megabytes| megabytes.parse::<usize>().ok())
         .map_or(DEFAULT_BUDGET, |megabytes| megabytes << 20);
@@ -103,12 +141,14 @@ fn main() {
         source,
         loader,
         budget,
+        force_cpu,
         view,
         dragging: false,
         cursor: ScreenPoint::new(0.0, 0.0),
         requested: Vec::new(),
         incomplete: false,
-        state: None,
+        window: None,
+        backend: None,
     };
 
     let event_loop = EventLoop::new().expect("event loop");
@@ -118,7 +158,6 @@ fn main() {
 
 /// Everything that needs a window to exist before it can be built.
 struct Graphics {
-    window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -133,10 +172,56 @@ struct Graphics {
     instances: wgpu::Buffer,
 }
 
+/// The same thing with no adapter: tiles kept as bytes in main memory and
+/// composed by [`qupath_viewer::compose`].
+struct Software {
+    surface: softbuffer::Surface<Arc<Window>, Arc<Window>>,
+    frame: Framebuffer,
+    /// Decoded tiles as the loader delivered them. The budget means the same
+    /// thing it does on the GPU path — these are the bytes a texture would have
+    /// held — so the two backends evict at the same points and the title bar's
+    /// resident figure is comparable between them.
+    resident: TileCache<Tile>,
+}
+
+/// A decoded tile held in main memory, ready to blit.
+struct Tile {
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+/// One tile and where it goes, in window pixels.
+///
+/// The last thing the two backends agree on: one turns it into an [`Instance`]
+/// for the shader, the other blits into it, and everything upstream — viewport,
+/// level, loader, cache — produced the same list either way.
+struct Draw {
+    tile: TileIndex,
+    /// Exactly what [`Viewport::tile_rect`] returns: `(x, y, width, height)`.
+    rect: (f32, f32, f32, f32),
+}
+
+/// Where a frame ends up.
+///
+/// The split is deliberately as late as possible: everything up to the draw
+/// list — the viewport, the level, the loader, the cache, the rectangles — is
+/// shared, and only storing a tile and presenting a frame differ. A backend
+/// that diverged earlier would make `--cpu` a different viewer rather than a
+/// different last step.
+enum Backend {
+    Gpu(Box<Graphics>),
+    Cpu(Box<Software>),
+}
+
 struct App {
     source: Arc<SlideTiles>,
     loader: TileLoader,
     budget: usize,
+    /// Whether `--cpu` was given. Skips adapter selection outright rather than
+    /// finding a GPU and declining to use it, so the software path can be
+    /// looked at on a machine that has one.
+    force_cpu: bool,
     view: Viewport,
     dragging: bool,
     cursor: ScreenPoint,
@@ -146,15 +231,21 @@ struct App {
     /// Whether the last frame was missing a tile that is still coming. Drives
     /// the wake-up in [`ApplicationHandler::about_to_wait`].
     incomplete: bool,
-    state: Option<Graphics>,
+    window: Option<Arc<Window>>,
+    backend: Option<Backend>,
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() {
+        if self.backend.is_some() {
             return;
         }
-        let state = pollster::block_on(init(event_loop, &self.view, self.budget));
+        let attributes = Window::default_attributes()
+            .with_title("qupath-viewer")
+            .with_inner_size(winit::dpi::LogicalSize::new(self.view.width, self.view.height));
+        let window = Arc::new(event_loop.create_window(attributes).expect("window"));
+
+        let backend = Backend::new(&window, self.budget, self.force_cpu);
         // The window we asked for is not the window we got. winit takes a
         // *logical* size and reports cursor positions in *physical* pixels, so
         // under display scaling — and on Wayland, where the compositor picks
@@ -164,8 +255,10 @@ impl ApplicationHandler for App {
         // Everything downstream is physical: the surface, `tile_rect`, and the
         // shader's window vector. So the viewport is re-fitted to the real
         // surface here, and `Resized` keeps it honest from then on.
-        self.view = Viewport::fit(self.slide(), state.config.width, state.config.height);
-        self.state = Some(state);
+        let (width, height) = backend.size();
+        self.view = Viewport::fit(self.slide(), width, height);
+        self.window = Some(window);
+        self.backend = Some(backend);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -222,10 +315,8 @@ impl ApplicationHandler for App {
 
             WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
                 self.view = self.view.resize(size.width, size.height);
-                if let Some(state) = self.state.as_mut() {
-                    state.config.width = size.width;
-                    state.config.height = size.height;
-                    state.surface.configure(&state.device, &state.config);
+                if let Some(backend) = self.backend.as_mut() {
+                    backend.resize(size.width, size.height);
                 }
                 self.redraw();
             }
@@ -260,8 +351,8 @@ impl App {
     }
 
     fn redraw(&self) {
-        if let Some(state) = self.state.as_ref() {
-            state.window.request_redraw();
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
         }
     }
 
@@ -281,40 +372,36 @@ impl App {
         let was_busy = !self.loader.is_idle();
 
         let view = self.view;
-        let Some(state) = self.state.as_mut() else {
+        let Some(backend) = self.backend.as_mut() else {
             return;
         };
 
-        // Upload whatever arrived since the last frame. This is the only
+        // Take whatever arrived since the last frame. This is the only
         // per-tile work left on the main thread: the decode, the crop and the
         // RGBA expansion all happened on a worker.
         for loaded in self.loader.drain() {
-            let bytes = loaded.pixels.len();
-            let bind_group = upload(state, &loaded.pixels, loaded.width, loaded.height);
-            state.resident.insert(loaded.tile, bind_group, bytes);
+            backend.store(loaded);
         }
 
         // Underlay first in both lists: it is drawn first so the fine tiles
         // paint over it, and it is *requested* first so the fallback is there
         // before the tiles it stands in for.
-        let mut draws: Vec<(TileIndex, Instance)> = Vec::new();
+        //
+        // The draw list is rectangles, not instances or blits, and that is what
+        // keeps the two backends the same viewer: everything above this point
+        // is shared, and the rectangle is the last thing both of them agree on.
+        let mut draws: Vec<Draw> = Vec::new();
         let mut missing: Vec<TileIndex> = Vec::new();
-        let window = [state.config.width as f32, state.config.height as f32];
         for (tiles, level) in [
             (&underlay_tiles, underlay.as_ref().unwrap_or(&level)),
             (&tiles, &level),
         ] {
             for &tile in tiles {
-                if state.resident.touch(tile) {
-                    let (x, y, width, height) = view.tile_rect(tile, level);
-                    draws.push((
+                if backend.touch(tile) {
+                    draws.push(Draw {
                         tile,
-                        Instance {
-                            rect: [x, y, width, height],
-                            window,
-                            _padding: [0.0; 2],
-                        },
-                    ));
+                        rect: view.tile_rect(tile, level),
+                    });
                 } else {
                     missing.push(tile);
                 }
@@ -330,85 +417,230 @@ impl App {
         }
         self.incomplete = was_busy || !self.loader.is_idle();
 
-        state.window.set_title(&format!(
-            "qupath-viewer — level {} of {}, {:.3} px/px, {} tiles +{} under, {} MB, {} loading",
+        let title = format!(
+            "qupath-viewer — {} — level {} of {}, {:.3} px/px, {} tiles +{} under, {} MB, {} loading",
+            backend.name(),
             level.index,
             self.source.slide().levels().len(),
             view.scale,
             tiles.len(),
             underlay_tiles.len(),
-            state.resident.bytes() >> 20,
+            backend.resident_bytes() >> 20,
             self.loader.pending() + self.loader.in_flight(),
-        ));
-
-        let Ok(frame) = state.surface.get_current_texture() else {
-            return;
-        };
-
-        // Every instance is written in one copy *before* the pass opens.
-        // `write_buffer` queues its copy ahead of the whole submission rather
-        // than at the point it appears in the recording, so interleaving writes
-        // with draws would leave every tile reading the last rectangle written
-        // — one tile drawn, the rest stretched over it.
-        let instances: Vec<Instance> = draws.iter().map(|(_, instance)| *instance).collect();
-        state
-            .queue
-            .write_buffer(&state.instances, 0, bytemuck::cast_slice(&instances));
-
-        let target = frame.texture.create_view(&wgpu::TextureViewDescriptor {
-            format: Some(state.config.format),
-            ..Default::default()
-        });
-        let mut encoder = state
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("tiles"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.08,
-                            g: 0.08,
-                            b: 0.09,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_pipeline(&state.pipeline);
-            // The pipeline declares the instance data as vertex buffer 0;
-            // leaving it unbound is a validation error, not a blank frame.
-            pass.set_vertex_buffer(0, state.instances.slice(..));
-
-            // In draw-list order, which is underlay before fine: back to front,
-            // so a fine tile that has arrived covers the coarse one standing in
-            // for it, and one that has not lets the coarse one show through.
-            // `peek` rather than `get` because the pass holds the cache
-            // immutably; the uses were all counted in the loop above.
-            for (slot, (tile, _)) in draws.iter().enumerate() {
-                let Some(bind_group) = state.resident.peek(*tile) else {
-                    continue;
-                };
-                pass.set_bind_group(0, bind_group, &[]);
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "bounded by MAX_TILES, which is far below u32::MAX"
-                )]
-                let slot = slot as u32;
-                pass.draw(0..4, slot..slot + 1);
-            }
+        );
+        backend.present(&draws);
+        if let Some(window) = self.window.as_ref() {
+            window.set_title(&title);
         }
-        state.queue.submit([encoder.finish()]);
-        frame.present();
     }
+}
+
+impl Backend {
+    /// The GPU path if an adapter can be had and `--cpu` was not given, the
+    /// software one otherwise.
+    ///
+    /// Three attempts, in order, and the last one always succeeds. A real
+    /// adapter; then `force_fallback_adapter`, which is Mesa's lavapipe where it
+    /// is installed and is worth trying because it keeps the shader path
+    /// exercised; then [`compose`], which needs no driver at all. This used to
+    /// be `expect("adapter")`, and a machine with no Vulkan or GL driver — a
+    /// headless server, a VM, an ssh session — got a panic at startup.
+    fn new(window: &Arc<Window>, budget: usize, force_cpu: bool) -> Self {
+        if !force_cpu {
+            if let Some(graphics) = pollster::block_on(gpu(window, budget)) {
+                println!("  drawing on the GPU");
+                return Self::Gpu(Box::new(graphics));
+            }
+            println!("  no GPU adapter; drawing on the CPU");
+        }
+        Self::Cpu(Box::new(software(window, budget)))
+    }
+
+    /// What to call this in the title bar.
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Gpu(_) => "gpu",
+            Self::Cpu(_) => "cpu",
+        }
+    }
+
+    /// The surface size in physical pixels, which is what the viewport is sized
+    /// in.
+    fn size(&self) -> (u32, u32) {
+        match self {
+            Self::Gpu(state) => (state.config.width, state.config.height),
+            Self::Cpu(state) => (state.frame.width(), state.frame.height()),
+        }
+    }
+
+    /// Bytes of decoded tile resident, GPU textures or main memory.
+    fn resident_bytes(&self) -> usize {
+        match self {
+            Self::Gpu(state) => state.resident.bytes(),
+            Self::Cpu(state) => state.resident.bytes(),
+        }
+    }
+
+    /// Takes a decoded tile into whichever cache this backend draws from.
+    fn store(&mut self, loaded: Loaded) {
+        let bytes = loaded.pixels.len();
+        match self {
+            Self::Gpu(state) => {
+                let bind_group = upload(state, &loaded.pixels, loaded.width, loaded.height);
+                state.resident.insert(loaded.tile, bind_group, bytes);
+            }
+            Self::Cpu(state) => {
+                let tile = Tile {
+                    pixels: loaded.pixels,
+                    width: loaded.width,
+                    height: loaded.height,
+                };
+                state.resident.insert(loaded.tile, tile, bytes);
+            }
+        };
+    }
+
+    /// Marks a tile as used now, returning whether it is resident.
+    fn touch(&mut self, tile: TileIndex) -> bool {
+        match self {
+            Self::Gpu(state) => state.resident.touch(tile),
+            Self::Cpu(state) => state.resident.touch(tile),
+        }
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        match self {
+            Self::Gpu(state) => {
+                state.config.width = width;
+                state.config.height = height;
+                state.surface.configure(&state.device, &state.config);
+            }
+            Self::Cpu(state) => state.frame.resize(width, height),
+        }
+    }
+
+    /// Draws the list back to front and puts it on the screen.
+    fn present(&mut self, draws: &[Draw]) {
+        match self {
+            Self::Gpu(state) => present_gpu(state, draws),
+            Self::Cpu(state) => present_cpu(state, draws),
+        }
+    }
+}
+
+/// The GPU path: one instance per tile, then one draw call each.
+fn present_gpu(state: &mut Graphics, draws: &[Draw]) {
+    let Ok(frame) = state.surface.get_current_texture() else {
+        return;
+    };
+
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "window pixels; screen space is f32 by definition"
+    )]
+    let window = [state.config.width as f32, state.config.height as f32];
+
+    // Every instance is written in one copy *before* the pass opens.
+    // `write_buffer` queues its copy ahead of the whole submission rather
+    // than at the point it appears in the recording, so interleaving writes
+    // with draws would leave every tile reading the last rectangle written
+    // — one tile drawn, the rest stretched over it.
+    let instances: Vec<Instance> = draws
+        .iter()
+        .map(|draw| Instance {
+            rect: [draw.rect.0, draw.rect.1, draw.rect.2, draw.rect.3],
+            window,
+            _padding: [0.0; 2],
+        })
+        .collect();
+    state
+        .queue
+        .write_buffer(&state.instances, 0, bytemuck::cast_slice(&instances));
+
+    let target = frame.texture.create_view(&wgpu::TextureViewDescriptor {
+        format: Some(state.config.format),
+        ..Default::default()
+    });
+    let mut encoder = state
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("tiles"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(CLEAR),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&state.pipeline);
+        // The pipeline declares the instance data as vertex buffer 0;
+        // leaving it unbound is a validation error, not a blank frame.
+        pass.set_vertex_buffer(0, state.instances.slice(..));
+
+        // In draw-list order, which is underlay before fine: back to front,
+        // so a fine tile that has arrived covers the coarse one standing in
+        // for it, and one that has not lets the coarse one show through.
+        // `peek` rather than `get` because the pass holds the cache
+        // immutably; the uses were all counted when the list was built.
+        for (slot, draw) in draws.iter().enumerate() {
+            let Some(bind_group) = state.resident.peek(draw.tile) else {
+                continue;
+            };
+            pass.set_bind_group(0, bind_group, &[]);
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "bounded by MAX_TILES, which is far below u32::MAX"
+            )]
+            let slot = slot as u32;
+            pass.draw(0..4, slot..slot + 1);
+        }
+    }
+    state.queue.submit([encoder.finish()]);
+    frame.present();
+}
+
+/// The software path: the same list, blitted in the same order.
+///
+/// Back to front for the same reason and by the same mechanism — a later tile
+/// overwrites an earlier one, which on this path is literally what the loop
+/// does.
+fn present_cpu(state: &mut Software, draws: &[Draw]) {
+    state.frame.clear(compose::CLEAR);
+    for draw in draws {
+        let Some(tile) = state.resident.peek(draw.tile) else {
+            continue;
+        };
+        state
+            .frame
+            .draw_tile(draw.rect, &tile.pixels, tile.width, tile.height);
+    }
+
+    // One copy of the composed frame into the buffer the window server reads.
+    // Composing straight into it would save the copy and would mean holding the
+    // surface borrowed across the whole draw; at 3 MB for a 1024x768 frame the
+    // copy is well under a millisecond and not what a pan would stutter on.
+    let (Some(width), Some(height)) = (
+        NonZeroU32::new(state.frame.width()),
+        NonZeroU32::new(state.frame.height()),
+    ) else {
+        return;
+    };
+    if state.surface.resize(width, height).is_err() {
+        return;
+    }
+    let Ok(mut buffer) = state.surface.buffer_mut() else {
+        return;
+    };
+    buffer.copy_from_slice(state.frame.pixels());
+    drop(buffer.present());
 }
 
 fn upload(state: &Graphics, rgba: &[u8], width: u32, height: u32) -> wgpu::BindGroup {
@@ -462,30 +694,55 @@ fn upload(state: &Graphics, rgba: &[u8], width: u32, height: u32) -> wgpu::BindG
     })
 }
 
-async fn init(event_loop: &ActiveEventLoop, view: &Viewport, budget: usize) -> Graphics {
-    let attributes = Window::default_attributes()
-        .with_title("qupath-viewer")
-        .with_inner_size(winit::dpi::LogicalSize::new(view.width, view.height));
-    let window = Arc::new(event_loop.create_window(attributes).expect("window"));
+/// Builds the software backend, which cannot fail for want of a driver.
+fn software(window: &Arc<Window>, budget: usize) -> Software {
+    let context = softbuffer::Context::new(window.clone()).expect("display");
+    let surface = softbuffer::Surface::new(&context, window.clone()).expect("surface");
+    let size = window.inner_size();
+    Software {
+        surface,
+        frame: Framebuffer::new(size.width.max(1), size.height.max(1)),
+        resident: TileCache::new(budget),
+    }
+}
 
+/// Builds the GPU backend, or `None` when there is no adapter to build it on.
+///
+/// Every failure here is a `None` rather than a panic, because the caller has
+/// somewhere to go: a machine with no Vulkan or GL driver still gets a viewer.
+/// The one thing that is *not* silently tolerated is a driver that produces a
+/// device and then cannot make a pipeline — that would be a broken GPU path
+/// rather than an absent one, and it should be seen.
+async fn gpu(window: &Arc<Window>, budget: usize) -> Option<Graphics> {
     let instance = wgpu::Instance::default();
-    let surface = instance.create_surface(window.clone()).expect("surface");
-    let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions {
-            compatible_surface: Some(&surface),
-            ..Default::default()
-        })
-        .await
-        .expect("adapter");
+    let surface = instance.create_surface(window.clone()).ok()?;
+
+    let options = wgpu::RequestAdapterOptions {
+        compatible_surface: Some(&surface),
+        ..Default::default()
+    };
+    let adapter = match instance.request_adapter(&options).await {
+        Ok(adapter) => adapter,
+        // Mesa's lavapipe where it is installed. Slower than the blit in
+        // `compose` for what this viewer draws, but it keeps the real shader
+        // path exercised, which is worth one attempt before giving it up.
+        Err(_) => {
+            instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    force_fallback_adapter: true,
+                    ..options
+                })
+                .await
+                .ok()?
+        }
+    };
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor::default())
         .await
-        .expect("device");
+        .ok()?;
 
     let size = window.inner_size();
-    let mut config = surface
-        .get_default_config(&adapter, size.width.max(1), size.height.max(1))
-        .expect("surface config");
+    let mut config = surface.get_default_config(&adapter, size.width.max(1), size.height.max(1))?;
     // The shader writes plain sRGB values, so the surface must interpret them
     // as sRGB or every tile comes out washed out.
     config.format = config.format.add_srgb_suffix();
@@ -565,8 +822,7 @@ async fn init(event_loop: &ActiveEventLoop, view: &Viewport, budget: usize) -> G
         cache: None,
     });
 
-    Graphics {
-        window,
+    Some(Graphics {
         surface,
         device,
         queue,
@@ -576,7 +832,7 @@ async fn init(event_loop: &ActiveEventLoop, view: &Viewport, budget: usize) -> G
         sampler,
         resident: TileCache::new(budget),
         instances,
-    }
+    })
 }
 
 /// A textured quad per instance, positioned in window pixels.

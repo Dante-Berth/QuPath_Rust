@@ -21,5 +21,9 @@ workspace = true
 bytemuck = { version = "1", features = ["derive"] }
 png = "0.18"
 pollster = "0.4"
+# Presents `compose::Framebuffer` to a window with no GPU involved. From the
+# winit organisation and on winit 0.30's `raw-window-handle`, so it shares the
+# window handle rather than opening a second path to the display server.
+softbuffer = "0.4"
 wgpu = "26"
 winit = "0.30"
