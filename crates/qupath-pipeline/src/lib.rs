@@ -224,6 +224,79 @@ impl Default for Params {
     }
 }
 
+/// QuPath's `WatershedCellDetection` defaults, in the units its dialog uses.
+///
+/// [`Params`] holds **pixels**, because that is what the pipeline computes in
+/// and a length in microns means nothing without a slide. These are the numbers
+/// a QuPath user recognises, and [`Micron::at`] is the conversion between them.
+///
+/// Only the parameters this pipeline actually implements appear here. QuPath's
+/// median filter radius, cell expansion and boundary smoothing are **not**
+/// among them — see the module documentation — and a field for one of those
+/// would be a value that silently does nothing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Micron {
+    /// Background radius, in µm. QuPath's 8.
+    pub background_radius: f64,
+    /// Gaussian sigma, in µm. QuPath's 1.5.
+    pub sigma: f64,
+    /// Smallest surviving area, in µm². QuPath's 10.
+    pub min_area: f64,
+    /// Largest surviving area, in µm². QuPath's 400.
+    pub max_area: f64,
+    /// Mean optical density a candidate must exceed. QuPath's 0.1.
+    ///
+    /// Dimensionless, so it is the same number at any pixel size and
+    /// [`Micron::at`] passes it through untouched.
+    pub intensity_threshold: f64,
+    /// Background level above which a region is masked out. QuPath's 2.0.
+    ///
+    /// Dimensionless, like [`Micron::intensity_threshold`].
+    pub max_background: f32,
+}
+
+impl Default for Micron {
+    fn default() -> Self {
+        Self {
+            background_radius: 8.0,
+            sigma: 1.5,
+            min_area: 10.0,
+            max_area: 400.0,
+            intensity_threshold: 0.1,
+            max_background: 2.0,
+        }
+    }
+}
+
+impl Micron {
+    /// These parameters in pixels, on a slide of `microns_per_pixel`.
+    ///
+    /// # Areas convert by the *square* of the pixel size
+    ///
+    /// A radius divides by the pixel size once and an area divides by it twice.
+    /// Using the radius conversion for an area is out by the pixel size — a
+    /// factor of two on CMU-1 — and it is the kind of error that leaves
+    /// detection returning plausible objects, so
+    /// `an_area_converts_by_the_square` pins it against a pixel size where the
+    /// two conversions give visibly different answers.
+    ///
+    /// `level` and the tiling fields are not derived from microns and come from
+    /// [`Params::default`].
+    #[must_use]
+    pub fn at(self, microns_per_pixel: f64) -> Params {
+        Params {
+            background_radius: self.background_radius / microns_per_pixel,
+            sigma: self.sigma / microns_per_pixel,
+            min_area: self.min_area / (microns_per_pixel * microns_per_pixel),
+            max_area: self.max_area / (microns_per_pixel * microns_per_pixel),
+            // Dimensionless: an optical density, not a length.
+            intensity_threshold: self.intensity_threshold,
+            max_background: self.max_background,
+            ..Params::default()
+        }
+    }
+}
+
 /// The value below which a pixel of the Laplacian of Gaussian cannot be a
 /// regional maximum at all: `findRegionalMaxima(fpLoG, 0.001f, false)`.
 ///
@@ -1268,6 +1341,60 @@ pub fn peak_resident_bytes() -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The conversion must reproduce the constants `Params::default` was
+    /// written with by hand, at the pixel size they were computed for.
+    ///
+    /// This is the test that makes `Micron` safe to introduce: if the two ever
+    /// disagree, one of them is wrong, and the hand-computed values are the ones
+    /// every recorded measurement in `ROADMAP.md` was taken with.
+    #[test]
+    fn the_micron_defaults_reproduce_the_pixel_defaults_on_cmu1() {
+        let converted = Micron::default().at(0.4990);
+        let expected = Params::default();
+        assert!(
+            (converted.background_radius - expected.background_radius).abs() < 1e-12,
+            "{} vs {}",
+            converted.background_radius,
+            expected.background_radius
+        );
+        assert!((converted.sigma - expected.sigma).abs() < 1e-12);
+        assert!((converted.min_area - expected.min_area).abs() < 1e-12);
+        assert!((converted.max_area - expected.max_area).abs() < 1e-12);
+        assert!((converted.intensity_threshold - expected.intensity_threshold).abs() < 1e-12);
+        assert!((converted.max_background - expected.max_background).abs() < 1e-6);
+    }
+
+    /// An area converts by the *square* of the pixel size and a radius by the
+    /// pixel size itself. Using one conversion for the other is out by a factor
+    /// of the pixel size, and leaves detection returning plausible objects.
+    ///
+    /// 0.25 µm/px is chosen because it makes the two answers differ by 4x rather
+    /// than by the 2x CMU-1 would give, so a test that confused them cannot pass
+    /// by rounding.
+    #[test]
+    fn an_area_converts_by_the_square() {
+        let params = Micron::default().at(0.25);
+        // A radius: 8 µm at 0.25 µm/px is 32 px.
+        assert!((params.background_radius - 32.0).abs() < 1e-12);
+        // An area: 10 µm² at 0.0625 µm²/px is 160 px², not 40.
+        assert!(
+            (params.min_area - 160.0).abs() < 1e-12,
+            "min_area came out {} -- 40 means the radius conversion was used",
+            params.min_area
+        );
+        assert!((params.max_area - 6400.0).abs() < 1e-9);
+    }
+
+    /// The dimensionless parameters must not be scaled at all.
+    #[test]
+    fn the_dimensionless_parameters_are_untouched_by_pixel_size() {
+        for mpp in [0.1, 0.4990, 1.0, 4.0] {
+            let params = Micron::default().at(mpp);
+            assert!((params.intensity_threshold - 0.1).abs() < 1e-12, "at {mpp}");
+            assert!((params.max_background - 2.0).abs() < 1e-6, "at {mpp}");
+        }
+    }
 
     /// Runs the marker chain the tile loop runs, on a hand-built surface.
     fn markers(values: &[f32], width: usize) -> (u32, Vec<f32>) {
