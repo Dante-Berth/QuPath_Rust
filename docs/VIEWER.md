@@ -125,9 +125,10 @@ take a slide path defaulting to `data/CMU-1.svs`.
 # slide will not open rather than an exit. A path on the command line is opened
 # at startup; without one it comes up asking for a slide.
 #
-# Drag to pan, scroll to zoom, f to fit. `d` detects cells in what is on screen
-# and `h` hides the outlines again; the run happens on another thread, so the
-# view keeps moving while it works.
+# Drag to pan, scroll or +/- to zoom about the cursor, right-drag a box to zoom
+# to that region, f to fit. `d` detects cells in what is on screen and `h` hides
+# the outlines again; the run happens on another thread, so the view keeps
+# moving while it works.
 cargo run -p qupath-app --release
 cargo run -p qupath-app --release -- data/CMU-1.svs
 
@@ -632,6 +633,75 @@ it.
   holds its tiles, reports its numbers, draws its outlines and idles; how it
   *looks* has not been seen.
 
+### 3.7 Zooming to a rectangle — **done**
+
+Scroll-to-zoom and the toolbar buttons existed since §3.3. What did not was a
+way to say "that region, fill the window with it", which is the gesture a
+person reaches for when they can see where they want to go.
+
+**Right-drag draws a box and releasing zooms to it.** Left-drag still pans, so
+neither gesture is modal and nothing has to be unlearned; escape abandons a box
+mid-drag, and a right-drag under eight window pixels is treated as a click
+rather than a zoom by a factor of several hundred.
+
+`Viewport::zoom_to_box` is the whole of the arithmetic and lives in the library
+beside `fit` and `zoom_about`, so it is unit-tested with no window: the box's
+own corners land back inside the window afterwards, all four drag directions
+give the same view, a box the wrong shape **overshoots rather than crops**, a
+degenerate box is refused instead of dividing by zero, and the clamp is the one
+every other zoom obeys. Fitting rather than stretching is forced by `Viewport`
+having a single `scale`; the alternative is a scale per axis and a second factor
+in every conversion in that file.
+
+#### The bug this uncovered, which was the more valuable half
+
+Reported from use: *"when I zoom the center remains the same"*, and separately
+that the toolbar buttons were the only way to zoom that worked at all.
+
+**Scroll-to-zoom had never worked in the application.** `state::input` gated the
+wheel on `egui`'s `consumed`, and `egui_winit` derives that from
+`wants_pointer_input()` — which is true for a pointer anywhere over a *panel*.
+The slide is a `CentralPanel`, so the answer is true over bare glass with no
+widget within four hundred pixels; an empty central panel with nothing allocated
+in it at all is enough. Every scroll over the slide was discarded, leaving the
+toolbar's buttons as the only working control, and those anchor on the view
+centre. Hence the symptom: zoom appeared permanently centre-locked.
+
+Panning was unaffected only because `CursorMoved` is reported against
+`is_using_pointer()`, which is true only while a button is already held. Two
+gestures gated on two different questions is what let one work and the other
+vanish silently.
+
+The first attempted fix — changing the panel's `Sense::drag()` to
+`Sense::empty()` — was wrong, and a probe said so: `wants_pointer_input` is true
+over a central panel *regardless of sense*, including with nothing allocated.
+The sense was never the discriminator. What separates the slide from the chrome
+is geometry, so `chrome::draw` now returns `available_rect` — the strip left
+after the toolbar and status bar have taken theirs — and all three mouse
+gestures ask `cursor_over_slide()` instead of `consumed`. `consumed` is still
+honoured for the keyboard, where "does something have focus" is a question only
+`egui` can answer.
+
+Two tests hold it: one that the reported rectangle contains the slide's middle
+and excludes both strips, and one asserting that `egui` *does* claim the pointer
+over a bare central panel — so that if that ever changes, the workaround is
+retired deliberately rather than left as cargo.
+
+#### Discoverability, which was the actual complaint
+
+The gesture was invisible, which is how the bug above survived: with the wheel
+dead and nothing advertising right-drag, the buttons were all there was. So the
+status bar now carries `drag to pan · right-drag a box to zoom · +/−` at rest
+and, while a box is being dragged, **what releasing it would do** — `zoom to
+4.2x`, read from `zoom_to_box` itself rather than recomputed, because a label
+predicting a different factor from the one applied is worse than no label. The
+`+`/`−` keys zoom about the cursor, and the toolbar tooltips name the gesture.
+
+**What is not done:** the box is drawn as four one-pixel segments through
+`draw_segments`, so it has no fill and no dashes; and as everywhere else in §6,
+how it *looks* has not been checked, only that it appears, tracks the cursor and
+zooms to the region it enclosed.
+
 ## 4. The two things that will bite
 
 - **Texture memory — handled, in `cache::TileCache`.** A naive "upload every
@@ -759,6 +829,36 @@ trusting a measurement, know what value would have made it fail, and check that
 that value is reachable.** For the coverage check, no byte value was. For `ps`,
 no idle process is — its `%cpu` cannot distinguish "asleep now" from "was busy
 once". A number that cannot come out wrong is not evidence.
+
+#### A third instance, and the part the rule missed
+
+Adding the zoom rectangle (§3.7) re-measured the idle number by the `/proc`
+delta method above, and got **55%, 65%, 94%** — a spin, apparently, and one the
+same method had shown as 0% a milestone earlier. The instrument was the good
+one. It was still the wrong reading twice over.
+
+The first error was sampling before the window had settled: CMU-1 takes about
+thirteen seconds to finish its startup decode, and a three-second sample taken
+at nine seconds is measuring the decode. The fix is not a longer sleep but a
+*termination check* — poll a frame counter until it stops moving, then measure,
+so the wait is derived from the program rather than guessed. The second error
+was worse and is why the numbers were erratic rather than merely high: earlier
+test binaries were still running. `/proc/<pid>/stat` was being read for a pid
+that was contending with three other copies of the same viewer.
+
+What the rule as stated did not cover: it asks whether the measurement can come
+out *wrong*, and this one could. It does not ask whether the thing being
+measured is the thing you think you are pointing at. Both errors here were of
+that second kind — right instrument, right units, wrong subject. So the rule
+gains a clause: **check that the number moves when the thing you are measuring
+moves, and that nothing else is in the frame.** A per-thread breakdown answers
+both at once, which is why it is what finally settled this: it showed every
+thread at 0% and the main thread in `ep_poll`, which no amount of aggregate
+percentage could have distinguished from a busy process.
+
+The idle claim, measured after all of that on a quiet machine with the frame
+counter confirmed stopped: **0% across four three-second samples**, main thread
+in state `S`.
 
 ## 7. Open questions
 
