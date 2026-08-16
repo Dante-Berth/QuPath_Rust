@@ -13,12 +13,16 @@
 
 use std::path::PathBuf;
 
+use qupath_pipeline::Micron;
 use qupath_viewer::SlidePoint;
 
 use crate::state::{App, cursor_slide_position, describe, display_name};
 
 /// What the interface is asking the application to do.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// `Eq` is deliberately absent: [`Command::SetTuning`] carries floats, and a
+/// derived `Eq` on them is the one that does not mean what it says.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum Command {
     #[default]
     None,
@@ -34,6 +38,27 @@ pub enum Command {
     Detect,
     /// Show or hide the outlines of what was detected, without re-running.
     ToggleOverlay,
+    /// Show or hide the analysis panel.
+    ToggleAnalysis,
+    /// Show or hide the slide-metadata panel.
+    ToggleMetadata,
+    /// Show or hide the gesture and key list.
+    ToggleHelp,
+    /// Replace the detection parameters.
+    ///
+    /// The whole struct rather than one field, because it keeps [`Command`] one
+    /// value per frame — see the module documentation — and because a slider
+    /// being dragged produces a new value every frame anyway, so there is
+    /// nothing to accumulate.
+    ///
+    /// This is what lets `draw` keep taking `&App`: the panel reads the current
+    /// parameters, shows the edit the user just made, and hands the result back
+    /// rather than writing through a `&mut`. The alternative is
+    /// `draw(&mut App)`, which would give the layout code the ability to change
+    /// anything and lose the property this module is built on.
+    SetTuning(Micron),
+    /// Put the detection parameters back to QuPath's defaults.
+    ResetTuning,
 }
 
 /// Sets the look once, at startup.
@@ -118,6 +143,27 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
                     .clicked()
                 {
                     command = Command::Zoom(1);
+                }
+            });
+
+            ui.menu_button("View", |ui| {
+                // Checkboxes rather than buttons: these are states, and a
+                // menu entry that does not say whether the thing is currently
+                // showing makes the user open the panel to find out.
+                let mut analysis = app.show_analysis;
+                if ui.checkbox(&mut analysis, "Analysis").clicked() {
+                    command = Command::ToggleAnalysis;
+                    ui.close();
+                }
+                let mut metadata = app.show_metadata;
+                if ui.checkbox(&mut metadata, "Slide metadata").clicked() {
+                    command = Command::ToggleMetadata;
+                    ui.close();
+                }
+                let mut help = app.show_help;
+                if ui.checkbox(&mut help, "Gestures and keys").clicked() {
+                    command = Command::ToggleHelp;
+                    ui.close();
                 }
             });
 
@@ -236,7 +282,28 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
         });
     });
 
-    // After the two panels have taken their strips and before the central one
+    // The side panels go in *before* `available_rect` is read below, which is
+    // the whole contract that keeps `cursor_over_slide` honest: a panel added
+    // after that line would sit over the slide's rectangle, and every gesture
+    // would treat a click on it as a click on the tissue. `docs/VIEWER.md` §3.7
+    // records what that class of bug cost the last time.
+    if app.show_analysis {
+        egui::SidePanel::right("analysis")
+            .default_width(260.0)
+            .show(context, |ui| analysis(ui, app, &mut command));
+    }
+    if app.show_metadata {
+        egui::SidePanel::left("metadata")
+            .default_width(240.0)
+            .show(context, |ui| metadata(ui, app));
+    }
+    if app.show_help {
+        egui::SidePanel::left("help")
+            .default_width(280.0)
+            .show(context, help);
+    }
+
+    // After the panels have taken their strips and before the central one
     // is shown, which is when this is the slide's rectangle and nothing else's.
     let available = context.available_rect();
     let slide_area = (
@@ -270,6 +337,354 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
         });
 
     (command, slide_area)
+}
+
+/// The analysis panel: QuPath's cell-detection parameters, in QuPath's units.
+///
+/// # Why microns, and why the pixel value beside them
+///
+/// QuPath's dialog is in microns and so is this, so a number a user knows
+/// transfers. But the pipeline computes in **pixels**, and the conversion needs
+/// the slide's pixel size — so the panel shows both: the micron value that is
+/// being edited, and the pixel value that will actually run. A parameter whose
+/// effect depends on a number the interface does not show is one the user cannot
+/// reason about, and the pixel column is what makes "8 µm" mean something
+/// specific on this slide rather than in general.
+///
+/// **Only the six parameters this pipeline implements appear.** QuPath's median
+/// filter radius, cell expansion and boundary smoothing are not implemented, and
+/// a slider for one of them would be a control that silently does nothing — the
+/// user's reasonable conclusion being that detection is broken. `VIEWER.md` §8.1
+/// has the full table.
+fn analysis(ui: &mut egui::Ui, app: &App, command: &mut Command) {
+    ui.heading("Analysis");
+    ui.label(
+        egui::RichText::new("Cell detection parameters, as QuPath names them.")
+            .weak()
+            .small(),
+    );
+    ui.separator();
+
+    // The slide's own pixel size, which every micron value converts through.
+    // Stated rather than assumed: a slide with no `MPP` runs on the built-in
+    // defaults, and the user has to be able to tell which of the two is
+    // happening — otherwise the µm labels are a claim the run does not honour.
+    let mpp = app
+        .open
+        .as_ref()
+        .and_then(|open| open.slide().microns_per_pixel());
+    match mpp {
+        Some(mpp) => {
+            ui.label(format!("{mpp:.4} µm/pixel"))
+                .on_hover_text("Read from the slide's Aperio description (MPP).");
+        }
+        None => {
+            ui.label(egui::RichText::new("Pixel size unknown").weak())
+                .on_hover_text(
+                    "This slide records no MPP, so microns cannot be converted \
+                     to pixels. Detection runs with the built-in defaults and \
+                     the values below are not applied.",
+                );
+        }
+    }
+    ui.separator();
+
+    let mut tuning = app.tuning;
+    let mut changed = false;
+    // Every control is disabled without a pixel size, because without one the
+    // values below are not what runs. Greyed out and explained above beats a
+    // slider that moves and changes nothing.
+    ui.add_enabled_ui(mpp.is_some(), |ui| {
+        ui.label(egui::RichText::new("Nucleus parameters").strong());
+        changed |= slider(
+            ui,
+            &mut tuning.background_radius,
+            0.0..=30.0,
+            "Background radius",
+            "µm",
+            mpp,
+            Unit::Length,
+            "Radius for background estimation; should exceed the largest nucleus \
+             radius. Zero turns background subtraction off.",
+        );
+        changed |= slider(
+            ui,
+            &mut tuning.sigma,
+            0.0..=10.0,
+            "Sigma",
+            "µm",
+            mpp,
+            Unit::Length,
+            "Gaussian smoothing before the Laplacian. Larger values stop nuclei \
+             fragmenting but blur their boundaries.",
+        );
+        changed |= slider(
+            ui,
+            &mut tuning.min_area,
+            0.0..=200.0,
+            "Minimum area",
+            "µm²",
+            mpp,
+            Unit::Area,
+            "Detected nuclei smaller than this are discarded.",
+        );
+        changed |= slider(
+            ui,
+            &mut tuning.max_area,
+            0.0..=2000.0,
+            "Maximum area",
+            "µm²",
+            mpp,
+            Unit::Area,
+            "Detected nuclei larger than this are discarded.",
+        );
+
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Intensity parameters").strong());
+        // Dimensionless, so no pixel column: these are optical densities and
+        // mean the same thing at any pixel size.
+        changed |= ui
+            .add(
+                egui::Slider::new(&mut tuning.intensity_threshold, 0.0..=1.0)
+                    .text("Threshold")
+                    .fixed_decimals(3),
+            )
+            .on_hover_text(
+                "A candidate's mean haematoxylin optical density must exceed \
+                 this to survive. Dimensionless, so it does not scale with the \
+                 pixel size.",
+            )
+            .changed();
+        let mut max_background = f64::from(tuning.max_background);
+        if ui
+            .add(
+                egui::Slider::new(&mut max_background, 0.0..=5.0)
+                    .text("Max background")
+                    .fixed_decimals(2),
+            )
+            .on_hover_text(
+                "Nuclei sitting on a background above this are discarded. \
+                 Only has an effect when the background radius is above zero.",
+            )
+            .changed()
+        {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a slider bounded to 0..=5, which f32 holds exactly enough of"
+            )]
+            {
+                tuning.max_background = max_background as f32;
+            }
+            changed = true;
+        }
+    });
+
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.add_enabled_ui(app.open.is_some() && !app.detector.is_running(), |ui| {
+            if ui
+                .button("Detect cells")
+                .on_hover_text("Run with these parameters over what is on screen (d).")
+                .clicked()
+            {
+                *command = Command::Detect;
+            }
+        });
+        if ui
+            .button("Reset")
+            .on_hover_text("Back to QuPath's defaults.")
+            .clicked()
+        {
+            *command = Command::ResetTuning;
+        }
+    });
+
+    // After the buttons, so a click on one of them wins the frame. Both cannot
+    // be reported at once — one command per frame, per this module's
+    // documentation — and a dropped slider frame is invisible where a dropped
+    // button press is not.
+    if changed && *command == Command::None {
+        *command = Command::SetTuning(tuning);
+    }
+
+    ui.add_space(8.0);
+    ui.label(
+        egui::RichText::new(
+            "QuPath's median filter, cell expansion and boundary smoothing are \
+             not implemented here, so they are not shown.",
+        )
+        .weak()
+        .small(),
+    );
+}
+
+/// Whether a parameter is a length or an area, which is how it converts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Unit {
+    /// Divides by the pixel size once.
+    Length,
+    /// Divides by the pixel size **twice**.
+    Area,
+}
+
+/// One micron-valued slider, with the pixel value it converts to beside it.
+///
+/// The pixel column is the point: an area divides by the *square* of the pixel
+/// size where a length divides by it once, and showing the result is what makes
+/// that visible rather than a thing to be trusted.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a slider's label, unit, range, tooltip and conversion; splitting \
+              them into a struct would be more ceremony than the four calls save"
+)]
+fn slider(
+    ui: &mut egui::Ui,
+    value: &mut f64,
+    range: std::ops::RangeInclusive<f64>,
+    label: &str,
+    unit: &str,
+    mpp: Option<f64>,
+    kind: Unit,
+    hover: &str,
+) -> bool {
+    let changed = ui
+        .add(
+            egui::Slider::new(value, range)
+                .text(format!("{label} ({unit})"))
+                .fixed_decimals(1),
+        )
+        .on_hover_text(hover)
+        .changed();
+    if let Some(mpp) = mpp {
+        let pixels = match kind {
+            Unit::Length => *value / mpp,
+            Unit::Area => *value / (mpp * mpp),
+        };
+        let suffix = if kind == Unit::Area { "px²" } else { "px" };
+        ui.label(
+            egui::RichText::new(format!("    = {pixels:.1} {suffix}"))
+                .weak()
+                .small(),
+        )
+        .on_hover_text("What this slide's pixel size makes of the value above.");
+    }
+    changed
+}
+
+/// The slide-metadata panel: what the file says about itself.
+///
+/// Everything here is read from the slide rather than computed, and it exists
+/// because `VIEWER.md` §8.0's pixel-size fix is otherwise invisible — the number
+/// every micron parameter divides by now has somewhere to be seen.
+fn metadata(ui: &mut egui::Ui, app: &App) {
+    ui.heading("Slide");
+    ui.separator();
+    let Some(open) = &app.open else {
+        ui.label(egui::RichText::new("No slide open.").weak());
+        return;
+    };
+    let slide = open.slide();
+
+    ui.label(egui::RichText::new(display_name(&open.path)).strong());
+    ui.label(egui::RichText::new(describe(slide)).weak().small());
+    ui.add_space(6.0);
+
+    egui::Grid::new("metadata-grid")
+        .num_columns(2)
+        .spacing([12.0, 4.0])
+        .show(ui, |ui| {
+            // `None` is shown as a dash rather than a plausible default, for
+            // `Slide::microns_per_pixel`'s reason: a guessed pixel size is
+            // wrong in the way that looks right.
+            ui.label("Pixel size");
+            match slide.microns_per_pixel() {
+                Some(mpp) => ui.label(format!("{mpp:.4} µm")),
+                None => ui.label(egui::RichText::new("—").weak()),
+            };
+            ui.end_row();
+
+            ui.label("Magnification");
+            match slide.magnification() {
+                Some(magnification) => ui.label(format!("{magnification:.0}x")),
+                None => ui.label(egui::RichText::new("—").weak()),
+            };
+            ui.end_row();
+
+            ui.label("Levels");
+            ui.label(format!("{}", slide.levels().len()));
+            ui.end_row();
+        });
+
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new("Pyramid").strong());
+    egui::Grid::new("level-grid")
+        .num_columns(3)
+        .spacing([10.0, 2.0])
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new("Level").weak().small());
+            ui.label(egui::RichText::new("Size").weak().small());
+            ui.label(egui::RichText::new("Downsample").weak().small());
+            ui.end_row();
+            let current = open.view.level(slide).index;
+            for level in slide.levels() {
+                // The level being shown is marked, because the status bar
+                // reports a level number and this table is where that number
+                // gets its meaning.
+                let mark = |text: String| {
+                    if level.index == current {
+                        egui::RichText::new(text).strong()
+                    } else {
+                        egui::RichText::new(text)
+                    }
+                };
+                ui.label(mark(level.index.to_string()));
+                ui.label(mark(format!("{} x {}", level.width, level.height)));
+                ui.label(mark(format!("{:.1}x", level.downsample)));
+                ui.end_row();
+            }
+        });
+}
+
+/// Every gesture and key, in one place.
+///
+/// This is the pane QuPath has no equivalent of, and it exists because the
+/// complaint that produced `VIEWER.md` §3.7 was discoverability: the zoom
+/// gesture was invisible, which is how a dead scroll wheel survived unnoticed.
+/// The status bar fixed one gesture's worth of that; this is the rest.
+fn help(ui: &mut egui::Ui) {
+    ui.heading("Gestures and keys");
+    ui.separator();
+    egui::Grid::new("help-grid")
+        .num_columns(2)
+        .spacing([14.0, 6.0])
+        .striped(true)
+        .show(ui, |ui| {
+            for (gesture, effect) in [
+                ("Left-drag", "Pan. The view stays on the slide."),
+                ("Right-drag", "Draw a box; releasing zooms to it."),
+                ("Escape", "Abandon a box mid-drag."),
+                ("Scroll", "Zoom about the cursor."),
+                ("+ / −", "Zoom about the cursor."),
+                ("f", "Fit the whole slide."),
+                ("d", "Detect cells in what is on screen."),
+                ("h", "Show or hide the outlines."),
+                ("o", "Open a slide."),
+            ] {
+                ui.label(egui::RichText::new(gesture).strong());
+                ui.label(effect);
+                ui.end_row();
+            }
+        });
+    ui.add_space(8.0);
+    ui.label(
+        egui::RichText::new(
+            "Zoom buttons in the toolbar work about the centre of the view; \
+             the wheel and the +/− keys work about the cursor.",
+        )
+        .weak()
+        .small(),
+    );
 }
 
 /// The detection controls: run it, and show or hide what it found.
@@ -436,6 +851,84 @@ mod tests {
         assert!(
             area.1 > 0.0 && area.3 < 600.0,
             "the panels reserved nothing: {area:?}"
+        );
+    }
+
+    /// The same layout with a side panel open, which is what the analysis,
+    /// metadata and help panes add.
+    fn layout_with_side_panel() -> (f32, f32, f32, f32) {
+        let context = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let mut area = (0.0, 0.0, 0.0, 0.0);
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let _ = context.run(input, |context| {
+                egui::TopBottomPanel::top("toolbar").show(context, |ui| {
+                    ui.horizontal(|ui| {
+                        let _ = ui.button("Fit");
+                    });
+                });
+                egui::TopBottomPanel::bottom("status").show(context, |ui| {
+                    ui.label("status");
+                });
+                // The ordering `draw` uses: side panels before the rectangle is
+                // read. This test exists because putting them after is the
+                // mistake that would compile and look right.
+                egui::SidePanel::right("analysis")
+                    .default_width(260.0)
+                    .show(context, |ui| {
+                        ui.label("parameters");
+                    });
+                area = {
+                    let available = context.available_rect();
+                    (
+                        available.min.x,
+                        available.min.y,
+                        available.max.x,
+                        available.max.y,
+                    )
+                };
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(context, |ui| {
+                        ui.allocate_response(ui.available_size(), egui::Sense::empty());
+                    });
+            });
+        }
+        area
+    }
+
+    /// A side panel must come out of the slide's rectangle.
+    ///
+    /// If it does not, every gesture treats a click on a slider as a click on
+    /// the tissue: dragging a parameter would pan the slide underneath it, and
+    /// a scroll to reach a control further down the panel would zoom. That is
+    /// the same class of bug `docs/VIEWER.md` §3.7 records, which is why the
+    /// panels are laid out before `available_rect` is read and why this asserts
+    /// on it rather than trusting the ordering.
+    #[test]
+    fn a_side_panel_is_not_part_of_the_slide_rectangle() {
+        let area = layout_with_side_panel();
+        // The panel is on the right, so the rectangle's right edge must have
+        // moved in from the window's.
+        assert!(
+            area.2 < 800.0,
+            "the side panel reserved nothing: {area:?} still reaches the window edge"
+        );
+        // A point inside the panel is not the slide's.
+        let in_panel = egui::pos2(780.0, 300.0);
+        assert!(
+            !contains(area, in_panel),
+            "a point in the side panel is inside the slide rectangle {area:?}"
+        );
+        // And the middle of what is left still is, so the panel has not taken
+        // the whole window.
+        assert!(
+            contains(area, egui::pos2(200.0, 300.0)),
+            "the slide rectangle {area:?} excludes the tissue left of the panel"
         );
     }
 

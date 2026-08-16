@@ -53,7 +53,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
-use qupath_pipeline::{self as pipeline, Params, Region};
+use qupath_pipeline::{self as pipeline, Micron, Params, Region};
 use qupath_slide::{Level, Slide};
 use qupath_viewer::{Overlay, Viewport};
 
@@ -180,7 +180,7 @@ impl Detector {
     /// same handle the viewer pans with would put the two in each other's way
     /// for the whole run, which is precisely the interval this exists to keep
     /// smooth.
-    pub fn start(&mut self, path: &Path, level: &Level, view: Viewport) {
+    pub fn start(&mut self, path: &Path, level: &Level, view: Viewport, tuning: Micron) {
         let Some((region, capped)) = region_for(view, level) else {
             self.message = Some(String::from(
                 "Nothing to detect: the view is off the slide.",
@@ -203,7 +203,7 @@ impl Detector {
         // run instead of waiting ninety seconds for one.
         std::thread::spawn(move || {
             let started = Instant::now();
-            let result = detect(&path, index, region).map(|(overlay, objects)| {
+            let result = detect(&path, index, region, tuning).map(|(overlay, objects)| {
                 (
                     overlay,
                     Summary {
@@ -292,11 +292,23 @@ fn describe(summary: &Summary) -> String {
 ///
 /// The whole of the detection side, in one function, so what runs on the worker
 /// thread is visible in one place.
-fn detect(path: &PathBuf, level: usize, region: Region) -> Result<(Overlay, usize), String> {
+fn detect(
+    path: &PathBuf,
+    level: usize,
+    region: Region,
+    tuning: Micron,
+) -> Result<(Overlay, usize), String> {
     let slide = Slide::open(path).map_err(|error| error.to_string())?;
+    // The slide's own pixel size, not an assumed one. `Params::default`
+    // hardcodes CMU-1's 0.4990 µm/px, so a slide scanned at any other size got
+    // every micron-derived filter at the wrong scale -- see `VIEWER.md` §8.0.
+    // A slide that records no `MPP` keeps the old behaviour rather than
+    // refusing to run, and the panel says which of the two is happening.
     let params = Params {
         level,
-        ..Params::default()
+        ..slide
+            .microns_per_pixel()
+            .map_or_else(Params::default, |mpp| tuning.at(mpp))
     };
     let (outcome, detections) =
         pipeline::run_collecting(&slide, region, params).map_err(|error| error.to_string())?;

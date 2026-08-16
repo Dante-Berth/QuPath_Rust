@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use qupath_pipeline::Micron;
 use qupath_slide::Slide;
 use qupath_viewer::compose::{self, Framebuffer, MeshVertex, Texture};
 use qupath_viewer::{ScreenPoint, SlidePoint, SlideTiles, TileCache, TileLoader, Viewport};
@@ -231,6 +232,18 @@ pub struct App {
     segments: Vec<ScreenPoint>,
     /// Objects the last frame drew an outline for, for the status bar.
     pub outlined: usize,
+    /// Detection parameters, in QuPath's units.
+    ///
+    /// Held here rather than in [`Detector`] because they outlive a run and
+    /// survive a slide being closed: they are what the user has dialled in, not
+    /// what the last run used. [`Detector::start`] is handed a copy.
+    pub tuning: Micron,
+    /// Whether the analysis panel is showing.
+    pub show_analysis: bool,
+    /// Whether the slide-metadata panel is showing.
+    pub show_metadata: bool,
+    /// Whether the gesture and key list is showing.
+    pub show_help: bool,
 }
 
 impl App {
@@ -256,6 +269,10 @@ impl App {
             detector: Detector::new(),
             segments: Vec::new(),
             outlined: 0,
+            tuning: Micron::default(),
+            show_analysis: false,
+            show_metadata: false,
+            show_help: false,
         }
     }
 
@@ -579,10 +596,21 @@ impl App {
             Command::Detect => {
                 if let Some(open) = &self.open {
                     let level = open.view.level(open.slide()).clone();
-                    self.detector.start(&open.path, &level, open.view);
+                    self.detector
+                        .start(&open.path, &level, open.view, self.tuning);
                 }
             }
             Command::ToggleOverlay => self.show_overlay = !self.show_overlay,
+            Command::ToggleAnalysis => self.show_analysis = !self.show_analysis,
+            Command::ToggleMetadata => self.show_metadata = !self.show_metadata,
+            Command::ToggleHelp => self.show_help = !self.show_help,
+            // Changing a parameter does not re-run detection. A run takes about
+            // a second and a slider produces a value every frame, so re-running
+            // on change would start dozens of runs across one drag and show the
+            // answer to a parameter the user had already moved past. `Detect`
+            // is the deliberate act, as it is in QuPath's dialog.
+            Command::SetTuning(tuning) => self.tuning = tuning,
+            Command::ResetTuning => self.tuning = Micron::default(),
             Command::Fit => {
                 if let Some(open) = &mut self.open {
                     let (width, height) = (open.view.width, open.view.height);
