@@ -935,3 +935,138 @@ in state `S`.
   tile is one fresh allocation of packed RGBA, because the buffer is given to
   the main thread and cannot be reused. A return channel would close it. It has
   not been measured, so it has not been written.
+
+## 8. Following QuPath's interface
+
+Asked directly: *take the Java that gives QuPath its interface and do the same
+in Rust.* This section is the answer, and it starts with the measurement,
+because the measurement changes the plan.
+
+### What the Java actually is
+
+| | Lines |
+| --- | --- |
+| `qupath-gui-fx` | **101,712** |
+| `ProjectBrowser.java` alone | 1,676 |
+| `ImageDetailsPane.java` | 1,200 |
+| `PathClassPane.java` | 1,065 |
+| all of `crates/qupath-app` | **1,600** |
+
+**So it is not a translation, and this file will not pretend otherwise.** One
+pane of QuPath's interface is the size of our whole application. Beyond the
+size, the two are built on opposite models: JavaFX is retained-mode with
+observable properties, FXML layouts, a scene graph and CSS, where `egui` is
+immediate-mode and rebuilds the interface every frame from state. There is no
+line-by-line correspondence to find — §2 chose immediate mode deliberately,
+because this viewer's interface is almost entirely derived from viewport state.
+
+What *is* portable, and what this section takes, is **the design**: which panes
+exist, what each one holds, and — the one piece that really is a specification —
+the project file format, which is JSON and has nothing to do with JavaFX.
+
+### 8.1 Detection parameters — **in progress**
+
+The finding that started this: **the pipeline already implements most of
+QuPath's `WatershedCellDetection` parameters, and the application throws them
+away.** `detect.rs` sets `level` and takes `Params::default()` for everything
+else, so six numbers QuPath puts in a dialog are unreachable here.
+
+| QuPath (`WatershedCellDetection`) | `Params` | Status |
+| --- | --- | --- |
+| Background radius | `background_radius` | implemented, not exposed |
+| Sigma | `sigma` | implemented, not exposed |
+| Threshold | `intensity_threshold` | implemented, not exposed |
+| Max background intensity | `max_background` | implemented, not exposed |
+| Minimum area | `min_area` | implemented, not exposed |
+| Maximum area | `max_area` | implemented, not exposed |
+| Median filter radius | — | **not implemented** |
+| Cell expansion | — | **not implemented** (lib.rs §31) |
+| Smooth boundaries | — | **not implemented** (lib.rs §32) |
+| Split by shape | always on | not a parameter here |
+
+The right-hand column is why this is a table rather than a list. **A control for
+a parameter the pipeline ignores is worse than no control**: it reads as a knob
+that does nothing, and the user's reasonable conclusion is that detection is
+broken. Only the first six get controls, and the rest stay off the panel until
+something implements them.
+
+Units are **microns**, as QuPath's are, which is what made §8.0 below a
+prerequisite rather than a nicety.
+
+### 8.0 Reading the pixel size — **done**
+
+A correctness bug found on the way in, and the reason it is numbered before the
+panel that needed it. `Params::default` hardcoded **0.4990 µm/px** — CMU-1's —
+and every micron-derived default divides by it: 8 µm background radius, 1.5 µm
+sigma, 10 and 400 µm² areas. On a slide scanned at 0.25 µm/px every one of those
+was **out by a factor of two**, silently, with detection still returning
+plausible objects. That is this file's own failure mode: wrong in the way that
+looks right.
+
+`Slide::microns_per_pixel` and `Slide::magnification` read Aperio's `MPP` and
+`AppMag` from the level-0 description, which this crate already parsed and
+handed out as a string. Both return `Option` rather than a default, because a
+caller that needs the number has to decide what to do without one rather than be
+given a guess.
+
+Six tests, four of them on the parser as a pure function: it trims around `=`
+because Aperio writes the spaces, and matches the whole key so `MPP` is not
+found inside `StripeWidth`.
+
+### 8.2 The panes QuPath has and this does not
+
+Taken from the interface rather than from the code, in the order they are worth
+having. Nothing here is started.
+
+- **Slide metadata.** `ImageDetailsPane`, 1,200 lines there and perhaps eighty
+  here: MPP, magnification, scanner, the level table, tile size. Everything it
+  shows is already parsed by §8.0 or by `Slide::levels`. Cheapest thing on this
+  list and the one that makes §8.0's fix visible.
+- **Brightness/contrast and stain vectors.** QuPath's dialog adjusts *display*
+  only, and separately shows the deconvolved haematoxylin and eosin channels.
+  `qupath-pipeline::stain` already computes the deconvolution, so the vectors
+  exist; what is missing is a display transform in `compose` and the controls.
+- **A gesture and key list.** The complaint that started §3.7 was
+  discoverability, and the status bar fixed one gesture's worth of it. QuPath
+  has no equivalent pane — this one is ours, and it is small.
+- **Saving detections and parameters.** §0 says nothing found is saved, and this
+  would change that, so it is a **deliberate revision of a stated non-goal**
+  rather than an omission being filled. Confirmed wanted. GeoJSON is the format
+  QuPath exports, and it is the one to write.
+
+### 8.3 Projects — the format is portable, the browser is not
+
+The tutorial that prompted this is QuPath's *Projects* page, and its figures are
+`ProjectBrowser.java`: a pane of image thumbnails, right-click to add metadata,
+sort by name or URI, mask names for blinded studies.
+
+The **format is a real specification and worth following exactly**, because a
+project written here that QuPath can open is worth far more than one that is
+merely similar. From `DefaultProject.java` it is a directory:
+
+```text
+project.qpproj          JSON: {version, uri, images: [...]}
+data/<entry-id>/
+    thumbnail.jpg       a JPEG thumbnail
+    server.json         how to reopen the image
+    data.qpdata         the objects, QuPath's own binary
+    summary.json
+```
+
+Three of those four we can write today. **`data.qpdata` is QuPath's Java
+serialisation and we should not attempt it** — that is a binary format tied to
+Java's object graph, and guessing at it is how a project file becomes corrupt in
+a way the user discovers later. Writing the JSON parts and leaving the objects
+to GeoJSON alongside is honest and useful; writing a broken `.qpdata` is neither.
+
+The browser pane itself is ordinary: a list, thumbnails from a `TileCache`, and
+`Viewport::fit` at a small size to generate them. The thumbnail generator is
+already written — `examples/dump.rs` produces exactly that overview PNG.
+
+**This is the largest item in this section and the least certain**, because
+`docs/VIEWER.md` §0 says *no project format* as a non-goal. Doing this revises
+that, and the revision should be deliberate: the argument for it is that a
+project is how a pathologist actually works — a study is fifty slides, not one —
+and the argument against is that it is the point where "a viewer" becomes "a
+QuPath replacement", which §0 rules out. **Not started, and not to be started
+without settling that.**

@@ -695,6 +695,31 @@ dependencies are linked.
 
 ---
 
+## 3b. Following QuPath's interface — in `VIEWER.md` §8, not here
+
+Asked for on the roadmap, and it is recorded there instead for the reason
+`VIEWER.md` §0 gives: the viewer is **not on the parity path**, and no fixture
+recorded from QuPath governs any of it. Putting interface work in this file
+would make it look like a parity claim, which it is not.
+
+One finding from it belongs here, because it is about the pipeline rather than
+about the interface. **`Params::default` hardcoded CMU-1's 0.4990 µm/px**, and
+every micron-derived default divides by it — 8 µm background radius, 1.5 µm
+sigma, 10 and 400 µm² areas. On a slide at 0.25 µm/px all four were out by a
+factor of two, silently, with detection still returning plausible objects.
+`Slide::microns_per_pixel` now reads Aperio's `MPP`; see `VIEWER.md` §8.0. That
+is a `D-005`-adjacent divergence — this pipeline runs at the slide's own pixel
+size — and it means **any measurement quoted from a slide other than CMU-1 and
+taken before that fix used the wrong filter sizes.** Every number in this file is
+from CMU-1, so none of them is affected.
+
+The other thing §8 settles is scope: `qupath-gui-fx` is **101,712 lines** of
+JavaFX against this application's 1,600, and the two use opposite interface
+models, so it is a port of the *design* rather than of the code. The one piece
+that is a genuine specification is the `.qpproj` format, which is JSON.
+
+---
+
 ## 4. Optimisation, in §0's order
 
 Only after 1 and 2. Each of these is worth less than it looks — the Amdahl
