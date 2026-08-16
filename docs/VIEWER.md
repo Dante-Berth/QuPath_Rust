@@ -125,10 +125,10 @@ take a slide path defaulting to `data/CMU-1.svs`.
 # slide will not open rather than an exit. A path on the command line is opened
 # at startup; without one it comes up asking for a slide.
 #
-# Drag to pan, scroll or +/- to zoom about the cursor, right-drag a box to zoom
-# to that region, f to fit. `d` detects cells in what is on screen and `h` hides
-# the outlines again; the run happens on another thread, so the view keeps
-# moving while it works.
+# Drag to pan -- the view is held on the slide, §3.8 -- scroll or +/- to zoom
+# about the cursor, right-drag a box to zoom to that region, f to fit. `d`
+# detects cells in what is on screen and `h` hides the outlines again; the run
+# happens on another thread, so the view keeps moving while it works.
 cargo run -p qupath-app --release
 cargo run -p qupath-app --release -- data/CMU-1.svs
 
@@ -171,7 +171,7 @@ be annoying.
 here; where there is no adapter at all the window composes on the CPU instead
 and says so, which used to be a panic at startup. `render` needs neither a
 display nor an adapter, which is the combination a headless machine usually has.
-Tests need neither, by construction (§6) — 57 of them now, and none links
+Tests need neither, by construction (§6) — 96 of them now, and none links
 `wgpu`. The integration tests need `data/CMU-1-Small-Region.svs` and return
 early without it.
 
@@ -701,6 +701,53 @@ predicting a different factor from the one applied is worse than no label. The
 `draw_segments`, so it has no fill and no dashes; and as everywhere else in §6,
 how it *looks* has not been checked, only that it appears, tracks the cursor and
 zooms to the region it enclosed.
+
+### 3.8 Staying on the slide — **done**
+
+Not on the original list, and not in §3.6's "what is not done" either, because
+nobody had looked. **`pan` moved the centre with no bound**, so a drag could
+take the view off the slide entirely and leave a window of clear colour with
+nothing on it to say which way the slide had gone. `f` was the only way back.
+
+The reason this is a milestone rather than a footnote is the scale of it. At the
+scale `fit` picks for `CMU-1.svs`, **one second of ordinary dragging** — sixty
+frames of forty pixels — takes the centre to `(-84812, -91355)` and the visible
+tile count from **108 to zero**. Not a stress case: that is a normal gesture at
+the zoom the application opens at.
+
+`Viewport::clamp_to_extent` holds the centre inside the slide's extent. The
+stronger rule — *the slide covers the window* — was considered and cannot hold:
+zoomed out past fit the slide is smaller than the window, so no centre makes it
+cover, and `Viewport::fit` itself would violate it on any slide whose aspect
+ratio differs from the window's, which is every slide. The centre rule holds at
+every scale, contradicts nothing, and still guarantees the slide reaches the
+middle of the window from whichever side it is on.
+
+It clamps **per axis rather than rejecting the move**, which is the difference
+between an edge that guides and one that catches: a diagonal drag that has run
+out of room on one axis still slides along the other, where a rejection would
+freeze both and read as the viewer having hung.
+
+Every write to `Open::view` goes through `Open::look`, which applies it. Six
+call sites move the view, and applying the clamp at each of them is applying it
+at five — the sixth being this bug again.
+
+Three unit tests, all on tile counts and none on appearance, and **the two
+load-bearing ones were confirmed to fail with the clamp neutralised** before
+being kept. That is §6's rule about a check that has never failed, applied at
+the time of writing rather than two milestones later.
+
+#### What this says about the ones before it
+
+The bug was found by asking what a gesture does when it is repeated, rather than
+whether it works once. Every test in §3.3 and §3.7 drives its gesture a bounded
+number of times from a sensible starting point, and every one of them passes on
+a viewport that has no bound at all. The gap was not in the arithmetic — `pan`
+is two correct subtractions — but in nobody having asked where it *ends up*.
+
+Worth stating because it generalises: this file's tests are strong on "is the
+answer right" and were, until here, silent on "can the state get somewhere it
+should never be". The three tests added are the second kind.
 
 ## 4. The two things that will bite
 
