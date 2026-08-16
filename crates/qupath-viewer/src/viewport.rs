@@ -129,6 +129,59 @@ impl Viewport {
         }
     }
 
+    /// The view showing the screen-space rectangle between two corners.
+    ///
+    /// This is what a rubber-band zoom lands on: the user drags a box over the
+    /// window and the slide under that box fills the window. The corners arrive
+    /// in whichever order they were dragged in — a box drawn upwards and to the
+    /// left is the same box — so they are sorted here rather than at the call
+    /// site.
+    ///
+    /// # Why it fits rather than stretches
+    ///
+    /// A dragged box is whatever shape the hand made, and the window is a fixed
+    /// one. Matching both would need a scale per axis, and [`Viewport`] has one
+    /// `scale` by design — two would make every pixel non-square and put a
+    /// second factor into every conversion in this file. So the axis that
+    /// constrains more wins and the other overshoots, which shows *more* than
+    /// was asked for and never less. The alternative crops something the user
+    /// drew a box around, and a zoom that discards part of the selection is the
+    /// version that gets noticed.
+    ///
+    /// The centre is the box's centre, so the overshoot is split between both
+    /// sides rather than added to one.
+    ///
+    /// A degenerate box — a click, or a drag along one axis — is `None`. That
+    /// is a zoom to infinity if it is computed and a stray click if it is not,
+    /// and the caller has a threshold in window pixels for it besides.
+    #[must_use]
+    pub fn zoom_to_box(self, from: ScreenPoint, to: ScreenPoint) -> Option<Self> {
+        let (left, right) = (from.x.min(to.x), from.x.max(to.x));
+        let (top, bottom) = (from.y.min(to.y), from.y.max(to.y));
+        let (box_width, box_height) = (f64::from(right - left), f64::from(bottom - top));
+        if !(box_width > 0.0 && box_height > 0.0) {
+            return None;
+        }
+
+        // The centre first, and in *slide* coordinates at the current scale —
+        // it has to be read off the view being left, before the scale changes.
+        let centre = self.to_slide(ScreenPoint::new((left + right) / 2.0, (top + bottom) / 2.0));
+
+        // Screen pixels per level-0 pixel, after the box fills the window. The
+        // box covers `box_width / scale` slide pixels, and those have to span
+        // `self.width` screen pixels; the smaller of the two factors is the axis
+        // that constrains.
+        let horizontal = f64::from(self.width) / box_width;
+        let vertical = f64::from(self.height) / box_height;
+        let scale = (self.scale * horizontal.min(vertical)).clamp(1e-6, 32.0);
+
+        Some(Self {
+            centre,
+            scale,
+            ..self
+        })
+    }
+
     /// The view resized to a new window size, keeping the centre and scale.
     #[must_use]
     pub fn resize(self, width: u32, height: u32) -> Self {
@@ -517,6 +570,138 @@ mod tests {
             (coarse_width - fine_width * 4.0).abs() < 1e-3,
             "coarse tile {coarse_width} against fine {fine_width}"
         );
+    }
+
+    #[test]
+    fn a_dragged_box_ends_up_filling_the_window() {
+        // The property a rubber-band zoom is *for*: whatever slide content was
+        // inside the box is on screen afterwards. Asserted as the box's own
+        // corners landing back inside the window rather than as a scale, so a
+        // sign error or an inverted factor cannot pass it.
+        let view = viewport((1000.0, 800.0), 0.25, (800, 600));
+        let (from, to) = (
+            ScreenPoint::new(200.0, 150.0),
+            ScreenPoint::new(600.0, 450.0),
+        );
+        let corners = [view.to_slide(from), view.to_slide(to)];
+
+        let zoomed = view.zoom_to_box(from, to).expect("a box with area");
+        for corner in corners {
+            let screen = zoomed.to_screen(corner);
+            assert!(
+                screen.x >= -0.5
+                    && screen.x <= zoomed.width as f32 + 0.5
+                    && screen.y >= -0.5
+                    && screen.y <= zoomed.height as f32 + 0.5,
+                "{corner:?} left the window at {screen:?}"
+            );
+        }
+        // And it is a zoom *in*: this box is half the window each way.
+        assert!(zoomed.scale > view.scale, "{} px/px", zoomed.scale);
+    }
+
+    #[test]
+    fn a_box_is_the_same_whichever_corner_it_started_from() {
+        // Dragging up and to the left is an ordinary way to draw a box, and it
+        // arrives with the corners in the opposite order. All four orderings of
+        // the same rectangle must give the same view.
+        let view = viewport((1000.0, 800.0), 0.25, (800, 600));
+        let (left, top, right, bottom) = (200.0, 150.0, 600.0, 450.0);
+        let wanted = view
+            .zoom_to_box(ScreenPoint::new(left, top), ScreenPoint::new(right, bottom))
+            .expect("a box with area");
+
+        for (from, to) in [
+            ((right, bottom), (left, top)),
+            ((left, bottom), (right, top)),
+            ((right, top), (left, bottom)),
+        ] {
+            let other = view
+                .zoom_to_box(
+                    ScreenPoint::new(from.0, from.1),
+                    ScreenPoint::new(to.0, to.1),
+                )
+                .expect("a box with area");
+            assert_eq!(other, wanted, "dragged from {from:?} to {to:?}");
+        }
+    }
+
+    #[test]
+    fn a_box_the_wrong_shape_shows_more_rather_than_cropping() {
+        // The window is 4:3 and this box is tall and thin, so the two cannot
+        // both be satisfied. What must never happen is the box being cropped:
+        // the constrained axis fills exactly and the other overshoots.
+        let view = viewport((1000.0, 800.0), 0.25, (800, 600));
+        let (from, to) = (
+            ScreenPoint::new(380.0, 100.0),
+            ScreenPoint::new(420.0, 500.0),
+        );
+        let (top_left, bottom_right) = (view.to_slide(from), view.to_slide(to));
+
+        let zoomed = view.zoom_to_box(from, to).expect("a box with area");
+        let (left, top, right, bottom) = zoomed.bounds();
+        assert!(
+            left <= top_left.x && right >= bottom_right.x,
+            "the box was cropped horizontally: {left}..{right} against \
+             {}..{}",
+            top_left.x,
+            bottom_right.x
+        );
+        assert!(
+            top <= top_left.y && bottom >= bottom_right.y,
+            "the box was cropped vertically"
+        );
+        // The tall axis is the one that constrains, so it fits exactly while
+        // the wide one has room to spare.
+        assert!((bottom - top) - (bottom_right.y - top_left.y) < 1e-6);
+        assert!((right - left) > (bottom_right.x - top_left.x) * 2.0);
+    }
+
+    #[test]
+    fn a_degenerate_box_is_refused_rather_than_zoomed_to_infinity() {
+        // A click is a box of no area, and a drag along one axis is a box of no
+        // area in the other. Both would divide by zero into an infinite scale,
+        // which the clamp would turn into a maximum zoom on a stray click.
+        let view = viewport((1000.0, 800.0), 0.25, (800, 600));
+        let point = ScreenPoint::new(400.0, 300.0);
+        assert!(view.zoom_to_box(point, point).is_none());
+        assert!(
+            view.zoom_to_box(point, ScreenPoint::new(600.0, 300.0))
+                .is_none()
+        );
+        assert!(
+            view.zoom_to_box(point, ScreenPoint::new(400.0, 500.0))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_box_around_everything_zooms_back_out() {
+        // The gesture is not only a zoom in. A box larger than the window means
+        // a factor below one, and the scale has to follow it down rather than
+        // being clamped at the current one.
+        let view = viewport((1000.0, 800.0), 1.0, (800, 600));
+        let zoomed = view
+            .zoom_to_box(
+                ScreenPoint::new(-800.0, -600.0),
+                ScreenPoint::new(1600.0, 1200.0),
+            )
+            .expect("a box with area");
+        assert!(zoomed.scale < view.scale, "{} px/px", zoomed.scale);
+    }
+
+    #[test]
+    fn zooming_to_a_box_clamps_like_every_other_zoom() {
+        // A box a few pixels across at an already-deep zoom asks for a scale
+        // past the clamp, and the same limit `zoom_about` obeys applies here.
+        let view = viewport((1000.0, 800.0), 16.0, (800, 600));
+        let zoomed = view
+            .zoom_to_box(
+                ScreenPoint::new(400.0, 300.0),
+                ScreenPoint::new(402.0, 302.0),
+            )
+            .expect("a box with area");
+        assert!(zoomed.scale <= 32.0 && zoomed.scale.is_finite());
     }
 
     #[test]
