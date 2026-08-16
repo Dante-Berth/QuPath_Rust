@@ -168,6 +168,62 @@ impl Slide {
         Ok(&self.directory(level)?.description)
     }
 
+    /// Microns per pixel at level 0, from Aperio's `MPP` field.
+    ///
+    /// `None` when the description carries no `MPP`, which is every slide that
+    /// is not Aperio and some that are. A caller that needs a number must decide
+    /// what to do without one rather than being handed a guess — see
+    /// [`Slide::magnification`] for the same contract.
+    ///
+    /// # Why this is not a convenience
+    ///
+    /// Every micron-derived detection default is a length in *pixels*, and the
+    /// conversion is this number. `qupath_pipeline::Params::default` hardcoded
+    /// CMU-1's 0.4990, so on a slide scanned at 0.25 µm/px every default was out
+    /// by a factor of two — a background radius half the size QuPath would use,
+    /// silently, with detection still returning plausible objects. That is the
+    /// failure mode `docs/VIEWER.md` §6 is written against, and it is why this
+    /// reads the value rather than the pipeline assuming it.
+    ///
+    /// Aperio writes `MPP = 0.4990` as one of the `|`-separated fields of the
+    /// level-0 description. Only level 0 is consulted: the field is absent from
+    /// the reduced levels, and their pixel size is this one times
+    /// [`Level::downsample`].
+    #[must_use]
+    pub fn microns_per_pixel(&self) -> Option<f64> {
+        Self::aperio_field(self.description(0).ok()?, "MPP")?
+            .parse::<f64>()
+            .ok()
+            // A zero or negative pixel size is a corrupt field, and every caller
+            // divides by this. Refusing it here means no call site has to.
+            .filter(|mpp| *mpp > 0.0)
+    }
+
+    /// Scanner magnification at level 0, from Aperio's `AppMag` field.
+    ///
+    /// `None` when the description does not carry one; see
+    /// [`Slide::microns_per_pixel`] for why that is not defaulted.
+    #[must_use]
+    pub fn magnification(&self) -> Option<f64> {
+        Self::aperio_field(self.description(0).ok()?, "AppMag")?
+            .parse::<f64>()
+            .ok()
+            .filter(|magnification| *magnification > 0.0)
+    }
+
+    /// One `Key = Value` field of an Aperio description.
+    ///
+    /// The format is a free-text first line followed by `|`-separated
+    /// `Key = Value` pairs. Both the key and the value are trimmed, because
+    /// Aperio writes the spaces around `=` and a parser that does not trim finds
+    /// nothing while looking like it is working.
+    fn aperio_field<'a>(description: &'a str, key: &str) -> Option<&'a str> {
+        description.split('|').find_map(|field| {
+            let (name, value) = field.split_once('=')?;
+            (name.trim() == key).then(|| value.trim())
+        })
+    }
+
     /// The coarsest level at least `min_width` pixels wide.
     ///
     /// Choosing the right level is the first item in §0 — doing less work beats
@@ -397,6 +453,60 @@ mod tests {
     fn small_slide() -> Option<Slide> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/CMU-1-Small-Region.svs");
         path.exists().then(|| Slide::open(&path).expect("open"))
+    }
+
+    /// The field parser, against the shape Aperio actually writes — spaces
+    /// around `=`, a free-text first line with no `=` in it at all, and the key
+    /// appearing as a substring of other keys.
+    #[test]
+    fn an_aperio_field_is_read_around_its_spaces() {
+        let description = "Aperio Image Library v10.0.51\r\n46920x33014 [0,100 46000x32914] \
+             (256x256) JPEG/RGB Q=30|AppMag = 20|StripeWidth = 2040|MPP = 0.4990|Left = 25.69";
+        assert_eq!(Slide::aperio_field(description, "MPP"), Some("0.4990"));
+        assert_eq!(Slide::aperio_field(description, "AppMag"), Some("20"));
+        assert_eq!(Slide::aperio_field(description, "Missing"), None);
+    }
+
+    /// `MPP` must not be found inside `StripeWidth` or any other key that
+    /// contains it, which is what a `contains` test rather than an equality test
+    /// would do.
+    #[test]
+    fn a_field_name_matches_whole_and_not_as_a_substring() {
+        assert_eq!(Slide::aperio_field("XMPP = 3|MPP = 0.5", "MPP"), Some("0.5"));
+        assert_eq!(Slide::aperio_field("XMPP = 3", "MPP"), None);
+    }
+
+    /// The first line carries no `=` at all on some scanners and a `Q=30` on
+    /// others, and neither may be mistaken for a field.
+    #[test]
+    fn a_description_with_no_fields_yields_nothing() {
+        assert_eq!(Slide::aperio_field("just some text", "MPP"), None);
+    }
+
+    #[test]
+    fn the_sample_slide_reports_its_pixel_size() {
+        let Some(slide) = small_slide() else {
+            return;
+        };
+        // Aperio's CMU-1 family is scanned at 0.4990 µm/px — the number
+        // `qupath_pipeline::Params` used to hardcode. Asserting the value rather
+        // than merely `is_some` is what makes this catch a parser that reads the
+        // wrong field.
+        assert_eq!(slide.microns_per_pixel(), Some(0.4990));
+        assert_eq!(slide.magnification(), Some(20.0));
+    }
+
+    /// A pixel size of zero would make every micron conversion infinite, and a
+    /// corrupt field is likelier than a scanner that means it.
+    #[test]
+    fn a_nonpositive_pixel_size_is_refused() {
+        // Exercised through the parser, since building a Slide needs a file.
+        for text in ["MPP = 0", "MPP = -1", "MPP = wat"] {
+            let parsed = Slide::aperio_field(text, "MPP")
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|mpp| *mpp > 0.0);
+            assert_eq!(parsed, None, "{text} must not yield a pixel size");
+        }
     }
 
     #[test]
