@@ -182,6 +182,55 @@ impl Viewport {
         })
     }
 
+    /// The view with its centre pulled back inside `slide`, if it had left.
+    ///
+    /// # Why the centre and not the bounds
+    ///
+    /// Without this a drag is unbounded, and that is not a corner case: at the
+    /// scale [`Viewport::fit`] picks for `CMU-1.svs`, one second of ordinary
+    /// dragging — sixty frames of forty pixels — takes the centre to
+    /// `(-84812, -91355)` and the visible tile count from 108 to **zero**. The
+    /// window becomes clear colour with nothing on it to say which way the slide
+    /// went, and `f` is the only way back. A viewer that can be steered into an
+    /// empty void by a gesture it invites is broken in the way that gets it
+    /// closed.
+    ///
+    /// The rule is that the **centre** stays inside the slide's extent, not that
+    /// the slide covers the window. The stronger rule cannot hold: zoomed out
+    /// past fit the slide is *smaller* than the window, so no centre makes it
+    /// cover — [`Viewport::fit`] itself would violate it on a slide whose aspect
+    /// ratio differs from the window's, which is every slide. This rule holds at
+    /// every scale, contradicts nothing, and still guarantees the slide reaches
+    /// the middle of the window from whichever side it is on.
+    ///
+    /// Clamping is a **projection, not a rejection**: a drag that would leave is
+    /// truncated at the edge rather than dropped, so a diagonal drag along the
+    /// boundary still slides along it instead of sticking. That is the
+    /// difference between an edge that guides and one that catches, and it is
+    /// what `a_drag_along_an_edge_still_moves_along_it` pins.
+    ///
+    /// Takes the extent rather than the [`Slide`] because that is all it reads,
+    /// which keeps it unit-testable with no file on disk — `docs/VIEWER.md` §6's
+    /// rule about the viewport math being the part that can carry assertions.
+    /// [`Viewport::clamp_to`] is the convenience for callers that hold a slide.
+    #[must_use]
+    pub fn clamp_to_extent(self, width: u32, height: u32) -> Self {
+        Self {
+            centre: SlidePoint::new(
+                self.centre.x.clamp(0.0, f64::from(width)),
+                self.centre.y.clamp(0.0, f64::from(height)),
+            ),
+            ..self
+        }
+    }
+
+    /// [`Viewport::clamp_to_extent`] against a slide's level 0.
+    #[must_use]
+    pub fn clamp_to(self, slide: &Slide) -> Self {
+        let base = &slide.levels()[0];
+        self.clamp_to_extent(base.width, base.height)
+    }
+
     /// The view resized to a new window size, keeping the centre and scale.
     #[must_use]
     pub fn resize(self, width: u32, height: u32) -> Self {
@@ -702,6 +751,70 @@ mod tests {
             )
             .expect("a box with area");
         assert!(zoomed.scale <= 32.0 && zoomed.scale.is_finite());
+    }
+
+    /// The failure this clamp exists for, at the scale it was measured at.
+    ///
+    /// The numbers are `CMU-1.svs`'s: a 46000x32914 slide fitted into 1024x768
+    /// picks scale 0.022261, and sixty frames of a forty-pixel drag — one second
+    /// of ordinary dragging — took the centre to `(-84812, -91355)` and the
+    /// visible tile count from 108 to zero. This asserts on the tile count,
+    /// because that is what "the slide is gone" means in a number rather than in
+    /// an appearance.
+    #[test]
+    fn a_second_of_dragging_cannot_lose_the_slide() {
+        let base = level(0, 46000, 32914, 1.0);
+        let mut view = viewport((23000.0, 16457.0), 0.022_261, (1024, 768));
+        let before = view.visible_tiles(&base).len();
+        assert!(before > 0, "the fitted view has to see something to begin with");
+
+        for _ in 0..60 {
+            view = view.pan(40.0, 40.0).clamp_to_extent(46000, 32914);
+        }
+        assert!(
+            !view.visible_tiles(&base).is_empty(),
+            "a one-second drag emptied the window: centre {:?}",
+            view.centre
+        );
+
+        // And it stays true for a drag nobody would call reasonable, because the
+        // clamp is a bound rather than a slower leak.
+        for _ in 0..6000 {
+            view = view.pan(40.0, 40.0).clamp_to_extent(46000, 32914);
+        }
+        assert!(!view.visible_tiles(&base).is_empty());
+    }
+
+    /// The clamp truncates a drag at the edge rather than dropping it.
+    ///
+    /// A rejection would make the boundary catch: a diagonal drag that has run
+    /// out of room on one axis would stop moving on *both*, which feels like the
+    /// viewer has frozen. Projecting each axis independently is what lets a drag
+    /// slide along the edge it has reached.
+    #[test]
+    fn a_drag_along_an_edge_still_moves_along_it() {
+        // Hard against the left edge, with room below.
+        let view = viewport((0.0, 5000.0), 1.0, (800, 600));
+        // Drag right-to-left (further off) and downwards at once.
+        let dragged = view.pan(100.0, -100.0).clamp_to_extent(46000, 32914);
+        assert_eq!(dragged.centre.x, 0.0, "x is held at the edge it reached");
+        assert_eq!(
+            dragged.centre.y, 5100.0,
+            "y is free and must still have moved"
+        );
+    }
+
+    #[test]
+    fn clamping_leaves_a_view_already_inside_alone() {
+        // The common case, and it must be exactly the identity: a clamp that
+        // nudges an interior view would make every pan drift.
+        let view = viewport((23000.0, 16457.0), 0.5, (800, 600));
+        assert_eq!(view.clamp_to_extent(46000, 32914), view);
+
+        // The boundary itself is inside, so a view fitted to a corner is not
+        // moved by the clamp that is meant to permit it.
+        let corner = viewport((0.0, 32914.0), 0.5, (800, 600));
+        assert_eq!(corner.clamp_to_extent(46000, 32914), corner);
     }
 
     #[test]

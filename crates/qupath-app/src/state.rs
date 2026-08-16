@@ -130,6 +130,17 @@ impl Open {
         self.source.slide()
     }
 
+    /// Moves the view, keeping it over the slide.
+    ///
+    /// **Every change to `view` goes through here**, which is why `view` is read
+    /// by the rest of the crate and written only by this. The clamp is one line
+    /// and there are six places that move the view; writing it at each of them
+    /// is writing it at five of them, and the sixth is a drag that loses the
+    /// slide — see [`Viewport::clamp_to`] for what that costs.
+    fn look(&mut self, view: Viewport) {
+        self.view = view.clamp_to(self.source.slide());
+    }
+
     /// Resident texture bytes and how many tiles that is.
     pub fn resident(&self) -> (usize, usize) {
         (self.cache.bytes(), self.cache.len())
@@ -311,7 +322,7 @@ impl App {
             state.frame.resize(width, height);
         }
         if let Some(open) = &mut self.open {
-            open.view = open.view.resize(width, height);
+            open.look(open.view.resize(width, height));
         }
     }
 
@@ -365,7 +376,7 @@ impl App {
                 if self.dragging
                     && let Some(open) = &mut self.open
                 {
-                    open.view = open.view.pan(dx, dy);
+                    open.look(open.view.pan(dx, dy));
                     return true;
                 }
                 // A moved cursor still repaints, because the status bar carries
@@ -421,7 +432,7 @@ impl App {
                     MouseScrollDelta::PixelDelta(position) => position.y / 50.0,
                 };
                 if let Some(open) = &mut self.open {
-                    open.view = open.view.zoom_about(1.2f64.powf(steps), self.cursor);
+                    open.look(open.view.zoom_about(1.2f64.powf(steps), self.cursor));
                     return true;
                 }
                 false
@@ -455,7 +466,7 @@ impl App {
         if let Some(open) = &mut self.open
             && let Some(zoomed) = open.view.zoom_to_box(from, to)
         {
-            open.view = zoomed;
+            open.look(zoomed);
         }
         true
     }
@@ -483,7 +494,7 @@ impl App {
     fn zoom_key(&mut self, steps: i32) -> bool {
         let cursor = self.cursor;
         if let Some(open) = &mut self.open {
-            open.view = open.view.zoom_about(1.5f64.powi(steps), cursor);
+            open.look(open.view.zoom_about(1.5f64.powi(steps), cursor));
             return true;
         }
         false
@@ -494,7 +505,8 @@ impl App {
             Key::Character("f") => {
                 if let Some(open) = &mut self.open {
                     let (width, height) = (open.view.width, open.view.height);
-                    open.view = Viewport::fit(open.slide(), width, height);
+                    let fitted = Viewport::fit(open.slide(), width, height);
+                    open.look(fitted);
                     return true;
                 }
                 false
@@ -574,20 +586,21 @@ impl App {
             Command::Fit => {
                 if let Some(open) = &mut self.open {
                     let (width, height) = (open.view.width, open.view.height);
-                    open.view = Viewport::fit(open.slide(), width, height);
+                    let fitted = Viewport::fit(open.slide(), width, height);
+                    open.look(fitted);
                 }
             }
             Command::Zoom(steps) => {
                 if let Some(open) = &mut self.open {
                     // The same 1.5 a scroll step uses, so the buttons and the
                     // wheel move the view by the same amount.
-                    open.view = open.view.zoom_about(1.5f64.powi(steps), centre(&open.view));
+                    open.look(open.view.zoom_about(1.5f64.powi(steps), centre(&open.view)));
                 }
             }
             Command::Actual => {
                 if let Some(open) = &mut self.open {
                     let factor = 1.0 / open.view.scale;
-                    open.view = open.view.zoom_about(factor, centre(&open.view));
+                    open.look(open.view.zoom_about(factor, centre(&open.view)));
                 }
             }
         }
