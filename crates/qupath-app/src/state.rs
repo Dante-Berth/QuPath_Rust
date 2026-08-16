@@ -59,6 +59,21 @@ const MIN_OVERLAY_PX: f32 = 2.0;
 /// it and not this module's guess.
 const OVERLAY_COLOUR: u32 = compose::pack(200, 255, 0);
 
+/// The colour the zoom rectangle is drawn in.
+///
+/// White, and not [`OVERLAY_COLOUR`]: the band is a transient thing the user is
+/// doing and the outlines are a result they are reading, so the two must not be
+/// mistaken for each other while a box is dragged across a detected field.
+const BAND_COLOUR: u32 = compose::pack(255, 255, 255);
+
+/// How far a right-drag must travel, in window pixels, before it is a zoom
+/// rectangle rather than a click.
+///
+/// A right-click that moves two pixels between press and release is a click
+/// with a shaky hand, and treating it as a box would zoom by a factor of a few
+/// hundred. Below this the gesture is abandoned and the view is left alone.
+const BAND_MINIMUM_PX: f32 = 8.0;
+
 /// One tile and where it goes, in window pixels — the draw list, in the same
 /// shape `examples/window.rs` builds it.
 type Draw<'a> = ((f32, f32, f32, f32), &'a Decoded);
@@ -170,6 +185,12 @@ pub struct App {
     /// size that `Viewport::fit` needs is known.
     pending: Option<PathBuf>,
     dragging: bool,
+    /// Where a right-drag began, while one is going.
+    ///
+    /// The anchor rather than a rectangle, because the other corner is always
+    /// [`App::cursor`] — keeping both would be two fields that have to be
+    /// updated together and one of them would eventually not be.
+    band: Option<ScreenPoint>,
     cursor: ScreenPoint,
     costs: Vec<Duration>,
     pub show_overlay: bool,
@@ -180,6 +201,19 @@ pub struct App {
     /// and a result to discard, and [`Detector::clear`] is what makes closing
     /// the slide discard it rather than draw it over the next one.
     pub detector: Detector,
+    /// The window rectangle the slide occupies — what is left after the
+    /// toolbar and the status bar have taken their strips — as
+    /// `(left, top, right, bottom)` in window pixels.
+    ///
+    /// Recorded during layout because it is the only reliable answer to "is the
+    /// pointer over the slide or over the interface". `egui`'s own
+    /// `wants_pointer_input` cannot answer it: it is true for a pointer
+    /// anywhere over a panel, and the slide *is* a panel, so it reads true over
+    /// bare glass with no widget within four hundred pixels. See the wheel arm
+    /// in [`App::input`].
+    ///
+    /// `None` until the first frame has been laid out.
+    slide_area: Option<(f32, f32, f32, f32)>,
     /// Screen-space line segments of the visible outlines, rebuilt every frame
     /// and reused across them — `segments_into` clears rather than appends, so
     /// this allocates once and then holds its capacity.
@@ -203,6 +237,8 @@ impl App {
             recent: Vec::new(),
             pending: path.map(PathBuf::from),
             dragging: false,
+            band: None,
+            slide_area: None,
             cursor: ScreenPoint::new(0.0, 0.0),
             costs: Vec::new(),
             show_overlay: true,
@@ -307,9 +343,16 @@ impl App {
     /// Handles one window event that the interface did not take, and says
     /// whether a redraw is needed.
     ///
-    /// `consumed` is `egui`'s answer to "was this mine". Without honouring it a
-    /// drag that starts on a slider also pans the slide, and a scroll over a
-    /// panel zooms the view underneath it.
+    /// `consumed` is `egui`'s answer to "was this mine", and it is honoured for
+    /// the **keyboard** only: a keypress belongs to whatever has focus, which
+    /// is a question only `egui` can answer.
+    ///
+    /// It is deliberately *not* used for the mouse. For pointer events
+    /// `egui_winit` derives it from `wants_pointer_input`, which is true for a
+    /// pointer anywhere over a panel — and the slide is a panel, so the answer
+    /// is true over bare glass and the mouse gestures gated on it silently did
+    /// nothing. Those ask [`App::cursor_over_slide`] instead, which is a
+    /// question about geometry and answerable.
     pub fn input(&mut self, window: &Window, event: &WindowEvent, consumed: bool) -> bool {
         match event {
             WindowEvent::CursorMoved { position, .. } => {
@@ -326,17 +369,53 @@ impl App {
                     return true;
                 }
                 // A moved cursor still repaints, because the status bar carries
-                // the position under it.
+                // the position under it — and because a band being dragged is
+                // redrawn to the new corner.
                 self.open.is_some()
             }
             WindowEvent::MouseInput { state, button, .. } if *button == MouseButton::Left => {
-                // A drag is only the slide's if it *began* outside the
-                // interface. Testing `consumed` on every motion instead would
-                // drop the drag the moment the cursor crossed a panel.
-                self.dragging = *state == ElementState::Pressed && !consumed;
+                // A drag is only the slide's if it *began* over the slide.
+                // Testing this on every motion instead would drop the drag the
+                // moment the cursor crossed a panel, which is an ordinary thing
+                // to do halfway through a pan.
+                //
+                // The test is geometric for the reason the wheel arm above
+                // gives at length: `consumed` is true for a pointer anywhere
+                // over a panel, and the slide is one.
+                self.dragging = *state == ElementState::Pressed && self.cursor_over_slide();
                 false
             }
-            WindowEvent::MouseWheel { delta, .. } if !consumed => {
+            WindowEvent::MouseInput { state, button, .. } if *button == MouseButton::Right => {
+                match state {
+                    // Began over the slide, for the reason the left button
+                    // records: a band started on a menu is the menu's.
+                    ElementState::Pressed => {
+                        self.band = (self.cursor_over_slide() && self.open.is_some())
+                            .then_some(self.cursor);
+                        false
+                    }
+                    ElementState::Released => self.finish_band(),
+                }
+            }
+            // Gated on *where the pointer is*, not on `egui`'s `consumed`.
+            //
+            // `egui_winit` reports a wheel event as consumed whenever
+            // `wants_pointer_input` is true, and that is true for a pointer
+            // anywhere over a panel — including the central one, which is the
+            // slide. Honouring it here meant **every scroll over the slide was
+            // discarded and scroll-to-zoom did nothing at all**, leaving the
+            // toolbar's buttons as the only way to zoom; those anchor on the
+            // view centre, so zooming appeared to be permanently centre-locked.
+            //
+            // Dragging was unaffected because `CursorMoved` is reported against
+            // `is_using_pointer`, which is only true while a button is already
+            // held. Two gestures gated on two different questions is what made
+            // one of them work and the other vanish.
+            //
+            // A scroll inside the slide's rectangle is the slide's, and one
+            // over the toolbar or the status bar is the interface's, which is
+            // what `consumed` was reached for and could not express.
+            WindowEvent::MouseWheel { delta, .. } if self.cursor_over_slide() => {
                 let steps = match delta {
                     MouseScrollDelta::LineDelta(_, y) => f64::from(*y),
                     MouseScrollDelta::PixelDelta(position) => position.y / 50.0,
@@ -356,6 +435,60 @@ impl App {
         }
     }
 
+    /// Ends a right-drag: zooms to the box if there is one, and says whether a
+    /// redraw is needed.
+    ///
+    /// A band that never grew past [`BAND_MINIMUM_PX`] was a right-click, and a
+    /// box with no area is refused by [`Viewport::zoom_to_box`] besides. Either
+    /// way the band is taken, so a released button never leaves a rectangle
+    /// drawn on the window.
+    fn finish_band(&mut self) -> bool {
+        let Some(from) = self.band.take() else {
+            return false;
+        };
+        let to = self.cursor;
+        if (to.x - from.x).abs() < BAND_MINIMUM_PX && (to.y - from.y).abs() < BAND_MINIMUM_PX {
+            // A click, not a drag. The band still has to be erased, which is
+            // why this repaints rather than returning false.
+            return true;
+        }
+        if let Some(open) = &mut self.open
+            && let Some(zoomed) = open.view.zoom_to_box(from, to)
+        {
+            open.view = zoomed;
+        }
+        true
+    }
+
+    /// Whether the cursor is over the slide rather than over the interface.
+    ///
+    /// See [`App::slide_area`] for why this is asked geometrically rather than
+    /// through `egui`. Before the first frame there is no layout to consult and
+    /// this is false, which costs at most one scroll delivered before the
+    /// window has drawn anything.
+    fn cursor_over_slide(&self) -> bool {
+        let Some((left, top, right, bottom)) = self.slide_area else {
+            return false;
+        };
+        self.cursor.x >= left
+            && self.cursor.x < right
+            && self.cursor.y >= top
+            && self.cursor.y < bottom
+    }
+
+    /// Zooms about the cursor by `steps`, for the keyboard.
+    ///
+    /// The same 1.5 per step the toolbar's buttons use, so the two agree about
+    /// what one step is.
+    fn zoom_key(&mut self, steps: i32) -> bool {
+        let cursor = self.cursor;
+        if let Some(open) = &mut self.open {
+            open.view = open.view.zoom_about(1.5f64.powi(steps), cursor);
+            return true;
+        }
+        false
+    }
+
     fn key(&mut self, window: &Window, key: &Key) -> bool {
         match key.as_ref() {
             Key::Character("f") => {
@@ -366,6 +499,16 @@ impl App {
                 }
                 false
             }
+            // Zoom from the keyboard, about the cursor rather than the window
+            // centre — the toolbar buttons use the centre because a button
+            // press says nothing about where the user is looking, and a
+            // keypress with the mouse over the tissue does.
+            //
+            // Three spellings each, because the keys next to each other on a
+            // keyboard are not the ones a layout agrees on: `=` is the
+            // unshifted key `+` lives on, and the numeric keypad sends its own.
+            Key::Character("+" | "=") => self.zoom_key(1),
+            Key::Character("-" | "_") => self.zoom_key(-1),
             Key::Character("o") => {
                 self.run(Command::Open, window);
                 true
@@ -381,8 +524,11 @@ impl App {
             Key::Named(NamedKey::Escape) => {
                 // Not an exit. In an application escape closes a dialog, and
                 // taking the window down on a stray keypress is what makes an
-                // example an example.
-                false
+                // example an example. What it does do is abandon a zoom
+                // rectangle mid-drag, which is the way out of a box drawn in
+                // the wrong place that does not require guessing where the
+                // corner was.
+                self.band.take().is_some()
             }
             _ => false,
         }
@@ -473,9 +619,13 @@ impl App {
         };
         let input = egui.take_egui_input(window);
         let mut command = Command::None;
+        let mut slide_area = None;
         let output = self.context.clone().run(input, |context| {
-            command = chrome::draw(context, self);
+            let (asked, area) = chrome::draw(context, self);
+            command = asked;
+            slide_area = Some(area);
         });
+        self.slide_area = slide_area;
         if let Some(egui) = self.egui.as_mut() {
             egui.handle_platform_output(window, output.platform_output);
         }
@@ -595,6 +745,13 @@ impl App {
         // outlines run across it, which is the one ordering mistake here that
         // looks like a rendering bug rather than a layering one.
         state.frame.draw_segments(&self.segments, OVERLAY_COLOUR);
+        // Over the outlines too. The band is what the hand is doing right now
+        // and has to be readable against whatever it is drawn across.
+        if let Some(from) = self.band {
+            state
+                .frame
+                .draw_segments(&band_segments(from, self.cursor), BAND_COLOUR);
+        }
         self.outlined = outlined;
         if let Some(open) = &mut self.open {
             open.drawn = drawn;
@@ -754,6 +911,33 @@ fn centre(view: &Viewport) -> ScreenPoint {
     ScreenPoint::new(view.width as f32 / 2.0, view.height as f32 / 2.0)
 }
 
+/// The four sides of the zoom rectangle, as the segment pairs
+/// [`Framebuffer::draw_segments`] takes.
+///
+/// Built from the two corners in whatever order they were dragged, so the
+/// rectangle is the same one [`Viewport::zoom_to_box`] will zoom to — the band
+/// showing a different rectangle from the one that gets used is the bug this
+/// sharing of `min`/`max` exists to prevent.
+fn band_segments(from: ScreenPoint, to: ScreenPoint) -> [ScreenPoint; 8] {
+    let (left, right) = (from.x.min(to.x), from.x.max(to.x));
+    let (top, bottom) = (from.y.min(to.y), from.y.max(to.y));
+    let (top_left, top_right) = (ScreenPoint::new(left, top), ScreenPoint::new(right, top));
+    let (bottom_right, bottom_left) = (
+        ScreenPoint::new(right, bottom),
+        ScreenPoint::new(left, bottom),
+    );
+    [
+        top_left,
+        top_right,
+        top_right,
+        bottom_right,
+        bottom_right,
+        bottom_left,
+        bottom_left,
+        top_left,
+    ]
+}
+
 /// Where the cursor is on the slide, in level-0 pixels.
 pub fn cursor_slide_position(open: &Open, cursor: ScreenPoint) -> SlidePoint {
     open.view.to_slide(cursor)
@@ -763,5 +947,26 @@ impl App {
     /// The cursor's position, for the status bar.
     pub fn cursor(&self) -> ScreenPoint {
         self.cursor
+    }
+
+    /// The zoom a band being dragged would apply if released now, as a
+    /// multiple of the current scale.
+    ///
+    /// `None` when no band is being dragged, or while it is still small enough
+    /// to be a click — so the readout appears once the gesture has committed to
+    /// being a drag, at the same threshold [`App::finish_band`] uses.
+    ///
+    /// Derived from [`Viewport::zoom_to_box`] rather than recomputed, because a
+    /// label predicting a different factor from the one the release applies is
+    /// worse than no label.
+    pub fn band_factor(&self) -> Option<f64> {
+        let from = self.band?;
+        let to = self.cursor;
+        if (to.x - from.x).abs() < BAND_MINIMUM_PX && (to.y - from.y).abs() < BAND_MINIMUM_PX {
+            return None;
+        }
+        let open = self.open.as_ref()?;
+        let zoomed = open.view.zoom_to_box(from, to)?;
+        Some(zoomed.scale / open.view.scale)
     }
 }

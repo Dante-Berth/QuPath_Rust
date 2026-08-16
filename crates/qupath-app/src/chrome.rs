@@ -49,8 +49,14 @@ pub fn style(context: &egui::Context) {
     });
 }
 
-/// Lays out the whole interface and returns what the user asked for.
-pub fn draw(context: &egui::Context, app: &App) -> Command {
+/// Lays out the whole interface and returns what the user asked for, along
+/// with the rectangle left over for the slide.
+///
+/// The rectangle is returned rather than recomputed by the caller because it is
+/// a fact about *this* layout — the toolbar's height depends on its contents and
+/// the status bar's on whether a detection message is in it — and the caller
+/// needs it to tell a scroll over the slide from a scroll over the interface.
+pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32)) {
     let mut command = Command::None;
 
     egui::TopBottomPanel::top("toolbar").show(context, |ui| {
@@ -96,10 +102,21 @@ pub fn draw(context: &egui::Context, app: &App) -> Command {
                 {
                     command = Command::Actual;
                 }
-                if ui.button("−").on_hover_text("Zoom out").clicked() {
+                if ui
+                    .button("−")
+                    .on_hover_text("Zoom out (− key, or scroll down)")
+                    .clicked()
+                {
                     command = Command::Zoom(-1);
                 }
-                if ui.button("+").on_hover_text("Zoom in").clicked() {
+                if ui
+                    .button("+")
+                    .on_hover_text(
+                        "Zoom in (+ key, or scroll up). To zoom to a particular \
+                         area, right-drag a box around it.",
+                    )
+                    .clicked()
+                {
                     command = Command::Zoom(1);
                 }
             });
@@ -176,6 +193,27 @@ pub fn draw(context: &egui::Context, app: &App) -> Command {
                     ui.label(egui::RichText::new(detection).weak());
                 }
 
+                // While a box is being dragged, what releasing it would do. This
+                // replaces the standing hint rather than sitting beside it: the
+                // hint's whole job is to get the user to start this gesture, and
+                // once they have started it the useful thing to say is how far
+                // it currently zooms.
+                if let Some(factor) = app.band_factor() {
+                    ui.separator();
+                    ui.label(egui::RichText::new(format!("zoom to {factor:.1}x")).strong())
+                        .on_hover_text("Release to zoom to the box; escape to abandon it.");
+                } else {
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new("drag to pan · right-drag a box to zoom · +/−").weak(),
+                    )
+                    .on_hover_text(
+                        "Left-drag moves the slide. Right-drag draws a rectangle and \
+                         releasing zooms to it. The scroll wheel and the +/− keys zoom \
+                         about the cursor, and f fits the whole slide.",
+                    );
+                }
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some(cost) = app.frame_cost() {
                         // Main-thread time only, and said so: it excludes the
@@ -198,21 +236,40 @@ pub fn draw(context: &egui::Context, app: &App) -> Command {
         });
     });
 
+    // After the two panels have taken their strips and before the central one
+    // is shown, which is when this is the slide's rectangle and nothing else's.
+    let available = context.available_rect();
+    let slide_area = (
+        available.min.x,
+        available.min.y,
+        available.max.x,
+        available.max.y,
+    );
+
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
         .show(context, |ui| {
             if app.open.is_some() {
                 // The slide is drawn underneath by the compositor, not by
-                // `egui`. Claiming the space with a drag sense keeps the
-                // interface from reporting the pan as unhandled, and leaves the
-                // pixels alone.
-                ui.allocate_response(ui.available_size(), egui::Sense::drag());
+                // `egui`, so this only reserves the space and leaves the pixels
+                // alone. No sense: nothing in this area is an `egui` widget,
+                // and the slide's own gestures are handled from raw winit
+                // events in `state::input`.
+                //
+                // The sense here is *not* what decides whether a scroll reaches
+                // the viewer, which is worth stating because it looks as though
+                // it should be. `wants_pointer_input` is true for a pointer
+                // anywhere over a panel — an empty `CentralPanel` with nothing
+                // allocated in it at all is enough — so the wheel arrives
+                // `consumed` whatever this argument says. That is handled where
+                // it can be, in `state::input`; see the wheel arm there.
+                ui.allocate_response(ui.available_size(), egui::Sense::empty());
                 return;
             }
             welcome(ui, app, &mut command);
         });
 
-    command
+    (command, slide_area)
 }
 
 /// The detection controls: run it, and show or hide what it found.
@@ -287,7 +344,8 @@ fn welcome(ui: &mut egui::Ui, app: &App, command: &mut Command) {
         ui.add_space(24.0);
         ui.label(
             egui::RichText::new(
-                "Baseline JPEG pyramids only. Drag to pan, scroll to zoom, f to fit.",
+                "Baseline JPEG pyramids only. Drag to pan, scroll to zoom, \
+                 right-drag a box to zoom to it, f to fit.",
             )
             .weak()
             .small(),
@@ -297,4 +355,107 @@ fn welcome(ui: &mut egui::Ui, app: &App, command: &mut Command) {
     // Kept honest: the description of a slide comes from the same function the
     // status bar uses, so there is one statement of what a slide is.
     let _ = describe;
+}
+
+#[cfg(test)]
+mod tests {
+    /// Lays the interface out headlessly and returns the slide rectangle
+    /// `draw` reports, together with `egui`'s own answer to "do you want the
+    /// pointer" at `pointer`.
+    ///
+    /// Two frames, because hover state is a function of the *previous* frame's
+    /// layout: a single pass reports the pointer as over nothing at all and
+    /// would make the assertions below pass for the wrong reason.
+    fn layout(pointer: egui::Pos2) -> ((f32, f32, f32, f32), bool) {
+        let context = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let mut area = (0.0, 0.0, 0.0, 0.0);
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events: vec![egui::Event::PointerMoved(pointer)],
+                ..Default::default()
+            };
+            let _ = context.run(input.clone(), |context| {
+                // The real layout, with a toolbar and a status bar above and
+                // below, is what gives the central rectangle its extent.
+                egui::TopBottomPanel::top("toolbar").show(context, |ui| {
+                    ui.horizontal(|ui| {
+                        let _ = ui.button("Fit");
+                    });
+                });
+                egui::TopBottomPanel::bottom("status").show(context, |ui| {
+                    ui.label("status");
+                });
+                area = {
+                    let available = context.available_rect();
+                    (
+                        available.min.x,
+                        available.min.y,
+                        available.max.x,
+                        available.max.y,
+                    )
+                };
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(context, |ui| {
+                        ui.allocate_response(ui.available_size(), egui::Sense::empty());
+                    });
+            });
+        }
+        (area, context.wants_pointer_input())
+    }
+
+    fn contains((left, top, right, bottom): (f32, f32, f32, f32), point: egui::Pos2) -> bool {
+        point.x >= left && point.x < right && point.y >= top && point.y < bottom
+    }
+
+    #[test]
+    fn the_slide_rectangle_is_what_the_panels_left_over() {
+        // What `state::cursor_over_slide` is gated on. A point in the middle of
+        // the window is the slide's; points in the toolbar's and the status
+        // bar's strips are not, and the rectangle has to exclude both — a
+        // rectangle that swallowed either would make a scroll over the toolbar
+        // zoom the slide underneath it.
+        let middle = egui::pos2(400.0, 300.0);
+        let (area, _) = layout(middle);
+        assert!(
+            contains(area, middle),
+            "the slide rectangle {area:?} excludes its own middle"
+        );
+        assert!(
+            !contains(area, egui::pos2(400.0, 2.0)),
+            "the toolbar strip is inside {area:?}"
+        );
+        assert!(
+            !contains(area, egui::pos2(400.0, 598.0)),
+            "the status strip is inside {area:?}"
+        );
+        // And it is a real rectangle rather than the whole window: both panels
+        // took a strip, so the top edge has moved down and the bottom edge up.
+        assert!(
+            area.1 > 0.0 && area.3 < 600.0,
+            "the panels reserved nothing: {area:?}"
+        );
+    }
+
+    #[test]
+    fn egui_claims_the_pointer_over_the_slide_which_is_why_consumed_is_unusable() {
+        // The bug's actual cause, pinned so that the workaround is not quietly
+        // reverted as redundant. `egui_winit` marks a pointer event `consumed`
+        // whenever `wants_pointer_input` is true, and that is true over the
+        // slide — with no widget there and nothing sensing input. Gating the
+        // wheel on it discarded every scroll over the slide, which left the
+        // centre-anchored toolbar buttons as the only way to zoom.
+        //
+        // If this ever comes out false, `egui` has changed its answer and
+        // `state::input` may go back to the simpler `!consumed` test.
+        let (area, wants) = layout(egui::pos2(400.0, 300.0));
+        assert!(contains(area, egui::pos2(400.0, 300.0)));
+        assert!(
+            wants,
+            "egui no longer claims the pointer over a bare central panel: the \
+             geometric test in `state::cursor_over_slide` is now unnecessary"
+        );
+    }
 }
