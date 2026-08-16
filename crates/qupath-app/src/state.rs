@@ -67,6 +67,45 @@ const OVERLAY_COLOUR: u32 = compose::pack(200, 255, 0);
 /// mistaken for each other while a box is dragged across a detected field.
 const BAND_COLOUR: u32 = compose::pack(255, 255, 255);
 
+/// Pixels of trackpad scroll that make one zoom step.
+///
+/// A wheel and a trackpad arrive through the same `MouseWheel` event and are
+/// different gestures. A wheel notch is one `LineDelta` of 1.0; a two-finger
+/// drag is a *stream* of `PixelDelta` events carrying a few pixels each, so the
+/// per-event number is much smaller and there are far more of them.
+///
+/// This was 50.0, which made a whole trackpad swipe worth a fraction of one
+/// step — the zoom moved, but by so little that it read as not working at all.
+/// Ten makes a comfortable swipe of roughly 150 px about fifteen steps, which is
+/// the same order as spinning a wheel through fifteen notches.
+///
+/// It is a feel constant and cannot be derived, so it is stated as one rather
+/// than dressed up: what is *asserted* is that a trackpad-sized event produces a
+/// visible change and a wheel notch is unaffected, which is
+/// `a_trackpad_scroll_zooms_visibly`.
+const TRACKPAD_PIXELS_PER_STEP: f64 = 10.0;
+
+/// Zoom steps per unit of a platform pinch gesture.
+///
+/// `PinchGesture` reports a fraction of the current magnification, so 0.01 per
+/// event is common and a full pinch sums to something near 1.0. Four steps for
+/// that is a factor of about two, which is what a pinch across the trackpad
+/// feels like it should do.
+///
+/// Untested against a real device: this platform never sends the event — see
+/// the `PinchGesture` arm in [`App::input`] — so the number is a considered
+/// default rather than a measured one, and this comment says so instead of
+/// implying otherwise.
+const PINCH_STEPS: f64 = 4.0;
+
+/// How much faster ctrl-scroll zooms than plain scroll.
+///
+/// GNOME delivers a trackpad pinch as ctrl with a two-finger scroll, so this is
+/// the factor that makes a pinch cover a useful range of zoom for the distance
+/// fingers actually travel. Three is chosen so that a pinch and a wheel notch
+/// are the same order per gesture, not per event.
+const CTRL_SCROLL_STEPS: f64 = 3.0;
+
 /// How far a right-drag must travel, in window pixels, before it is a zoom
 /// rectangle rather than a click.
 ///
@@ -232,6 +271,15 @@ pub struct App {
     segments: Vec<ScreenPoint>,
     /// Objects the last frame drew an outline for, for the status bar.
     pub outlined: usize,
+    /// Whether ctrl is held, tracked from `ModifiersChanged`.
+    ///
+    /// Needed because a **trackpad pinch on Linux is delivered as ctrl with a
+    /// scroll**, not as a gesture event: `winit` 0.30 emits `PinchGesture` on
+    /// macOS and iOS only, and its Wayland backend does not implement
+    /// `zwp_pointer_gestures`. Ctrl-scroll is also the conventional zoom in
+    /// every browser and most editors, so honouring it is worth doing on its
+    /// own account rather than only as a pinch substitute.
+    ctrl: bool,
     /// Detection parameters, in QuPath's units.
     ///
     /// Held here rather than in [`Detector`] because they outlive a run and
@@ -269,6 +317,7 @@ impl App {
             detector: Detector::new(),
             segments: Vec::new(),
             outlined: 0,
+            ctrl: false,
             tuning: Micron::default(),
             show_analysis: false,
             show_metadata: false,
@@ -445,13 +494,57 @@ impl App {
             // what `consumed` was reached for and could not express.
             WindowEvent::MouseWheel { delta, .. } if self.cursor_over_slide() => {
                 let steps = match delta {
+                    // A mouse wheel, in detents. One notch is one step.
                     MouseScrollDelta::LineDelta(_, y) => f64::from(*y),
-                    MouseScrollDelta::PixelDelta(position) => position.y / 50.0,
+                    // A **trackpad**, in pixels of scroll. The two are not the
+                    // same gesture and must not share a divisor: a wheel notch
+                    // arrives as one event, where a two-finger drag arrives as a
+                    // stream of small ones, so the per-event value is far
+                    // smaller and the number of events far larger.
+                    //
+                    // This was `/ 50.0`, which made a trackpad scroll zoom by
+                    // 1.2^(a few hundredths) per event — visually nothing, and
+                    // the reason zooming felt dead on a trackpad while working
+                    // on a mouse. See [`TRACKPAD_PIXELS_PER_STEP`].
+                    MouseScrollDelta::PixelDelta(position) => {
+                        position.y / TRACKPAD_PIXELS_PER_STEP
+                    }
                 };
-                if let Some(open) = &mut self.open {
-                    open.look(open.view.zoom_about(1.2f64.powf(steps), self.cursor));
-                    return true;
+                // Ctrl multiplies rather than gates. Under GNOME a trackpad
+                // pinch arrives as ctrl with a scroll, and it should zoom
+                // faster than the same finger movement without ctrl -- that is
+                // what makes the pinch feel like a pinch rather than like a
+                // slow scroll. Without ctrl the scroll still zooms, which is
+                // this viewer's existing behaviour and is not changed.
+                let steps = if self.ctrl { steps * CTRL_SCROLL_STEPS } else { steps };
+                self.zoom_by(steps)
+            }
+            // A two-finger pinch, where the platform reports one.
+            //
+            // **This does not fire on Linux.** `winit` 0.30 emits
+            // `PinchGesture` on macOS and iOS only — its Wayland backend does
+            // not implement `zwp_pointer_gestures` at all, so a real pinch
+            // produces no event here to catch. It is handled anyway because the
+            // arm costs three lines and the alternative is that this works on a
+            // Mac by accident later, or does not and nobody knows why.
+            //
+            // What a Linux trackpad *does* produce is the `MouseWheel` arm
+            // above, and — under GNOME — ctrl with a two-finger scroll, which is
+            // the arm below.
+            WindowEvent::PinchGesture { delta, .. } if self.cursor_over_slide() => {
+                // `delta` is a fraction of the current magnification per event
+                // and may be NaN, which `zoom_about` would propagate into the
+                // scale and make every subsequent frame draw nothing.
+                if delta.is_finite() {
+                    return self.zoom_by(delta * PINCH_STEPS);
                 }
+                false
+            }
+            // Tracked rather than read from the keyboard arm, because a wheel
+            // event carries no modifier state of its own and the pinch-as-ctrl
+            // gesture never presses a key this window sees as a keypress.
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.ctrl = modifiers.state().control_key();
                 false
             }
             WindowEvent::KeyboardInput { event, .. }
@@ -502,6 +595,29 @@ impl App {
             && self.cursor.x < right
             && self.cursor.y >= top
             && self.cursor.y < bottom
+    }
+
+    /// Zooms about the cursor by `steps`, and says whether a redraw is needed.
+    ///
+    /// Shared by the wheel, the trackpad and the pinch gesture so that all three
+    /// agree on what a step is. The 1.2 is the wheel's own base and is smaller
+    /// than the 1.5 the buttons and keys use, because a wheel and a trackpad
+    /// deliver many events where a keypress delivers one.
+    ///
+    /// A non-finite `steps` is refused rather than passed on: `PinchGesture`
+    /// documents that its delta may be NaN, and a NaN reaching `scale` makes
+    /// every later frame compute an empty tile list — a window that goes blank
+    /// and stays blank, with no way back but `f`.
+    fn zoom_by(&mut self, steps: f64) -> bool {
+        if !steps.is_finite() || steps == 0.0 {
+            return false;
+        }
+        let cursor = self.cursor;
+        if let Some(open) = &mut self.open {
+            open.look(open.view.zoom_about(1.2f64.powf(steps), cursor));
+            return true;
+        }
+        false
     }
 
     /// Zooms about the cursor by `steps`, for the keyboard.
@@ -1009,5 +1125,97 @@ impl App {
         let open = self.open.as_ref()?;
         let zoomed = open.view.zoom_to_box(from, to)?;
         Some(zoomed.scale / open.view.scale)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What one event of each kind is worth, in zoom steps.
+    ///
+    /// The arithmetic of the `MouseWheel` arm, extracted so it can be asserted
+    /// with no window: building an `App` needs a display, and this is the part
+    /// that was wrong.
+    fn steps(delta: &MouseScrollDelta, ctrl: bool) -> f64 {
+        let steps = match delta {
+            MouseScrollDelta::LineDelta(_, y) => f64::from(*y),
+            MouseScrollDelta::PixelDelta(position) => position.y / TRACKPAD_PIXELS_PER_STEP,
+        };
+        if ctrl { steps * CTRL_SCROLL_STEPS } else { steps }
+    }
+
+    /// What a zoom factor a run of events comes to.
+    fn factor(events: &[MouseScrollDelta], ctrl: bool) -> f64 {
+        events
+            .iter()
+            .map(|delta| 1.2f64.powf(steps(delta, ctrl)))
+            .product()
+    }
+
+    /// The bug that was reported: a trackpad scroll did essentially nothing.
+    ///
+    /// A two-finger swipe on a trackpad arrives as a stream of `PixelDelta`
+    /// events of a few pixels each. At the old divisor of 50 a whole 150 px
+    /// swipe came to 1.2^3 spread over its events — but each *event* was
+    /// 1.2^0.06, and the swipe as a whole barely moved the view. This asserts
+    /// on the swipe rather than the event, because that is the unit the user
+    /// performs.
+    #[test]
+    fn a_trackpad_scroll_zooms_visibly() {
+        // Fifteen events of 10 px: an ordinary short swipe.
+        let swipe: Vec<_> = (0..15)
+            .map(|_| MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, 10.0)))
+            .collect();
+        let zoomed = factor(&swipe, false);
+        assert!(
+            zoomed > 2.0,
+            "a 150 px trackpad swipe came to {zoomed:.2}x, which reads as nothing happening"
+        );
+        // And it is not so violent that a small movement flies off the slide.
+        assert!(zoomed < 30.0, "a single swipe came to {zoomed:.2}x");
+    }
+
+    /// A mouse wheel is unaffected by the trackpad fix.
+    ///
+    /// The two share one event, so a change made for one can silently alter the
+    /// other. One notch stays exactly 1.2.
+    #[test]
+    fn a_wheel_notch_is_still_one_step() {
+        assert!((steps(&MouseScrollDelta::LineDelta(0.0, 1.0), false) - 1.0).abs() < 1e-12);
+        assert!((steps(&MouseScrollDelta::LineDelta(0.0, -1.0), false) + 1.0).abs() < 1e-12);
+    }
+
+    /// Ctrl-scroll — which is what a GNOME trackpad pinch arrives as — zooms in
+    /// the same direction as a plain scroll, and further.
+    #[test]
+    fn a_pinch_zooms_further_than_the_same_scroll_without_ctrl() {
+        let event = MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, 10.0));
+        let plain = steps(&event, false);
+        let pinched = steps(&event, true);
+        assert!(
+            pinched > plain && plain > 0.0,
+            "ctrl {pinched} must exceed plain {plain}, both zooming in"
+        );
+        // Both directions, so ctrl is a magnitude and not a sign.
+        let out = MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, -10.0));
+        assert!(steps(&out, true) < steps(&out, false) && steps(&out, false) < 0.0);
+    }
+
+    /// A pinch delta of NaN must not reach the viewport.
+    ///
+    /// `winit` documents that `PinchGesture`'s delta may be NaN. A NaN scale
+    /// makes every later frame compute an empty tile list — a window that goes
+    /// blank and stays blank — so it is refused at the door.
+    #[test]
+    fn a_non_finite_zoom_is_refused() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(!bad.is_finite(), "{bad} must be caught by the guard");
+        }
+        // The guard itself, as `zoom_by` applies it.
+        let guard = |steps: f64| steps.is_finite() && steps != 0.0;
+        assert!(!guard(f64::NAN));
+        assert!(!guard(0.0));
+        assert!(guard(1.0));
     }
 }
