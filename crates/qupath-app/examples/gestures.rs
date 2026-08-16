@@ -52,13 +52,13 @@ impl ApplicationHandler for Probe {
                 self.ctrl = modifiers.state().control_key();
             }
             WindowEvent::CloseRequested => events.exit(),
-            WindowEvent::KeyboardInput { event, .. } if !event.state.is_pressed() => {}
-            WindowEvent::KeyboardInput { event, .. } => {
-                if event.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
-                {
-                    println!("\n{} events seen.", self.seen);
-                    events.exit();
-                }
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state.is_pressed()
+                    && event.logical_key
+                        == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape) =>
+            {
+                println!("\n{} events seen.", self.seen);
+                events.exit();
             }
             _ => {}
         }
