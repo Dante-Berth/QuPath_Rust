@@ -128,7 +128,8 @@ take a slide path defaulting to `data/CMU-1.svs`.
 # Drag to pan -- the view is held on the slide, §3.8 -- scroll or +/- to zoom
 # about the cursor, right-drag a box to zoom to that region, f to fit. `d`
 # detects cells in what is on screen and `h` hides the outlines again; the run
-# happens on another thread, so the view keeps moving while it works.
+# happens on another thread, so the view keeps moving while it works. The View
+# menu opens the analysis, slide and gesture panes (§8).
 cargo run -p qupath-app --release
 cargo run -p qupath-app --release -- data/CMU-1.svs
 
@@ -964,7 +965,7 @@ What *is* portable, and what this section takes, is **the design**: which panes
 exist, what each one holds, and — the one piece that really is a specification —
 the project file format, which is JSON and has nothing to do with JavaFX.
 
-### 8.1 Detection parameters — **in progress**
+### 8.1 Detection parameters — **done**
 
 The finding that started this: **the pipeline already implements most of
 QuPath's `WatershedCellDetection` parameters, and the application throws them
@@ -991,7 +992,32 @@ broken. Only the first six get controls, and the rest stay off the panel until
 something implements them.
 
 Units are **microns**, as QuPath's are, which is what made §8.0 below a
-prerequisite rather than a nicety.
+prerequisite rather than a nicety. Each slider shows the **pixel value it
+converts to on this slide** beside it, because that is what actually runs — and
+because an area divides by the *square* of the pixel size where a length divides
+by it once, which is worth showing rather than trusting. Without a pixel size
+the controls are disabled and the panel says why, rather than offering sliders
+whose µm labels the run would not honour.
+
+`chrome::draw` still takes `&App` and still changes nothing: a slider's edit
+comes back as `Command::SetTuning`, so the layout code keeps the one property
+this crate is built on rather than gaining a `&mut` to everything.
+
+Changing a parameter **does not re-run detection**. A run is about a second and
+a slider produces a value every frame, so re-running on change would start dozens
+of runs across one drag and show the answer to a parameter the user had already
+moved past. `Detect` stays the deliberate act, as it is in QuPath's dialog.
+
+Verified end-to-end on the profiled region, which is how a control is known to
+be connected to anything: **1272** objects at the defaults — §3.5's own number —
+against 23 at a minimum area of 60 µm², 851 at a threshold of 0.30, and 852 at a
+sigma of 3 µm.
+
+`a_side_panel_is_not_part_of_the_slide_rectangle` pins the layout ordering the
+panels depend on: they are laid out *before* `available_rect` is read, so the
+slide's rectangle excludes them. Confirmed to fail when the read is moved ahead
+of the panel — which is the mistake that would compile, look right, and make
+dragging a slider pan the slide underneath it. That is §3.7's bug class exactly.
 
 ### 8.0 Reading the pixel size — **done**
 
@@ -1013,22 +1039,69 @@ Six tests, four of them on the parser as a pure function: it trims around `=`
 because Aperio writes the spaces, and matches the whole key so `MPP` is not
 found inside `StripeWidth`.
 
+### 8.1b Trackpad zoom — **done**, and one half of it cannot be fixed here
+
+Reported from use: *pinch-to-zoom on a trackpad does nothing.* Two causes, and
+they are worth separating because only one was ours.
+
+**The bug.** A wheel and a trackpad arrive through the *same* `MouseWheel`
+event and are different gestures. A wheel notch is one `LineDelta` of 1.0; a
+two-finger swipe is a **stream** of `PixelDelta` events carrying a few pixels
+each. The pixel branch divided by 50, so an ordinary 150 px swipe came to
+1.2³ spread over fifteen events — **1.2^0.06 per event**, which reads as
+nothing happening at all. This had been there since §3.3 and was invisible on a
+mouse, which is what it was developed with.
+
+**The half that is not ours.** `winit` 0.30 emits `PinchGesture` on **macOS and
+iOS only**, and its Wayland backend does not implement `zwp_pointer_gestures`,
+so on Linux a true two-finger pinch produces **no winit event to catch**. No
+code in this application can fix that; it needs winit. The arm is written
+anyway, because it costs three lines and the alternative is that this works on a
+Mac by accident later and nobody knows why.
+
+What a GNOME trackpad pinch *does* send is **ctrl with a scroll**, so ctrl now
+multiplies the zoom rather than gating it — a pinch zooms faster than the same
+finger movement without it, and plain scroll still zooms as before. Ctrl-scroll
+is the conventional zoom in browsers and editors besides, so it earns its place
+independently of the pinch.
+
+`zoom_by` is now shared by the wheel, the trackpad and the pinch so all three
+agree what a step is, and it **refuses a non-finite value**: `PinchGesture`
+documents that its delta may be NaN, and a NaN reaching `scale` makes every
+later frame compute an empty tile list — blank, and staying blank, with `f` the
+only way back.
+
+Four tests on the step arithmetic, extracted so it asserts with no window.
+`a_trackpad_scroll_zooms_visibly` asserts on the **swipe** rather than on one
+event, because that is the unit a person performs, and was confirmed to fail at
+the old divisor.
+
+`examples/gestures.rs` prints what the hardware actually sends. It exists
+because **what a pinch produces is platform-specific and cannot be read off the
+code** — the question that settled this was answered by looking at winit's
+Linux backend, and the next person should be able to look at their own device
+instead.
+
 ### 8.2 The panes QuPath has and this does not
 
 Taken from the interface rather than from the code, in the order they are worth
-having. Nothing here is started.
+having.
 
-- **Slide metadata.** `ImageDetailsPane`, 1,200 lines there and perhaps eighty
-  here: MPP, magnification, scanner, the level table, tile size. Everything it
-  shows is already parsed by §8.0 or by `Slide::levels`. Cheapest thing on this
-  list and the one that makes §8.0's fix visible.
+- **Slide metadata — done.** `ImageDetailsPane` is 1,200 lines there and about
+  seventy here: pixel size, magnification, and the level table with the level
+  currently being shown marked, which is where the status bar's level number
+  gets its meaning. Everything it shows is parsed by §8.0 or by `Slide::levels`.
+  A missing value is a dash rather than a plausible default, for
+  `microns_per_pixel`'s reason.
 - **Brightness/contrast and stain vectors.** QuPath's dialog adjusts *display*
   only, and separately shows the deconvolved haematoxylin and eosin channels.
   `qupath-pipeline::stain` already computes the deconvolution, so the vectors
   exist; what is missing is a display transform in `compose` and the controls.
-- **A gesture and key list.** The complaint that started §3.7 was
-  discoverability, and the status bar fixed one gesture's worth of it. QuPath
-  has no equivalent pane — this one is ours, and it is small.
+- **A gesture and key list — done.** The complaint that started §3.7 was
+  discoverability, and the status bar fixed one gesture's worth of it. QuPath has
+  no equivalent pane; this one is ours. It is also where the trackpad and
+  ctrl-scroll gestures of §8.1b are stated, which is the only place a user would
+  find them.
 - **Saving detections and parameters.** §0 says nothing found is saved, and this
   would change that, so it is a **deliberate revision of a stated non-goal**
   rather than an omission being filled. Confirmed wanted. GeoJSON is the format
