@@ -310,7 +310,10 @@ mod tests {
         let overview = Overview::fit(CMU1.0, CMU1.1).expect("real slide");
         // A point far along x and near zero on y must stay that way.
         let mapped = overview.to_overview(SlidePoint::new(46000.0, 0.0));
-        assert!(mapped.x > 140.0, "x should reach the right edge: {mapped:?}");
+        assert!(
+            mapped.x > 140.0,
+            "x should reach the right edge: {mapped:?}"
+        );
         assert!(mapped.y.abs() < 1.0, "y should stay at the top: {mapped:?}");
     }
 

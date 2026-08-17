@@ -170,6 +170,30 @@ impl Framebuffer {
         tile_width: u32,
         tile_height: u32,
     ) {
+        self.draw_tile_with(rect, rgba, tile_width, tile_height, crate::Display::new());
+    }
+
+    /// [`Framebuffer::draw_tile`] with a display transform applied per pixel.
+    ///
+    /// `docs/VIEWER.md` §8.2. The transform is the last thing that happens to a
+    /// pixel before it is written, which is what makes it *display only*: the
+    /// tile in the cache is untouched, so turning a stain channel off restores
+    /// the original colour with no reload, and nothing a detection reads has
+    /// moved.
+    ///
+    /// An identity [`crate::Display`] takes the same path as
+    /// [`Framebuffer::draw_tile`] and is **byte-identical** to it — the branch
+    /// is hoisted out of the loop rather than tested per pixel, so the default
+    /// display costs nothing and `docs/VIEWER.md` §3.4b's agreement between the
+    /// two backends is not conditional on a display being set.
+    pub fn draw_tile_with(
+        &mut self,
+        rect: (f32, f32, f32, f32),
+        rgba: &[u8],
+        tile_width: u32,
+        tile_height: u32,
+        display: crate::Display,
+    ) {
         let (x, y, width, height) = (
             f64::from(rect.0),
             f64::from(rect.1),
@@ -202,6 +226,7 @@ impl Framebuffer {
         // and they repeat.
         let across = f64::from(tile_width) / width;
         let down = f64::from(tile_height) / height;
+        let identity = display.is_identity();
         let (tile_width, tile_height) = (tile_width as usize, tile_height as usize);
 
         for destination_row in first_row..last_row {
@@ -226,14 +251,30 @@ impl Framebuffer {
             // so this accumulates no error at all in the case that has to be
             // byte-exact.
             let mut source_column = (f64::from(first_column) + 0.5 - x) * across;
-            for pixel in out {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "non-negative and below tile_width by construction, and clamped here"
-                )]
-                let at = (source_column as usize).min(tile_width - 1) * 4;
-                *pixel = pack(tile_row[at], tile_row[at + 1], tile_row[at + 2]);
-                source_column += across;
+            // The branch is hoisted here rather than tested per pixel, so the
+            // identity display runs the original loop untouched.
+            if identity {
+                for pixel in out {
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "non-negative and below tile_width by construction, and clamped here"
+                    )]
+                    let at = (source_column as usize).min(tile_width - 1) * 4;
+                    *pixel = pack(tile_row[at], tile_row[at + 1], tile_row[at + 2]);
+                    source_column += across;
+                }
+            } else {
+                for pixel in out {
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "non-negative and below tile_width by construction, and clamped here"
+                    )]
+                    let at = (source_column as usize).min(tile_width - 1) * 4;
+                    let (red, green, blue) =
+                        display.apply(tile_row[at], tile_row[at + 1], tile_row[at + 2]);
+                    *pixel = pack(red, green, blue);
+                    source_column += across;
+                }
             }
         }
     }
@@ -756,6 +797,37 @@ mod tests {
             }
         }
         rgba
+    }
+
+    /// The identity display must take the original path exactly, which is what
+    /// lets `draw_tile` delegate without `docs/VIEWER.md` §3.4b's byte-exact
+    /// agreement between the two backends becoming conditional on it.
+    #[test]
+    fn an_identity_display_draws_the_same_bytes_as_no_display() {
+        let rgba = tile(16, 12);
+        let mut plain = Framebuffer::new(64, 48);
+        plain.draw_tile((8.0, 4.0, 16.0, 12.0), &rgba, 16, 12);
+        let mut with = Framebuffer::new(64, 48);
+        with.draw_tile_with((8.0, 4.0, 16.0, 12.0), &rgba, 16, 12, crate::Display::new());
+        assert_eq!(plain.pixels(), with.pixels());
+    }
+
+    /// And a real display must actually reach the frame — a transform wired up
+    /// but never applied would pass every test in `display.rs`.
+    #[test]
+    fn a_display_transform_reaches_the_frame() {
+        let rgba = tile(16, 12);
+        let mut plain = Framebuffer::new(64, 48);
+        plain.draw_tile((8.0, 4.0, 16.0, 12.0), &rgba, 16, 12);
+        let mut brightened = Framebuffer::new(64, 48);
+        brightened.draw_tile_with(
+            (8.0, 4.0, 16.0, 12.0),
+            &rgba,
+            16,
+            12,
+            crate::Display::range(0.0, 64.0).expect("a real range"),
+        );
+        assert_ne!(plain.pixels(), brightened.pixels());
     }
 
     #[test]

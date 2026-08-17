@@ -32,6 +32,7 @@
 pub mod cache;
 pub mod compose;
 pub mod coords;
+pub mod display;
 pub mod loader;
 pub mod overlay;
 pub mod overview;
@@ -41,6 +42,7 @@ pub mod viewport;
 pub use cache::TileCache;
 pub use compose::Framebuffer;
 pub use coords::{LevelPoint, ScreenPoint, SlidePoint, TileIndex};
+pub use display::{Display, Stain};
 pub use loader::{Loaded, SlideTiles, TileLoader, TileSource};
 pub use overlay::Overlay;
 pub use overview::Overview;
