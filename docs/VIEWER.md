@@ -14,11 +14,17 @@ about that.
 
 ## 0. What this is not
 
-- **Not a QuPath replacement.** No project format, no annotation editing, no
-  scripting. If those are ever wanted they are a separate decision. There is an
-  application now — `crates/qupath-app`, §3.6 — and it does not change this:
-  it opens a slide, looks at it, and runs detection over what is on screen.
-  Nothing it finds is saved, exported or editable, which is the line.
+- **Not a QuPath replacement**, with two clauses now deliberately revised.
+  What stands: no annotation editing, no scripting, and nothing here is a
+  second application. What changed, both as decisions rather than as drift —
+  **export** (§8.2, `geojson.rs`) and the **project format** (§8.3,
+  `project.rs`). §8.3 said its item was "not to be started without settling"
+  this, and it was settled: the argument that carries both is that each is a
+  *specification to follow* rather than a design to invent, so a file this
+  writes and QuPath opens is interoperability and not a step towards
+  replacing it. "No annotation editing" is what now holds the line: nothing
+  found here is editable, and a project written here carries no `data.qpdata`
+  because that would mean guessing at Java serialisation.
 - **Not a performance lever.** The two remaining levers are in `ROADMAP.md` §4:
   pyramid-level selection on whole slides, and touching less memory per tile.
   This project *uses* the first one but does not deliver it.
@@ -1138,7 +1144,7 @@ see. It is kept, because it pins the layout *ordering* the replica is good for.
 moved across the line is *how much window the slide gets*, which is a number.
 Colours and legibility are still unlooked-at.
 
-### 8.1d A scalebar — **done**, and the one piece that really is a translation
+### 8.1d A scalebar — **done**, and the first piece that really is a translation
 
 §8 said the portable part of `qupath-gui-fx` is *the design, not the code*, with
 the project format as the exception. `Scalebar.java` is a second exception, and a
@@ -1211,31 +1217,30 @@ having.
   gets its meaning. Everything it shows is parsed by §8.0 or by `Slide::levels`.
   A missing value is a dash rather than a plausible default, for
   `microns_per_pixel`'s reason.
-- **The overview thumbnail — not started, and now the top of this list.**
-  `ImageOverview.java` is 271 lines and is the other half of `QuPathViewerPlus`
-  besides the scalebar: a small whole-slide image in the top-right corner with a
-  rectangle showing where the view is, clickable to jump. It matters more than
-  its size suggests, because zoomed in past a few hundred microns there is
-  currently **nothing on screen that says where on the slide you are** — the
-  status bar gives level-0 coordinates, which is a number, not a position.
-  Everything it needs exists: `examples/dump` already writes exactly that
-  overview PNG, and `Viewport` knows the visible rectangle.
-- **Brightness/contrast and stain vectors.** QuPath's dialog adjusts *display*
-  only, and separately shows the deconvolved haematoxylin and eosin channels.
-  `qupath-pipeline::stain` already computes the deconvolution, so the vectors
-  exist; what is missing is a display transform in `compose` and the controls.
+- **The overview thumbnail — done, §8.4.** `ImageOverview.java`'s two mappings,
+  in `overview.rs`, and the pane in the application. It answered what §8.2 said
+  it would: zoomed in past a few hundred microns there was **nothing on screen
+  that said where on the slide you are**, the status bar's level-0 coordinates
+  being a number rather than a position.
+- **Brightness/contrast and stain vectors — the transform is done, §8.5; the
+  controls are not.** `display.rs` is the per-pixel operation and
+  `Framebuffer::draw_tile_with` applies it. What remains is the *dialog*: there
+  is no way to move the range or pick a channel from the interface yet, so the
+  transform is reachable from the library and from `examples/panes` only.
 - **A scalebar — done, §8.1d.** Listed here because it is part of QuPath's viewer
-  rather than a pane, and because it is the one item so far that was a genuine
-  translation of the Java rather than a port of the design.
+  rather than a pane, and because it was the first item that was a genuine
+  translation of the Java rather than a port of the design. It is no longer the
+  only one: §8.4's overview and §8.5's display transform are translations too,
+  and §8.6 and §8.3 follow file formats exactly. The pattern is that what
+  ports cleanly is *arithmetic and formats*, and what does not is drawing.
 - **A gesture and key list — done.** The complaint that started §3.7 was
   discoverability, and the status bar fixed one gesture's worth of it. QuPath has
   no equivalent pane; this one is ours. It is also where the trackpad and
   ctrl-scroll gestures of §8.1b are stated, which is the only place a user would
   find them.
-- **Saving detections and parameters.** §0 says nothing found is saved, and this
-  would change that, so it is a **deliberate revision of a stated non-goal**
-  rather than an omission being filled. Confirmed wanted. GeoJSON is the format
-  QuPath exports, and it is the one to write.
+- **Saving detections — done, §8.6.** `geojson.rs`, in the dialect QuPath
+  reads. §0's "nothing found is saved" is revised there rather than quietly:
+  the *parameters* are still not saved, and no detection is editable.
 
 ### 8.3 Projects — the format is portable, the browser is not
 
@@ -1271,5 +1276,123 @@ already written — `examples/dump.rs` produces exactly that overview PNG.
 that, and the revision should be deliberate: the argument for it is that a
 project is how a pathologist actually works — a study is fifty slides, not one —
 and the argument against is that it is the point where "a viewer" becomes "a
-QuPath replacement", which §0 rules out. **Not started, and not to be started
-without settling that.**
+QuPath replacement", which §0 rules out.
+
+**Settled, and the JSON parts are written — `project.rs`.** What carried it is
+narrower than the argument above: the format is a *specification to follow*, so
+following it exactly is interoperability rather than a second application. The
+browser pane is **not** written and is the part that would be, and there is
+still no `data.qpdata` — see §8.7.
+
+### 8.4 The overview — the invariant is that the two mappings agree
+
+`overview.rs` is `ImageOverview.java`'s arithmetic: slide to overview, which
+places the rectangle, and overview to slide, which turns a click into a centre.
+The drawing is JavaFX and stayed there.
+
+The property worth stating is that **the two must agree** — clicking the centre
+of the drawn rectangle must not move the view. Neither function alone can catch
+an inverted or transposed mapping, because each is individually defensible at
+any single scale; this is §3.3's level bug in the same shape as §8.1d's
+scalebar, and `zooming_in_never_grows_the_rectangle` compares across scales for
+exactly that reason.
+
+Constants copied rather than chosen: `maxLength` 150, the rectangle at
+`rgba(200,0,0,0.8)`, the border `rgb(64,64,64)` at width 2. At `Viewport::fit`
+QuPath draws **no rectangle at all** — "in which case everything is visible" —
+and the test for that is against the slide's extent rather than against a
+remembered scale, because a resize or a pan reaches the same condition without
+going through `fit`.
+
+**Where it goes.** The top of the slide-metadata panel, not floating over the
+image where `QuPathViewerPlus` anchors it: a picture over the slide would sit
+inside the slide's rectangle, and §8.1c is the record of what lands there. The
+same call the scalebar made in §8.1d.
+
+The thumbnail is read once per slide from the **coarsest** level, which is what
+makes it cheap — CMU-1's top level is 1,024 px on its long edge, so it is one
+small region read rather than a decimation of level 0 — and uploaded to the
+renderer when the slide changes rather than per frame, because the picture is of
+the slide and not of the view.
+
+### 8.5 The display transform — and why it cannot reach a count
+
+`display.rs` is QuPath's `AbstractChannelInfo` arithmetic: `offset =
+minDisplay`, `scale = 255 / (max - min)`, applied per channel and clamped to a
+byte. Ported rather than re-derived, because "brightness and contrast" has a
+dozen reasonable definitions and the one worth having is the one that agrees
+with QuPath at the same settings.
+
+**Display only, structurally rather than by intention.** A brightness control
+that reached the pipeline would change every count this project has recorded,
+and would do it in a way no count-to-count test would notice — the parity
+fixtures would simply start disagreeing with a slider position. The separation
+is that this module is in `qupath-viewer`, the detection path is in
+`qupath-pipeline`, and the dependency only runs one way. `ROADMAP.md` §5's rule
+about not asserting on appearance has a mirror image, which is that appearance
+must not be able to move an assertion.
+
+The stain arithmetic is **duplicated** rather than shared, because §7 keeps this
+crate on `qupath-slide` alone and taking a `Stains` would pull the pipeline into
+every build of the viewer for nine numbers and a logarithm.
+`matches_the_pipelines_own_arithmetic` records the pipeline's own values for the
+same pixels so the copy cannot drift. The coefficients are the *inverted*
+matrix's row, taken from the pipeline rather than typed from the stain vectors —
+the first attempt at this typed a plausible vector that was wrong, and only
+comparing against the real numbers caught it.
+
+`draw_tile_with` hoists the identity branch **out of the loop**, so the default
+display is byte-identical to no display at all and §3.4b's agreement between the
+two backends does not become conditional on a display being set.
+
+What is missing is the **dialog**. There is no way to move the range or pick a
+channel from the interface; the transform is reachable from the library and from
+`examples/panes` only.
+
+### 8.6 GeoJSON — the part that is wrong in a way that looks right
+
+`geojson.rs` writes what `QuPathTypeAdapters` writes, and the shape is taken
+from there rather than from the GeoJSON specification. That distinction is the
+whole point: GeoJSON is published, so writing something a validator accepts
+takes no effort and still lands in QuPath showing nothing. `objectType` is the
+camelCase spelling its reader wants — it warns on the older `object_type` — and
+`measurements` is the post-0.4.0 name-to-number object rather than the array of
+`{name, value}` that came before.
+
+The correctness question is **coordinates**, and it has the §3.3 shape again: a
+file written in level coordinates opens without complaint and puts every object
+in the top-left corner at the wrong size.
+`coordinates_are_level_zero_pixels` compares the same ring pushed at downsample
+1 against downsample 4, because a single file is individually plausible whatever
+frame it is in.
+
+No serde: the workspace has no serialisation dependency, and one nesting of
+arrays and a flat map of numbers is not enough reason to acquire one. Verified
+by round-tripping real output through a JSON parser rather than only by the
+brace-balance test, because balanced braces are exactly what a hand-rolled
+writer gets right while getting the field names wrong.
+
+### 8.7 What is still missing
+
+In the order it is worth having.
+
+- **The brightness/contrast dialog.** §8.5's transform has no controls. This is
+  the smallest remaining item and the one with a user-visible hole where the
+  work already exists behind it.
+- **The project browser pane.** §8.3's format is written and nothing in the
+  application creates or opens a project, so `project.rs` is a library with no
+  caller. Writing the pane is what would make it real; it is also the point at
+  which the §0 argument deserves revisiting rather than being treated as
+  settled once.
+- **`data.qpdata`, which should stay missing.** Java serialisation tied to
+  Java's object graph. A guessed version is how a project becomes corrupt in a
+  way someone discovers much later, having trusted it. The detections belong
+  beside it as GeoJSON, which both sides can read.
+- **A JPEG encoder for `thumbnail.jpg`.** `project.rs` returns the JSON files
+  and leaves the thumbnail to the caller, because nothing in this workspace
+  encodes JPEG. QuPath tolerates its absence.
+- **Parity for the two file formats.** Nothing here has been opened *by QuPath*.
+  Both formats were checked against a JSON parser and against the Java that
+  writes them, which is a stronger claim than "it validates" and a weaker one
+  than "QuPath opened it". Until a file has been through QuPath, that is the
+  honest description.

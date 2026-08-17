@@ -200,9 +200,10 @@ cargo run -p qupath-viewer --example render --release -- data/CMU-1.svs
 ### The application
 
 `crates/qupath-app` is the viewer with an interface around it: a toolbar, a file
-dialog, a status bar with a scalebar, and three panels off the View menu —
-QuPath's detection parameters in microns, the slide's metadata and level table,
-and a list of every gesture and key.
+dialog, a status bar with a scalebar, an overview thumbnail showing where on the
+slide the view is, and three panels off the View menu — QuPath's detection
+parameters in microns, the slide's metadata and level table, and a list of every
+gesture and key.
 
 ```sh
 # `d` detects cells in what is on screen, `h` hides the outlines. Detection runs
@@ -222,16 +223,20 @@ portable is which panes exist and what each one holds — and, where a rule is
 genuinely a specification, the rule itself. The scalebar is the clearest case:
 `Scalebar.java`'s table of permitted lengths and its snap-to-nearest is
 arithmetic with no JavaFX in it, so it is ported exactly, down to the irregular
-250/400/800 entries a generated 1-2-5 sequence would get wrong.
+250/400/800 entries a generated 1-2-5 sequence would get wrong. The pattern that
+emerged is that **arithmetic and file formats port cleanly and drawing does
+not** — the overview's two mappings, the brightness/contrast transform, GeoJSON
+and `.qpproj` all came across the same way.
 
-What QuPath's viewer has that this does not, in the order it is worth having:
-the **overview thumbnail** for navigating while zoomed in, **brightness and
-contrast** with the deconvolved stain channels (the vectors already exist in
-`qupath-pipeline::stain`; the display transform does not), **saving detections**
-as GeoJSON, and **projects**. The last two would revise
-[docs/VIEWER.md](docs/VIEWER.md) §0's stated non-goals rather than fill a gap in
-it, so they are decisions rather than tasks. `.qpproj` is JSON and portable;
-`data.qpdata` is Java serialisation and is not something to guess at.
+Since then: the **overview thumbnail** is in, the **display transform** and the
+deconvolved stain channels exist but have no controls yet, **GeoJSON export**
+writes the dialect QuPath reads, and the **project format**'s JSON files are
+written. The last two revise [docs/VIEWER.md](docs/VIEWER.md) §0's stated
+non-goals, deliberately and on the record rather than by drift. `data.qpdata` is
+Java serialisation and is deliberately still not attempted: a guessed version is
+how a project becomes corrupt in a way someone finds out much later. Neither
+file has yet been opened *by QuPath* — both were checked against a JSON parser
+and against the Java that writes them, which is not the same claim.
 
 Level selection is the whole point, and it is worth one number: a 1024x768 view
 of the whole slide picks level 2 and reads **108 tiles against level 0's
