@@ -232,6 +232,19 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
                 ));
                 ui.separator();
 
+                // QuPath draws its scalebar over the bottom-left of the slide
+                // itself (`QuPathViewerPlus`, an `AnchorPane` at the corner).
+                // Here it goes in the status bar instead, and deliberately: a bar
+                // floating over the image would sit inside the slide's rectangle,
+                // and §8.1c is what happens when something lands there. The bar
+                // is what gives the `px/px` beside it a physical meaning.
+                if let Some(bar) =
+                    qupath_viewer::scalebar(open.slide().microns_per_pixel(), open.view.scale)
+                {
+                    scalebar(ui, &bar);
+                    ui.separator();
+                }
+
                 let SlidePoint { x, y } = cursor_slide_position(open, app.cursor());
                 ui.label(format!("{x:.0}, {y:.0}"))
                     .on_hover_text("Cursor position in level-0 slide pixels");
@@ -694,6 +707,55 @@ fn metadata(ui: &mut egui::Ui, app: &App) {
         });
 }
 
+/// Draws a scalebar: a bar with end ticks, and its length written above it.
+///
+/// The length comes from [`qupath_viewer::scalebar`], which is QuPath's rule; all
+/// this does is put it on screen. The bar is clamped to something that fits in a
+/// status bar, because past the end of QuPath's table it can grow without bound
+/// and the layout is not the place to discover that.
+fn scalebar(ui: &mut egui::Ui, bar: &qupath_viewer::Scalebar) {
+    // Cast once, and clamp: `pixels` is what the rule asked for, and a status bar
+    // has an opinion about how much of itself it will give up. The clamp is also
+    // what makes the truncation harmless — the range it admits is a few hundred,
+    // where `f32` is exact in the integers.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "screen space is f32, and the clamp bounds the value to a few hundred"
+    )]
+    let width = (bar.pixels as f32).clamp(8.0, 220.0);
+    let height = ui.text_style_height(&egui::TextStyle::Small);
+    let (response, painter) =
+        ui.allocate_painter(egui::vec2(width, height + 6.0), egui::Sense::hover());
+    let rect = response.rect;
+    let colour = ui.visuals().text_color();
+    let stroke = egui::Stroke::new(1.0, colour);
+
+    // The bar sits at the bottom of what was allocated with the label above it,
+    // which is the arrangement QuPath uses and reads as one object rather than a
+    // line and some text that happen to be adjacent.
+    let y = rect.bottom() - 1.0;
+    painter.line_segment(
+        [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+        stroke,
+    );
+    // End ticks, so the bar has ends rather than fading into the separator next
+    // to it.
+    for x in [rect.left(), rect.right()] {
+        painter.line_segment([egui::pos2(x, y - 4.0), egui::pos2(x, y)], stroke);
+    }
+    painter.text(
+        egui::pos2(rect.center().x, y - 5.0),
+        egui::Align2::CENTER_BOTTOM,
+        &bar.label,
+        egui::FontId::proportional(height),
+        colour,
+    );
+    response.on_hover_text(
+        "Scalebar. The length is snapped to a round number, so the bar is \
+         whatever that length happens to measure on screen.",
+    );
+}
+
 /// Every gesture and key, in one place.
 ///
 /// This is the pane QuPath has no equivalent of, and it exists because the
@@ -712,7 +774,10 @@ fn help(ui: &mut egui::Ui) {
                 ("Left-drag", "Pan. The view stays on the slide."),
                 ("Right-drag", "Draw a box; releasing zooms to it."),
                 ("Escape", "Abandon a box mid-drag."),
-                ("Scroll", "Zoom about the cursor. Two fingers on a trackpad."),
+                (
+                    "Scroll",
+                    "Zoom about the cursor. Two fingers on a trackpad.",
+                ),
                 ("Ctrl-scroll", "Zoom faster; this is what a pinch sends."),
                 ("+ / −", "Zoom about the cursor."),
                 ("f", "Fit the whole slide."),
@@ -732,6 +797,15 @@ fn help(ui: &mut egui::Ui) {
                 ui.end_row();
             }
         });
+    ui.add_space(8.0);
+    ui.label(
+        egui::RichText::new(
+            "The scalebar in the status bar is snapped to a round number, so it \
+             changes length as you zoom rather than changing what it says.",
+        )
+        .weak()
+        .small(),
+    );
     ui.add_space(8.0);
     ui.label(
         egui::RichText::new(
@@ -1113,4 +1187,3 @@ mod tests {
         );
     }
 }
-
