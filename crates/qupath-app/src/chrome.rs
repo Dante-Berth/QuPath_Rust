@@ -74,6 +74,36 @@ pub fn style(context: &egui::Context) {
     });
 }
 
+/// The fraction of the window the side panels may take between them.
+///
+/// The slide keeps the rest. Half is chosen because the slide is what the
+/// application is for: a panel is being read while the tissue is being looked
+/// at, so the tissue keeps the larger share whenever the two compete.
+const PANEL_SHARE: f32 = 0.5;
+
+/// How many side panels are open.
+fn open_panels(app: &App) -> u32 {
+    u32::from(app.show_analysis) + u32::from(app.show_metadata) + u32::from(app.show_help)
+}
+
+/// The widest a single side panel may be, given the window and how many panels
+/// share it.
+///
+/// The cap binds each panel, so it is the *total* share divided between however
+/// many are open: three panels at a 1280px window get 213 each rather than 640
+/// each, which is what makes the sum a bound rather than a bound on the widest
+/// one. Capping each panel at the whole share instead is the mistake that looks
+/// right — with three panels of 260, 240 and 280 it binds only the last.
+///
+/// Pure, and separate from [`draw`], so the arithmetic that stopped the slide
+/// rectangle going negative can be asserted without laying anything out.
+fn panel_cap(window: f32, panels: u32) -> f32 {
+    if panels == 0 {
+        return 0.0;
+    }
+    window * PANEL_SHARE / panels as f32
+}
+
 /// Lays out the whole interface and returns what the user asked for, along
 /// with the rectangle left over for the slide.
 ///
@@ -287,19 +317,37 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
     // after that line would sit over the slide's rectangle, and every gesture
     // would treat a click on it as a click on the tissue. `docs/VIEWER.md` §3.7
     // records what that class of bug cost the last time.
+    // Each panel is also capped, because a `default_width` is a request made
+    // without knowledge of the other panels: 260 + 240 + 280 is 780 of an 800px
+    // window, and what came out was a slide rectangle *130 pixels wide in the
+    // negative* — an inverted rectangle that `cursor_over_slide` rejects every
+    // point of, so every gesture over the slide silently stopped working. The
+    // cap is a share of the window rather than a constant, so the panels shrink
+    // together on a small window and are untouched on a large one.
+    //
+    // The cap is applied by clamping the width *before* handing it over, rather
+    // than through `SidePanel::max_width`. `default_width` widens the range to
+    // include whatever it is given (`egui` 0.33 `panel.rs:178`), and a panel's
+    // width is remembered across frames besides, so the two combined do not
+    // reliably bind. Doing the arithmetic here means the number that runs is the
+    // number `panel_cap` returned.
+    let cap = panel_cap(context.content_rect().width(), open_panels(app));
     if app.show_analysis {
         egui::SidePanel::right("analysis")
-            .default_width(260.0)
+            .default_width(260.0_f32.min(cap))
+            .max_width(cap)
             .show(context, |ui| analysis(ui, app, &mut command));
     }
     if app.show_metadata {
         egui::SidePanel::left("metadata")
-            .default_width(240.0)
+            .default_width(240.0_f32.min(cap))
+            .max_width(cap)
             .show(context, |ui| metadata(ui, app));
     }
     if app.show_help {
         egui::SidePanel::left("help")
-            .default_width(280.0)
+            .default_width(280.0_f32.min(cap))
+            .max_width(cap)
             .show(context, help);
     }
 
@@ -673,7 +721,14 @@ fn help(ui: &mut egui::Ui) {
                 ("o", "Open a slide."),
             ] {
                 ui.label(egui::RichText::new(gesture).strong());
-                ui.label(effect);
+                // Wrapped, not merely long: a `Grid` sizes itself to its widest
+                // unwrapped cell, and that intrinsic width beats the panel's
+                // `max_width`. With these left unwrapped the three panels
+                // together took a 1280px window down to 471px of slide, and an
+                // 800px one to a *negative* width — the whole reason the cap
+                // above exists. The cap cannot bind a panel whose contents
+                // refuse to be narrower.
+                ui.add(egui::Label::new(effect).wrap());
                 ui.end_row();
             }
         });
@@ -902,6 +957,111 @@ mod tests {
         area
     }
 
+    /// Runs the *real* [`draw`] headlessly at `size`, with the panels the flags
+    /// ask for, and returns the slide rectangle it reports.
+    ///
+    /// Every other helper in this module rebuilds a replica of the layout, which
+    /// cannot catch a panel being too wide for the window because the replica
+    /// does not contain the panel's contents. This one calls the function the
+    /// application calls, so what it measures is what a user would see.
+    ///
+    /// Two frames, for `layout`'s reason.
+    fn draw_headless(
+        size: egui::Vec2,
+        analysis: bool,
+        metadata: bool,
+        help: bool,
+    ) -> (f32, f32, f32, f32) {
+        // Imported here rather than at module scope: the helpers above are pure
+        // `egui` and stay clearer without the crate's names in view.
+        use super::{App, draw, style};
+
+        let context = egui::Context::default();
+        style(&context);
+        let mut app = App::new(None);
+        app.show_analysis = analysis;
+        app.show_metadata = metadata;
+        app.show_help = help;
+        let mut area = (0.0, 0.0, 0.0, 0.0);
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                ..Default::default()
+            };
+            let _ = context.run(input, |context| {
+                let (_, reported) = draw(context, &app);
+                area = reported;
+            });
+        }
+        area
+    }
+
+    /// The width a rectangle from [`draw_headless`] leaves for the slide.
+    fn width(area: (f32, f32, f32, f32)) -> f32 {
+        area.2 - area.0
+    }
+
+    /// With every panel open, the slide must still keep its share of the window.
+    ///
+    /// This is the rough edge `docs/VIEWER.md` §6 predicted and could not check:
+    /// three side panels are opened independently, none of them knows about the
+    /// others, and on a small window they can add up to more than there is.
+    /// Whether they *look* right is still not asserted — but "the slide is left
+    /// with nothing" is a number, and it is the failure that matters.
+    ///
+    /// The slack is a pixel, not a fudge factor: the panels take exactly
+    /// [`PANEL_SHARE`] and the separator lines between them round, so the
+    /// measured 639.875 of a 1280px window is the bound being *met*. Asserting
+    /// strictly more than half would fail on the correct layout.
+    #[test]
+    fn three_panels_leave_the_slide_its_share_of_a_normal_window() {
+        let size = egui::vec2(1280.0, 800.0);
+        let bare = width(draw_headless(size, false, false, false));
+        let all = width(draw_headless(size, true, true, true));
+        assert!(
+            all >= bare * super::PANEL_SHARE - 1.0,
+            "three panels took more than their share of a 1280px window: \
+             {all} left of {bare}"
+        );
+    }
+
+    /// And on a small window they must not take *all* of it.
+    ///
+    /// The weaker claim, deliberately: at 800x600 three panels genuinely are a
+    /// lot of the window, and asserting a comfortable share there would be
+    /// asserting a preference. What must hold is that the slide does not vanish,
+    /// because a viewer showing no slide is broken rather than cramped.
+    #[test]
+    fn the_slide_does_not_vanish_on_a_small_window() {
+        let all = width(draw_headless(egui::vec2(800.0, 600.0), true, true, true));
+        assert!(
+            all > 100.0,
+            "three panels left the slide {all}px wide on an 800px window"
+        );
+    }
+
+    /// Each panel must cost something, or one of them is not being laid out.
+    ///
+    /// The test above passes trivially if a flag is ignored — a panel that never
+    /// shows takes no width. This pins that all three actually reserve space,
+    /// which is what makes the sum above a real measurement.
+    #[test]
+    fn every_panel_reserves_width_of_its_own() {
+        let size = egui::vec2(1280.0, 800.0);
+        let bare = width(draw_headless(size, false, false, false));
+        for (name, analysis, metadata, help) in [
+            ("analysis", true, false, false),
+            ("metadata", false, true, false),
+            ("help", false, false, true),
+        ] {
+            let one = width(draw_headless(size, analysis, metadata, help));
+            assert!(
+                one < bare,
+                "the {name} panel reserved no width: {one} against {bare} with none open"
+            );
+        }
+    }
+
     /// A side panel must come out of the slide's rectangle.
     ///
     /// If it does not, every gesture treats a click on a slider as a click on
@@ -953,3 +1113,4 @@ mod tests {
         );
     }
 }
+
