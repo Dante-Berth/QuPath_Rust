@@ -1082,6 +1082,62 @@ code** — the question that settled this was answered by looking at winit's
 Linux backend, and the next person should be able to look at their own device
 instead.
 
+### 8.1c Three panels at once — **done**, and it was not a cosmetic problem
+
+§6 has said throughout that appearance is unverified, and §8.1 predicted the
+rough edge as *"three panels open at once on a small window leaving little
+slide"*. That was written as a matter of taste. It was a **bug**, and a silent
+one.
+
+The measurement, once a test actually ran `chrome::draw` rather than a replica of
+it: with all three panels open on an **800x600** window the slide rectangle came
+out **−130 pixels wide**. Not cramped — *inverted*. `cursor_over_slide` tests
+`x >= left && x < right`, which no point satisfies when `right < left`, so **every
+gesture over the slide stopped working**: no pan, no scroll-zoom, no zoom
+rectangle. On a 1280px window it was not negative but still wrong, leaving the
+slide 471px of 1280.
+
+Two independent causes, which is why the first fix moved nothing:
+
+- **The panels did not know about each other.** `default_width` of 260, 240 and
+  280 is 780 of an 800px window. The cap is now a *share* of the window divided
+  by however many panels are open, so they shrink together on a small window and
+  are untouched on a large one.
+- **The contents refused to be narrower.** This is the one worth keeping. An
+  `egui::Grid` sizes itself to its widest **unwrapped** cell, and that intrinsic
+  width **beats the panel's `max_width`**. The help pane's `"Zoom about the
+  cursor. Two fingers on a trackpad."` set a floor no cap could get under, and
+  capping the panels changed the numbers **not at all** until the labels wrapped.
+
+Worth stating because it generalises past `egui`: a bound applied to a container
+is not a bound on what the container is asked to hold. The cap read as correct,
+the arithmetic *was* correct — `panel_cap` returned 213 for a 1280px window
+throughout — and the layout ignored it. What found it was printing the resulting
+rectangle rather than the intended width, which is §6's rule about knowing what
+value would make a check fail.
+
+Both halves were confirmed load-bearing separately, and the two failures are
+different, which is what says neither is redundant. Remove **the cap** and the
+800px window goes to a 0px slide — that half is what keeps the rectangle from
+collapsing. Remove **the wrap** and the small window is fine while the 1280px one
+falls back to 471px — that half is what makes the cap bind at all. Each fix
+alone leaves a real failure standing.
+
+Three tests, all on widths and none on appearance. The third —
+`every_panel_reserves_width_of_its_own` — exists because the other two pass
+trivially if a panel is never laid out at all, and a test satisfied by a missing
+panel is not measuring the panel.
+
+`draw_headless` runs the **real** `draw`, which is the change that made any of
+this visible. `a_side_panel_is_not_part_of_the_slide_rectangle` and its
+neighbours rebuild a *replica* of the layout, and a replica cannot contain a
+panel's contents — so the entire class of bug above was outside what they could
+see. It is kept, because it pins the layout *ordering* the replica is good for.
+
+**Appearance is still not asserted**, and this does not claim otherwise. What
+moved across the line is *how much window the slide gets*, which is a number.
+Colours and legibility are still unlooked-at.
+
 ### 8.2 The panes QuPath has and this does not
 
 Taken from the interface rather than from the code, in the order they are worth
