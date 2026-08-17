@@ -37,6 +37,7 @@ pub mod geojson;
 pub mod loader;
 pub mod overlay;
 pub mod overview;
+pub mod project;
 pub mod scalebar;
 pub mod viewport;
 
@@ -48,5 +49,6 @@ pub use geojson::Measurement;
 pub use loader::{Loaded, SlideTiles, TileLoader, TileSource};
 pub use overlay::Overlay;
 pub use overview::Overview;
+pub use project::Entry;
 pub use scalebar::{Scalebar, scalebar};
 pub use viewport::Viewport;
