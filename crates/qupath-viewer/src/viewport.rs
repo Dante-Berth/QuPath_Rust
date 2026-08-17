@@ -766,7 +766,10 @@ mod tests {
         let base = level(0, 46000, 32914, 1.0);
         let mut view = viewport((23000.0, 16457.0), 0.022_261, (1024, 768));
         let before = view.visible_tiles(&base).len();
-        assert!(before > 0, "the fitted view has to see something to begin with");
+        assert!(
+            before > 0,
+            "the fitted view has to see something to begin with"
+        );
 
         for _ in 0..60 {
             view = view.pan(40.0, 40.0).clamp_to_extent(46000, 32914);

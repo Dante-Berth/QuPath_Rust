@@ -506,9 +506,7 @@ impl App {
                     // 1.2^(a few hundredths) per event — visually nothing, and
                     // the reason zooming felt dead on a trackpad while working
                     // on a mouse. See [`TRACKPAD_PIXELS_PER_STEP`].
-                    MouseScrollDelta::PixelDelta(position) => {
-                        position.y / TRACKPAD_PIXELS_PER_STEP
-                    }
+                    MouseScrollDelta::PixelDelta(position) => position.y / TRACKPAD_PIXELS_PER_STEP,
                 };
                 // Ctrl multiplies rather than gates. Under GNOME a trackpad
                 // pinch arrives as ctrl with a scroll, and it should zoom
@@ -516,7 +514,11 @@ impl App {
                 // what makes the pinch feel like a pinch rather than like a
                 // slow scroll. Without ctrl the scroll still zooms, which is
                 // this viewer's existing behaviour and is not changed.
-                let steps = if self.ctrl { steps * CTRL_SCROLL_STEPS } else { steps };
+                let steps = if self.ctrl {
+                    steps * CTRL_SCROLL_STEPS
+                } else {
+                    steps
+                };
                 self.zoom_by(steps)
             }
             // A two-finger pinch, where the platform reports one.
@@ -1142,7 +1144,11 @@ mod tests {
             MouseScrollDelta::LineDelta(_, y) => f64::from(*y),
             MouseScrollDelta::PixelDelta(position) => position.y / TRACKPAD_PIXELS_PER_STEP,
         };
-        if ctrl { steps * CTRL_SCROLL_STEPS } else { steps }
+        if ctrl {
+            steps * CTRL_SCROLL_STEPS
+        } else {
+            steps
+        }
     }
 
     /// What a zoom factor a run of events comes to.

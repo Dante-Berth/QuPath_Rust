@@ -30,7 +30,8 @@ impl ApplicationHandler for Probe {
         self.window = Some(
             events
                 .create_window(
-                    Window::default_attributes().with_title("Scroll and pinch here; Escape to quit"),
+                    Window::default_attributes()
+                        .with_title("Scroll and pinch here; Escape to quit"),
                 )
                 .expect("create a window"),
         );

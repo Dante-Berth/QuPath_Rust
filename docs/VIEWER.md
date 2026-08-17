@@ -1138,6 +1138,68 @@ see. It is kept, because it pins the layout *ordering* the replica is good for.
 moved across the line is *how much window the slide gets*, which is a number.
 Colours and legibility are still unlooked-at.
 
+### 8.1d A scalebar — **done**, and the one piece that really is a translation
+
+§8 said the portable part of `qupath-gui-fx` is *the design, not the code*, with
+the project format as the exception. `Scalebar.java` is a second exception, and a
+cleaner one: the rule for how long a scalebar should be is arithmetic over a
+fixed table, with no JavaFX anywhere in it. `crates/qupath-viewer/src/scalebar.rs`
+is that rule ported line for line — the first thing in this section that is a
+translation rather than a re-design.
+
+The rule, from `Scalebar.updateScalebar`: take a preferred length of **100 screen
+pixels**, convert it to microns at the current downsample, snap to the nearest
+entry in `permittedScales`, and convert back to find the bar's length on screen.
+Snapping in *microns* rather than in pixels is the whole point — the label is a
+round number and the bar is however long that number happens to measure.
+
+**The table is copied, not generated.** It looks like a 1-2-5 progression and is
+not: it also carries **250, 400 and 800**. A generated sequence would agree with
+QuPath at most scales and disagree at those, which would show up as a
+differently-labelled bar on the same slide — the kind of divergence that is
+invisible until someone compares two screenshots. `permitted` is tested at 300 →
+250 and 420 → 400 for exactly that reason.
+
+Verified against CMU-1's real scales, which is what says the arithmetic is the
+right way up rather than merely plausible:
+
+| `scale` | Label | Bar |
+| --- | --- | --- |
+| 1.0 | 50 µm | 100 px |
+| 0.25 | 200 µm | 100 px |
+| 0.05 | 1 mm | 100 px |
+| 0.0223 (fit) | **2 mm** | 89 px |
+| 0.01 | 5 mm | 100 px |
+
+The fit row is the one worth checking by hand: 46,000 px at 0.499 µm/px is about
+**23 mm** of slide across the window, so a 2 mm bar at 89 of 1024 pixels is
+right. A number that is merely round proves nothing here — an inverted downsample
+would produce 50 µm, 20 µm, 5 µm at successive scales and every one of them would
+look like a working scalebar. `zooming_out_never_claims_a_shorter_length` is the
+test that catches it, and it has to compare *across* two scales to do so: this is
+§3.3's level bug in miniature, where each frame was individually defensible.
+
+**Where it goes, and why not where QuPath puts it.** QuPath anchors its scalebar
+over the bottom-left of the image itself (`QuPathViewerPlus`, an `AnchorPane`).
+Here it is in the status bar instead — a bar floating over the slide would sit
+inside the slide's rectangle, and §8.1c is the record of what lands there. It
+also gives the `px/px` already in the status bar a physical meaning, which was
+the gap.
+
+**What the table does past a real slide.** `permittedScales` stops at 100,000 µm,
+so zoomed out far enough the bar cannot grow and starts under-reporting — 23 px
+at a scale of 0.0001. That is QuPath's behaviour, not a defect in the port, and
+it is **pinned rather than fixed**: extending the table would be diverging from
+QuPath to serve a scale no slide reaches. It was found by sweeping past the
+reachable range, which is why the sweep test's lower bound is now a stated
+quarter of `Viewport::fit`'s scale rather than an arbitrary small number — a
+bound chosen by taste would have hidden it.
+
+Ten tests, none needing a window: the library function is pure, so `scalebar` is
+`Option<f64>` and `f64` in, a length and a string out. It refuses a non-finite or
+non-positive scale for §8.1b's reason — a NaN reaching a label is the same class
+of bug as a NaN reaching the viewport.
+
 ### 8.2 The panes QuPath has and this does not
 
 Taken from the interface rather than from the code, in the order they are worth
@@ -1149,10 +1211,22 @@ having.
   gets its meaning. Everything it shows is parsed by §8.0 or by `Slide::levels`.
   A missing value is a dash rather than a plausible default, for
   `microns_per_pixel`'s reason.
+- **The overview thumbnail — not started, and now the top of this list.**
+  `ImageOverview.java` is 271 lines and is the other half of `QuPathViewerPlus`
+  besides the scalebar: a small whole-slide image in the top-right corner with a
+  rectangle showing where the view is, clickable to jump. It matters more than
+  its size suggests, because zoomed in past a few hundred microns there is
+  currently **nothing on screen that says where on the slide you are** — the
+  status bar gives level-0 coordinates, which is a number, not a position.
+  Everything it needs exists: `examples/dump` already writes exactly that
+  overview PNG, and `Viewport` knows the visible rectangle.
 - **Brightness/contrast and stain vectors.** QuPath's dialog adjusts *display*
   only, and separately shows the deconvolved haematoxylin and eosin channels.
   `qupath-pipeline::stain` already computes the deconvolution, so the vectors
   exist; what is missing is a display transform in `compose` and the controls.
+- **A scalebar — done, §8.1d.** Listed here because it is part of QuPath's viewer
+  rather than a pane, and because it is the one item so far that was a genuine
+  translation of the Java rather than a port of the design.
 - **A gesture and key list — done.** The complaint that started §3.7 was
   discoverability, and the status bar fixed one gesture's worth of it. QuPath has
   no equivalent pane; this one is ours. It is also where the trackpad and

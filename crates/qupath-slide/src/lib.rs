@@ -472,7 +472,10 @@ mod tests {
     /// would do.
     #[test]
     fn a_field_name_matches_whole_and_not_as_a_substring() {
-        assert_eq!(Slide::aperio_field("XMPP = 3|MPP = 0.5", "MPP"), Some("0.5"));
+        assert_eq!(
+            Slide::aperio_field("XMPP = 3|MPP = 0.5", "MPP"),
+            Some("0.5")
+        );
         assert_eq!(Slide::aperio_field("XMPP = 3", "MPP"), None);
     }
 

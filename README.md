@@ -153,6 +153,31 @@ what to distrust, in one page.
 
 ## Viewing a slide
 
+`CMU-1.svs` — 46000x32914, four tissue sections — fitted to a 1024x768 view.
+The viewer picks **level 2** for this and reads 108 tiles; level 0 would be
+23,220 for a worse image.
+
+![The whole slide, fitted](docs/images/viewer.jpg)
+
+Zoomed to the region `docs/ROADMAP.md` profiles, with the detections from a
+`d` keypress drawn over it — **1272 objects**, the outline of each traced
+nucleus in orange:
+
+![Cell detection over tissue](docs/images/viewer-detail.jpg)
+
+Further in, at level 0 and past 1:1, where the outlines can be checked against
+individual nuclei. The boundaries are pixel-stepped because nothing smooths
+them yet — QuPath's *Smooth boundaries* is not implemented
+([docs/VIEWER.md](docs/VIEWER.md) §8.1), and a control for it is deliberately
+absent rather than present and inert:
+
+![Nuclear outlines at level 0](docs/images/viewer-zoom1.jpg)
+
+Every image above is written by `examples/render`, which composes offscreen
+through the same shader the window uses — so they are the viewer's own output
+rather than screenshots, and they can be regenerated on a machine with no
+display. `docs/VIEWER.md` §6 is why that distinction is kept.
+
 ```sh
 # Drag to pan, scroll to zoom, f to fit, escape to quit. The title bar shows
 # the backend, the pyramid level, the tile count and resident texture memory.
@@ -171,6 +196,42 @@ cargo run -p qupath-viewer --example dump --release -- data/CMU-1.svs
 # reports a scripted pan through the loader and the cache. Takes `--cpu` too.
 cargo run -p qupath-viewer --example render --release -- data/CMU-1.svs
 ```
+
+### The application
+
+`crates/qupath-app` is the viewer with an interface around it: a toolbar, a file
+dialog, a status bar with a scalebar, and three panels off the View menu —
+QuPath's detection parameters in microns, the slide's metadata and level table,
+and a list of every gesture and key.
+
+```sh
+# `d` detects cells in what is on screen, `h` hides the outlines. Detection runs
+# on another thread, so the view keeps moving while it works.
+cargo run -p qupath-app --release -- data/CMU-1.svs
+
+# What your trackpad actually sends, which is platform-specific enough to be
+# worth printing rather than guessing at.
+cargo run -p qupath-app --example gestures --release
+```
+
+Following QuPath's interface is a **port of the design, not of the code**, and
+the measurement is why: `qupath-gui-fx` is 101,712 lines against this
+application's 1,600, `ProjectBrowser.java` alone is larger than all of it, and
+JavaFX is retained-mode where `egui` rebuilds from state every frame. What is
+portable is which panes exist and what each one holds — and, where a rule is
+genuinely a specification, the rule itself. The scalebar is the clearest case:
+`Scalebar.java`'s table of permitted lengths and its snap-to-nearest is
+arithmetic with no JavaFX in it, so it is ported exactly, down to the irregular
+250/400/800 entries a generated 1-2-5 sequence would get wrong.
+
+What QuPath's viewer has that this does not, in the order it is worth having:
+the **overview thumbnail** for navigating while zoomed in, **brightness and
+contrast** with the deconvolved stain channels (the vectors already exist in
+`qupath-pipeline::stain`; the display transform does not), **saving detections**
+as GeoJSON, and **projects**. The last two would revise
+[docs/VIEWER.md](docs/VIEWER.md) §0's stated non-goals rather than fill a gap in
+it, so they are decisions rather than tasks. `.qpproj` is JSON and portable;
+`data.qpdata` is Java serialisation and is not something to guess at.
 
 Level selection is the whole point, and it is worth one number: a 1024x768 view
 of the whole slide picks level 2 and reads **108 tiles against level 0's
