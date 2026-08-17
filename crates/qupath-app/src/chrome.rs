@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 use qupath_pipeline::Micron;
-use qupath_viewer::SlidePoint;
+use qupath_viewer::{ScreenPoint, SlidePoint};
 
 use crate::state::{App, cursor_slide_position, describe, display_name};
 
@@ -44,6 +44,15 @@ pub enum Command {
     ToggleMetadata,
     /// Show or hide the gesture and key list.
     ToggleHelp,
+    /// Show or hide the overview thumbnail.
+    ToggleOverview,
+    /// Centre the view on a slide point, from a click on the overview.
+    ///
+    /// Carries the point rather than the click position because the mapping
+    /// belongs to `Overview` and the layout code is where the click's position
+    /// within the picture is known — converting here keeps `state` from having
+    /// to know where the pane was laid out.
+    JumpTo(SlidePoint),
     /// Replace the detection parameters.
     ///
     /// The whole struct rather than one field, because it keeps [`Command`] one
@@ -73,6 +82,13 @@ pub fn style(context: &egui::Context) {
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
     });
 }
+
+/// The `egui` user-texture id the overview picture is registered under.
+///
+/// One constant shared by the pane that names it and the renderer that uploads
+/// it, because two literals that must match are one literal that eventually
+/// does not.
+pub const OVERVIEW_TEXTURE: u64 = 1;
 
 /// The fraction of the window the side panels may take between them.
 ///
@@ -193,6 +209,11 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
                 let mut help = app.show_help;
                 if ui.checkbox(&mut help, "Gestures and keys").clicked() {
                     command = Command::ToggleHelp;
+                    ui.close();
+                }
+                let mut overview = app.show_overview;
+                if ui.checkbox(&mut overview, "Overview").clicked() {
+                    command = Command::ToggleOverview;
                     ui.close();
                 }
             });
@@ -355,7 +376,7 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
         egui::SidePanel::left("metadata")
             .default_width(240.0_f32.min(cap))
             .max_width(cap)
-            .show(context, |ui| metadata(ui, app));
+            .show(context, |ui| metadata(ui, app, &mut command));
     }
     if app.show_help {
         egui::SidePanel::left("help")
@@ -637,7 +658,87 @@ fn slider(
 /// Everything here is read from the slide rather than computed, and it exists
 /// because `VIEWER.md` §8.0's pixel-size fix is otherwise invisible — the number
 /// every micron parameter divides by now has somewhere to be seen.
-fn metadata(ui: &mut egui::Ui, app: &App) {
+/// The overview thumbnail: where the view is on the slide, and a click to jump.
+///
+/// `VIEWER.md` §8.2, and the pane the section put at the top of its list —
+/// zoomed in past a few hundred microns nothing else on screen says where on
+/// the slide you are, because the status bar's level-0 coordinates are a number
+/// rather than a position.
+///
+/// The picture is painted as a mesh of one textured quad rather than through an
+/// `egui` texture handle, because `draw` takes `&App` by design (see the module
+/// documentation) and registering a texture needs somewhere to keep the handle.
+/// The pixels are already in memory and the quad is what `compose` rasterises
+/// anyway, so this costs a copy of a 150x107 image per frame — about 64 KB,
+/// against the megabytes of tile the same frame blits.
+fn overview_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
+    let Some(thumbnail) = app.open.as_ref().and_then(|open| open.overview()) else {
+        return;
+    };
+    let view = app.open.as_ref().map(|open| open.view);
+    let (width, height) = thumbnail.overview.size();
+
+    // Fitted to the pane rather than drawn at its stored size: the pane is
+    // resizable and a picture that overflows it is clipped rather than scaled,
+    // which loses the right-hand edge of the slide without saying so.
+    let available = ui.available_width().max(1.0);
+    let scale = (available / width as f32).min(1.0);
+    let size = egui::vec2(width as f32 * scale, height as f32 * scale);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+
+    let painter = ui.painter_at(rect);
+    let texture = egui::TextureId::User(OVERVIEW_TEXTURE);
+    let mut mesh = egui::Mesh::with_texture(texture);
+    mesh.add_rect_with_uv(
+        rect,
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        egui::Color32::WHITE,
+    );
+    painter.add(egui::Shape::mesh(mesh));
+
+    // The visible rectangle, unless everything is visible — QuPath skips it at
+    // zoom-to-fit, "in which case everything is visible".
+    if let Some(view) = view
+        && !thumbnail.overview.covers_everything(view)
+    {
+        let visible = thumbnail.overview.visible_rect(view);
+        let corner = rect.min + egui::vec2(visible[0] * scale, visible[1] * scale);
+        let box_ =
+            egui::Rect::from_min_size(corner, egui::vec2(visible[2] * scale, visible[3] * scale));
+        // Clipped to the picture, because panning past an edge puts part of the
+        // rectangle outside it — `visible_rect` returns that honestly and the
+        // drawing is where it gets bounded.
+        painter.rect_stroke(
+            box_.intersect(rect),
+            0.0,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(200, 0, 0)),
+            egui::StrokeKind::Inside,
+        );
+    }
+    painter.rect_stroke(
+        rect,
+        0.0,
+        egui::Stroke::new(1.0, egui::Color32::from_gray(64)),
+        egui::StrokeKind::Inside,
+    );
+
+    // Click *and* drag, as `ImageOverview` does: it binds both to
+    // `mouseViewerToLocation`, so holding the button scrubs the view across the
+    // slide rather than needing one click per jump.
+    if (response.clicked() || response.dragged())
+        && let Some(position) = response.interact_pointer_pos()
+    {
+        let local = position - rect.min;
+        *command = Command::JumpTo(
+            thumbnail
+                .overview
+                .to_slide(ScreenPoint::new(local.x / scale, local.y / scale)),
+        );
+    }
+    ui.label(egui::RichText::new("Click to jump").weak().small());
+}
+
+fn metadata(ui: &mut egui::Ui, app: &App, command: &mut Command) {
     ui.heading("Slide");
     ui.separator();
     let Some(open) = &app.open else {
@@ -645,6 +746,16 @@ fn metadata(ui: &mut egui::Ui, app: &App) {
         return;
     };
     let slide = open.slide();
+
+    // The overview goes at the top of this pane rather than floating over the
+    // image where QuPath anchors it (`QuPathViewerPlus`, an `AnchorPane`). A
+    // picture over the slide would sit inside the slide's rectangle, and
+    // §8.1c is the record of what lands there — the same decision the scalebar
+    // took in §8.1d, and taken the same way.
+    if app.show_overview {
+        overview_pane(ui, app, command);
+        ui.add_space(8.0);
+    }
 
     ui.label(egui::RichText::new(display_name(&open.path)).strong());
     ui.label(egui::RichText::new(describe(slide)).weak().small());

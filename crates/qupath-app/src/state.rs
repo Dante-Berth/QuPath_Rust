@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use qupath_pipeline::Micron;
 use qupath_slide::Slide;
 use qupath_viewer::compose::{self, Framebuffer, MeshVertex, Texture};
+use qupath_viewer::overview::Overview;
 use qupath_viewer::{ScreenPoint, SlidePoint, SlideTiles, TileCache, TileLoader, Viewport};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{Key, NamedKey};
@@ -138,6 +139,28 @@ pub struct Open {
     pub view: Viewport,
     /// Tiles the last frame drew, for the status bar.
     pub drawn: usize,
+    /// The whole slide as a small picture, and the geometry that places the
+    /// visible rectangle on it — `VIEWER.md` §8.2.
+    ///
+    /// Read once when the slide opens, from the coarsest level, because that is
+    /// what makes a thumbnail cheap: the top of CMU-1's pyramid is 1,024 px on
+    /// its long edge, so this is one region read of about 2 MB rather than
+    /// anything per frame. It never changes afterwards — the picture is of the
+    /// slide, not of the view — so the only per-frame work is drawing the
+    /// rectangle.
+    ///
+    /// `None` when the slide is degenerate or the read failed. A missing
+    /// overview is not a reason to fail to open a slide, so it is an absent
+    /// pane rather than an error.
+    pub overview: Option<Thumbnail>,
+}
+
+/// A whole-slide picture and the mapping onto it.
+pub struct Thumbnail {
+    /// The picture, RGBA, `width` by `height` as `Overview::size` gave them.
+    pub pixels: Vec<u8>,
+    /// Geometry: where the view is, and where a click lands.
+    pub overview: Overview,
 }
 
 impl Open {
@@ -154,6 +177,7 @@ impl Open {
     pub fn new(path: PathBuf, width: u32, height: u32) -> Result<Self, String> {
         let slide = Slide::open(&path).map_err(|error| error.to_string())?;
         let view = Viewport::fit(&slide, width.max(1), height.max(1));
+        let overview = thumbnail(&slide);
         let source = Arc::new(SlideTiles::new(slide));
         let loader = TileLoader::new(&source, WORKERS);
         Ok(Self {
@@ -163,11 +187,17 @@ impl Open {
             cache: TileCache::new(BUDGET),
             view,
             drawn: 0,
+            overview,
         })
     }
 
     pub fn slide(&self) -> &Slide {
         self.source.slide()
+    }
+
+    /// The overview, if the slide has one.
+    pub fn overview(&self) -> Option<&Thumbnail> {
+        self.overview.as_ref()
     }
 
     /// Moves the view, keeping it over the slide.
@@ -292,6 +322,19 @@ pub struct App {
     pub show_metadata: bool,
     /// Whether the gesture and key list is showing.
     pub show_help: bool,
+    /// Whether the overview picture has been handed to the renderer for the
+    /// slide currently open.
+    ///
+    /// Cleared when a slide is opened or closed, which is the only time the
+    /// picture changes.
+    uploaded_overview: bool,
+    /// Whether the overview thumbnail is showing.
+    ///
+    /// On by default, unlike the other panes: it answers "where am I", which
+    /// is a question the user has before they know to go looking for a pane
+    /// that answers it. QuPath shows its overview by default for the same
+    /// reason.
+    pub show_overview: bool,
 }
 
 impl App {
@@ -322,6 +365,8 @@ impl App {
             show_analysis: false,
             show_metadata: false,
             show_help: false,
+            show_overview: true,
+            uploaded_overview: false,
         }
     }
 
@@ -367,6 +412,7 @@ impl App {
                 self.recent.insert(0, path);
                 self.recent.truncate(RECENT);
                 self.open = Some(open);
+                self.uploaded_overview = false;
             }
             Err(error) => {
                 // Kept open. Failing to open a second slide must not close the
@@ -708,6 +754,7 @@ impl App {
             }
             Command::Close => {
                 self.open = None;
+                self.uploaded_overview = false;
                 self.detector.clear();
                 self.message = String::from("Open a slide to begin.");
             }
@@ -722,6 +769,20 @@ impl App {
             Command::ToggleAnalysis => self.show_analysis = !self.show_analysis,
             Command::ToggleMetadata => self.show_metadata = !self.show_metadata,
             Command::ToggleHelp => self.show_help = !self.show_help,
+            Command::ToggleOverview => self.show_overview = !self.show_overview,
+            Command::JumpTo(centre) => {
+                if let Some(open) = &mut self.open {
+                    // Through `look`, so the jump is clamped like every other
+                    // move of the view — a click near the edge of the overview
+                    // asks for a centre outside the slide, which is exactly
+                    // what `clamp_to` exists for.
+                    let view = Viewport {
+                        centre,
+                        ..open.view
+                    };
+                    open.look(view);
+                }
+            }
             // Changing a parameter does not re-run detection. A run takes about
             // a second and a slider produces a value every frame, so re-running
             // on change would start dozens of runs across one drag and show the
@@ -890,9 +951,25 @@ impl App {
             self.segments.clear();
         }
 
+        // Uploaded when the slide changes rather than every frame: the picture
+        // is of the slide, not of the view, so the rectangle moving is a
+        // different draw and not a different texture. `uploaded_overview` is
+        // what keeps a pan from copying 64 KB sixty times a second for a
+        // picture that has not changed.
+        let overview = self
+            .open
+            .as_ref()
+            .and_then(|open| open.overview())
+            .filter(|_| !self.uploaded_overview)
+            .map(|thumbnail| (thumbnail.pixels.clone(), thumbnail.overview.size()));
+
         let Some(state) = &mut self.surface else {
             return;
         };
+        if let Some((pixels, (width, height))) = overview {
+            state.set_overview(&pixels, width, height);
+            self.uploaded_overview = true;
+        }
         state.frame.clear(compose::CLEAR);
         for (rect, tile) in &draws {
             state
@@ -978,6 +1055,35 @@ impl Software {
         }
     }
 
+    /// Registers the overview picture as a user texture, replacing any
+    /// previous one.
+    ///
+    /// `egui` owns the *managed* ids in [`Software::textures`]; this claims one
+    /// user id alongside them, so `mesh` resolves it through the same lookup
+    /// and needs no special case. Uploaded per slide rather than per frame:
+    /// `chrome` names the texture every frame, but the pixels only change when
+    /// a different slide is opened, which is what `dirty` tracks.
+    fn set_overview(&mut self, pixels: &[u8], width: u32, height: u32) {
+        let id = egui::TextureId::User(chrome::OVERVIEW_TEXTURE);
+        let texture = Texture {
+            width,
+            height,
+            pixels: pixels
+                .chunks_exact(4)
+                .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]])
+                .collect(),
+        };
+        if let Some(at) = self
+            .textures
+            .iter()
+            .position(|(existing, _)| *existing == id)
+        {
+            self.textures[at].1 = texture;
+        } else {
+            self.textures.push((id, texture));
+        }
+    }
+
     /// Rasterises one `egui` mesh into the frame.
     ///
     /// The texture is resolved to an *index* rather than a reference so that the
@@ -1042,6 +1148,40 @@ impl Software {
         buffer.copy_from_slice(self.frame.pixels());
         buffer.present()
     }
+}
+
+/// Reads a slide's overview picture, or `None` if it has none to give.
+///
+/// From the **coarsest** level, which is the whole point: the top of CMU-1's
+/// pyramid is 1,024 px on its long edge, so the picture costs one small region
+/// read rather than a decimation of level 0. Downsampled from there by nearest
+/// sampling — the picture is 150 px wide and this runs once per slide, so a
+/// better filter would be invisible and unmeasurable.
+fn thumbnail(slide: &Slide) -> Option<Thumbnail> {
+    let base = slide.levels().first()?;
+    let overview = Overview::fit(base.width, base.height)?;
+    let (width, height) = overview.size();
+    let coarsest = slide.levels().last()?;
+    let source = slide
+        .read_region_rgb(coarsest.index, 0, 0, coarsest.width, coarsest.height)
+        .ok()?;
+
+    let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
+    for row in 0..height {
+        // The centre of this destination row in source pixels, which is the
+        // same "which pixel does this point fall in" rule `Framebuffer` uses.
+        let source_row =
+            ((f64::from(row) + 0.5) * f64::from(coarsest.height) / f64::from(height)) as usize;
+        let source_row = source_row.min(coarsest.height as usize - 1);
+        for column in 0..width {
+            let source_column =
+                ((f64::from(column) + 0.5) * f64::from(coarsest.width) / f64::from(width)) as usize;
+            let source_column = source_column.min(coarsest.width as usize - 1);
+            let at = (source_row * coarsest.width as usize + source_column) * 3;
+            pixels.extend_from_slice(&[source[at], source[at + 1], source[at + 2], 255]);
+        }
+    }
+    Some(Thumbnail { pixels, overview })
 }
 
 /// The file name of a path, for a title bar.
@@ -1148,6 +1288,58 @@ mod tests {
             steps * CTRL_SCROLL_STEPS
         } else {
             steps
+        }
+    }
+
+    /// A jump from the overview lands where it was aimed, and stays on the
+    /// slide when it was not.
+    ///
+    /// `Command::JumpTo` goes through `Open::look`, so it is clamped like every
+    /// other move of the view — this asserts the clamp is what happens rather
+    /// than that it was remembered, which is the property `clamp_to_extent`
+    /// exists for. Written against the arithmetic rather than against an `App`
+    /// for the reason `steps` is: building one needs a display.
+    #[test]
+    fn a_jump_from_the_overview_stays_on_the_slide() {
+        let overview = Overview::fit(46000, 32914).expect("a real slide");
+        let view = Viewport {
+            centre: SlidePoint::new(23000.0, 16457.0),
+            scale: 0.25,
+            width: 1024,
+            height: 768,
+        };
+
+        // A click in the middle of the picture centres on the middle.
+        let (width, height) = overview.size();
+        let middle = overview.to_slide(ScreenPoint::new(width as f32 / 2.0, height as f32 / 2.0));
+        let jumped = Viewport {
+            centre: middle,
+            ..view
+        }
+        .clamp_to_extent(46000, 32914);
+        assert!((jumped.centre.x - 23000.0).abs() < 400.0);
+        assert!((jumped.centre.y - 16457.0).abs() < 400.0);
+
+        // And a click outside the picture — which a drag off its edge
+        // produces, since `to_slide` is deliberately unclamped — cannot take
+        // the view off the slide.
+        for corner in [
+            ScreenPoint::new(-40.0, -40.0),
+            ScreenPoint::new(width as f32 + 80.0, height as f32 + 80.0),
+        ] {
+            let outside = Viewport {
+                centre: overview.to_slide(corner),
+                ..view
+            }
+            .clamp_to_extent(46000, 32914);
+            assert!(
+                outside.centre.x >= 0.0
+                    && outside.centre.x <= 46000.0
+                    && outside.centre.y >= 0.0
+                    && outside.centre.y <= 32914.0,
+                "a drag off the overview left the slide: {:?}",
+                outside.centre,
+            );
         }
     }
 
