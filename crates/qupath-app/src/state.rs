@@ -925,9 +925,20 @@ impl App {
             }
             Command::Detect => {
                 if let Some(open) = &self.open {
-                    let level = open.view.level(open.slide()).clone();
-                    self.detector
-                        .start(&open.path, &level, open.view, self.tuning);
+                    let slide = open.slide();
+                    // The level the viewer *draws* is passed as a floor, not as
+                    // the level to read: `Detector::start` picks the level that
+                    // can resolve a nucleus, which is a different question. See
+                    // `detect::level_for_detection`.
+                    let view = open.view.level(slide).clone();
+                    self.detector.start(
+                        &open.path,
+                        slide.levels(),
+                        &view,
+                        slide.microns_per_pixel(),
+                        open.view,
+                        self.tuning,
+                    );
                 }
             }
             Command::ToggleOverlay => self.show_overlay = !self.show_overlay,

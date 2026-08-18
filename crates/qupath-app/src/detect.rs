@@ -20,18 +20,32 @@
 //!
 //! # Which level a run reads
 //!
-//! The one the viewer is showing, not level 0. That is what makes "detect what
-//! is on screen" bounded work at every zoom — a fitted view reads level 2,
-//! where the whole slide is 5.6 Mpx rather than the 1.5 Gpx it is at level 0.
-//! Detecting at a fixed level 0 would make the button's cost depend on the zoom
-//! by a factor of a thousand, which is the difference between a control that
-//! responds and one that appears to hang.
+//! **The coarsest level that can still resolve a nucleus**, which is not always
+//! the level the viewer is drawing. See [`MAX_MICRONS_PER_PIXEL`].
 //!
-//! What this trades away is that objects found at a coarse level are coarse:
-//! their outlines are traced in level pixels and scaled up, so a nucleus
-//! detected at level 2 is a sixteen-pixel-blocky version of itself. That is
-//! visible when zooming back in, and it is the honest thing to show — the
-//! alternative is pretending a coarse run resolved detail it never read.
+//! This used to be the viewer's own level, chosen so that "detect what is on
+//! screen" was bounded work at every zoom. That is a real property and it is
+//! why the rule is a *cap* rather than a fixed level 0: a run at a moderate
+//! zoom still reads the cheap level it always did.
+//!
+//! What it got wrong is that a level cheap enough to draw is not always fine
+//! enough to measure. Detection parameters are in microns and the pipeline
+//! converts them with the level's pixel size, so a coarse run is arithmetically
+//! consistent — but no conversion puts back evidence the downsampling removed.
+//! At CMU-1's level 2 a pixel is 8 µm and a nucleus is 5–10, so what survived
+//! the filters was tissue, reported as a plausible object count. The numbers
+//! below say it: a fitted whole-slide view found 1638 objects where one
+//! screenful of tissue found 1357, when the whole slide holds far more nuclei
+//! than one screenful.
+//!
+//! The cost is real and is bounded by [`MAX_PIXELS`] rather than by the zoom:
+//! a run started while zoomed out reads the middle of the view rather than all
+//! of it, and says so. Detecting a whole slide properly needs tiling, which is
+//! not here yet.
+//!
+//! Objects found at a coarse level are also coarse — outlines traced in level
+//! pixels and scaled up — which is still true of any run above level 0 and is
+//! the honest thing to show.
 //!
 //! # What is not offered, and why
 //!
@@ -78,13 +92,85 @@ use qupath_viewer::{Overlay, Viewport};
 /// rectangle about its centre and the caller says so. Detecting the middle of
 /// what you asked for beats detecting nothing.
 ///
-/// In practice it does not fire. The viewer reads the level that matches the
-/// zoom, so the pixels behind a window stay near the window's own size at any
-/// scale — `the_level_the_viewer_shows_keeps_a_run_under_the_cap_at_any_zoom`
-/// asserts exactly that. What is left for the cap to catch is a run at a level
-/// far finer than the view, which nothing in the interface currently asks for
-/// and which would otherwise be a viewer that stops responding.
+/// It used to be true that this did not fire, because the run read the level
+/// the viewer drew and the pixels behind a window stayed near the window's own
+/// size at any scale — `the_level_the_viewer_shows_keeps_a_run_under_the_cap_at_any_zoom`
+/// still asserts that of `region_for` alone. [`MAX_MICRONS_PER_PIXEL`] changed
+/// what is asked for: a run started while zoomed out now reads a finer level
+/// than the view, which is exactly "a run at a level far finer than the view".
+///
+/// So this cap is now load-bearing rather than theoretical, and it is what
+/// bounds the cost of the level cap. A fitted view of CMU-1 is 1444 Mpx at
+/// level 0; capped, a run reads the middle **21%** of the slide's width, and
+/// the status bar says "centre of the view only" when it does. Detecting the
+/// middle of what you asked for beats both detecting nothing and a fifteen
+/// second freeze — but it is a partial answer, and it is the reason detecting
+/// a *whole* slide needs tiling rather than a bigger cap.
 const MAX_PIXELS: u64 = 64 << 20;
+
+/// The coarsest pixel size a run may read, in µm per pixel.
+///
+/// Detection parameters are in microns and the pipeline converts them with the
+/// level's own pixel size, so a run at any level is *arithmetically* consistent.
+/// What that conversion cannot do is put back evidence the downsampling threw
+/// away: `Micron::min_area`'s 10 µm² is a nucleus about 3.6 µm across, so at
+/// level 2 of CMU-1 — 2.0 µm/px — the smallest object worth finding is under
+/// four pixels of area, and at level 3 it is a quarter of one pixel.
+///
+/// Below that scale the detector is not finding nuclei badly, it is finding
+/// something else: clumps of stained tissue whose size and contrast at that
+/// downsample match what a nucleus looks like at level 0. Those arrive in the
+/// status bar as a plausible object count, which is the failure this module is
+/// otherwise careful about — a result that looks like a result.
+///
+/// 1.0 µm/px keeps the smallest surviving object at ten pixels of area, which
+/// is enough for a shape rather than a blob. On CMU-1 — whose levels are 0.499,
+/// 2.0 and 8.0 µm/px — only level 0 clears it, so a zoomed-out run there
+/// reads level 0 over the view's rectangle. That is what the counts in this
+/// module's header show going wrong: a fitted whole-slide view at level 2 reported 1638
+/// objects where one screenful of tissue at level 0 reported 1357 — the whole
+/// slide holds far more nuclei than one screenful, and the coarse run was not
+/// finding them.
+const MAX_MICRONS_PER_PIXEL: f64 = 1.0;
+
+/// The level a run should read for `view`, which is not always the level the
+/// viewer is drawing.
+///
+/// The viewer picks a level to *look* at, matched to the zoom so that pixels on
+/// screen stay near pixels in the file. Detection picks a level to *measure* at,
+/// and those are different questions the moment the view is zoomed out: see
+/// [`MAX_MICRONS_PER_PIXEL`] for what a coarse level does to the answer.
+///
+/// This returns the coarsest level at or under that limit — the cheapest level
+/// that can still resolve a nucleus — rather than always level 0, so a run at a
+/// moderate zoom stays as cheap as it honestly can be.
+///
+/// `mpp` is the slide's own level-0 pixel size. A slide that records none gets
+/// the viewer's level unchanged: without a pixel size there is no way to know
+/// what any level resolves, and refusing to run would be worse than the
+/// existing behaviour. `Params::default`'s assumed pixel size is not reused
+/// here, because guessing the physical scale is exactly what produces the
+/// confident wrong answer this is meant to prevent.
+fn level_for_detection<'a>(levels: &'a [Level], view: &'a Level, mpp: Option<f64>) -> &'a Level {
+    let Some(mpp) = mpp else {
+        return view;
+    };
+    // Levels are ordered finest first, so this walks from the cheap end and
+    // takes the coarsest that still resolves a nucleus.
+    let resolving = levels
+        .iter()
+        .rfind(|level| level.downsample * mpp <= MAX_MICRONS_PER_PIXEL)
+        .unwrap_or(&levels[0]);
+    // Never *finer* than the viewer is showing. Zoomed in past 1:1 the viewer
+    // reads level 0 and this would agree; the `min` matters when the viewer is
+    // already at a level finer than the cap requires, where forcing it coarser
+    // would read less detail than the person is looking at.
+    if view.downsample <= resolving.downsample {
+        view
+    } else {
+        resolving
+    }
+}
 
 /// A detection run in progress, or the one that last finished.
 pub struct Detector {
@@ -121,6 +207,11 @@ struct Summary {
     took: Duration,
     /// Whether the region was shrunk to fit [`MAX_PIXELS`].
     capped: bool,
+    /// Whether the run read a finer level than the viewer is drawing, because
+    /// the drawn one is too coarse to resolve a nucleus. The status bar says
+    /// so: it explains a run that took longer than the zoom suggests, and it
+    /// is why the count can differ from what an earlier coarse run reported.
+    deepened: bool,
 }
 
 impl Default for Detector {
@@ -180,8 +271,20 @@ impl Detector {
     /// same handle the viewer pans with would put the two in each other's way
     /// for the whole run, which is precisely the interval this exists to keep
     /// smooth.
-    pub fn start(&mut self, path: &Path, level: &Level, view: Viewport, tuning: Micron) {
-        let Some((region, capped)) = region_for(view, level) else {
+    pub fn start(
+        &mut self,
+        path: &Path,
+        levels: &[Level],
+        view: &Level,
+        mpp: Option<f64>,
+        viewport: Viewport,
+        tuning: Micron,
+    ) {
+        // Not `view`: the level to measure at is not the level to look at. See
+        // [`level_for_detection`].
+        let level = level_for_detection(levels, view, mpp);
+        let deepened = level.index != view.index;
+        let Some((region, capped)) = region_for(viewport, level) else {
             self.message = Some(String::from(
                 "Nothing to detect: the view is off the slide.",
             ));
@@ -212,6 +315,7 @@ impl Detector {
                         level: index,
                         took: started.elapsed(),
                         capped,
+                        deepened,
                     },
                 )
             });
@@ -279,8 +383,16 @@ fn describe(summary: &Summary) -> String {
     } else {
         ""
     };
+    // Said in words rather than left to the level number, because "level 0"
+    // does not tell the person why a run they started while zoomed out read the
+    // finest pixels in the file and took longer than the last one.
+    let deepened = if summary.deepened {
+        " (finest level that resolves a nucleus)"
+    } else {
+        ""
+    };
     format!(
-        "{} objects at level {} in {:.1} s over {:.1} Mpx{capped}",
+        "{} objects at level {}{deepened} in {:.1} s over {:.1} Mpx{capped}",
         summary.objects,
         summary.level,
         summary.took.as_secs_f64(),
@@ -538,6 +650,87 @@ mod tests {
                 height: 100
             }
         );
+    }
+
+    /// CMU-1's actual pyramid, read off the file rather than assumed: three
+    /// levels at 0.499, 1.996 and 7.984 µm/px.
+    fn cmu1() -> Vec<Level> {
+        vec![
+            level(0, 46000, 32914, 1.0),
+            level(1, 11500, 8228, 4.0),
+            level(2, 2875, 2057, 16.0),
+        ]
+    }
+
+    const CMU1_MPP: f64 = 0.499;
+
+    #[test]
+    fn a_zoomed_out_view_is_detected_at_a_level_that_can_resolve_a_nucleus() {
+        // The bug this cap exists for. A fitted view of the whole slide draws
+        // level 2 — 8 µm per pixel, where a 10 µm² nucleus is a sixth of one
+        // pixel — and detecting there finds clumps of tissue and reports
+        // them as an object count. The run is moved to a level that can
+        // actually see a nucleus.
+        let levels = cmu1();
+        let chosen = level_for_detection(&levels, &levels[2], Some(CMU1_MPP));
+        assert!(
+            chosen.downsample * CMU1_MPP <= MAX_MICRONS_PER_PIXEL,
+            "a run at {} µm/px cannot resolve a nucleus",
+            chosen.downsample * CMU1_MPP,
+        );
+        // Level 0 alone: CMU-1's level 1 is downsample 4, which is 2.0 µm/px
+        // and already past the limit. This pyramid has no intermediate level to
+        // fall back to, so resolving a nucleus here means the finest pixels in
+        // the file.
+        assert_eq!(chosen.index, 0);
+    }
+
+    #[test]
+    fn a_view_already_fine_enough_is_detected_where_it_is_drawn() {
+        // The cap only ever deepens a run. A viewer at 1:1 draws level 0 and a
+        // detection there reads level 0: nothing to correct, and no reason to
+        // make the cheap case more expensive than it is.
+        let levels = cmu1();
+        let chosen = level_for_detection(&levels, &levels[0], Some(CMU1_MPP));
+        assert_eq!(chosen.index, 0);
+    }
+
+    #[test]
+    fn the_cap_never_reads_coarser_than_the_viewer_is_showing() {
+        // Whatever the levels say, a run must not read less detail than the
+        // person is looking at — that would report fewer objects than the
+        // screen plainly shows.
+        let levels = cmu1();
+        for view in &levels {
+            let chosen = level_for_detection(&levels, view, Some(CMU1_MPP));
+            assert!(
+                chosen.downsample <= view.downsample,
+                "level {} is coarser than the drawn level {}",
+                chosen.index,
+                view.index,
+            );
+        }
+    }
+
+    #[test]
+    fn a_slide_with_no_pixel_size_keeps_the_level_the_viewer_shows() {
+        // Without an `MPP` there is no way to know what any level resolves.
+        // Guessing one is what `Params::default` does and what produces a
+        // confident wrong answer, so the old behaviour is kept instead.
+        let levels = cmu1();
+        let chosen = level_for_detection(&levels, &levels[2], None);
+        assert_eq!(chosen.index, 2);
+    }
+
+    #[test]
+    fn a_coarse_slide_still_runs_rather_than_refusing() {
+        // Every level of this pyramid is past the limit. Something must run,
+        // and the finest level is the best available answer -- a button that
+        // silently does nothing would be worse than a coarse result the status
+        // bar describes.
+        let levels = vec![level(0, 4000, 4000, 1.0), level(1, 1000, 1000, 4.0)];
+        let chosen = level_for_detection(&levels, &levels[1], Some(8.0));
+        assert_eq!(chosen.index, 0);
     }
 
     #[test]

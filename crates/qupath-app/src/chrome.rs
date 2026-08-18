@@ -601,7 +601,12 @@ fn analysis(ui: &mut egui::Ui, app: &App, command: &mut Command) {
         ui.add_enabled_ui(app.open.is_some() && !app.detector.is_running(), |ui| {
             if ui
                 .button("Detect cells")
-                .on_hover_text("Run with these parameters over what is on screen (d).")
+                .on_hover_text(
+                    "Run with these parameters over what is on screen (d). \
+                     Zoomed out, it reads finer pixels than the screen shows so \
+                     that nuclei are resolved, and may cover only the centre of \
+                     the view.",
+                )
                 .clicked()
             {
                 *command = Command::Detect;
@@ -1146,7 +1151,9 @@ fn detection(ui: &mut egui::Ui, app: &App, command: &mut Command) {
             .button("Detect cells")
             .on_hover_text(
                 "Run cell detection over what is on screen (d). \
-                 It runs on another thread, so the view keeps moving.",
+                 It runs on another thread, so the view keeps moving. \
+                 Zoomed out, it reads finer pixels than the screen shows so that \
+                 nuclei are resolved, and may cover only the centre of the view.",
             )
             .clicked()
         {
