@@ -180,7 +180,9 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
                 }
                 if ui
                     .button("1:1")
-                    .on_hover_text("One screen pixel per slide pixel")
+                    .on_hover_text(
+                        "Show the slide at full detail: one screen pixel per slide pixel.",
+                    )
                     .clicked()
                 {
                     command = Command::Actual;
@@ -214,27 +216,41 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
                     ui.close();
                 }
                 let mut metadata = app.show_metadata;
-                if ui.checkbox(&mut metadata, "Slide metadata").clicked() {
+                if ui
+                    .checkbox(&mut metadata, "Slide panel")
+                    .on_hover_text(
+                        "The slide's details, the overview map and the \
+                         brightness controls.",
+                    )
+                    .clicked()
+                {
                     command = Command::ToggleMetadata;
                     ui.close();
                 }
                 let mut help = app.show_help;
-                if ui.checkbox(&mut help, "Gestures and keys").clicked() {
+                if ui.checkbox(&mut help, "Mouse and keyboard help").clicked() {
                     command = Command::ToggleHelp;
                     ui.close();
                 }
                 let mut overview = app.show_overview;
-                if ui.checkbox(&mut overview, "Overview").clicked() {
+                if ui
+                    .checkbox(&mut overview, "Overview map")
+                    .on_hover_text(
+                        "A thumbnail of the whole slide showing where you are. \
+                         Click it to jump. Opens in the slide panel.",
+                    )
+                    .clicked()
+                {
                     command = Command::ToggleOverview;
                     ui.close();
                 }
                 let mut appearance = app.show_appearance;
                 if ui
-                    .checkbox(&mut appearance, "Display")
+                    .checkbox(&mut appearance, "Brightness and contrast")
                     .on_hover_text(
-                        "Brightness, contrast and stain channels. Shows in the \
-                         slide panel; changes what is drawn, never what is \
-                         detected.",
+                        "Brightness, contrast and the haematoxylin/eosin \
+                         channels. Opens in the slide panel. Changes how the \
+                         slide looks, never what gets counted.",
                     )
                     .clicked()
                 {
@@ -550,12 +566,9 @@ fn analysis(ui: &mut egui::Ui, app: &App, command: &mut Command) {
         ui.label(egui::RichText::new("Intensity parameters").strong());
         // Dimensionless, so no pixel column: these are optical densities and
         // mean the same thing at any pixel size.
+        ui.label("Threshold");
         changed |= ui
-            .add(
-                egui::Slider::new(&mut tuning.intensity_threshold, 0.0..=1.0)
-                    .text("Threshold")
-                    .fixed_decimals(3),
-            )
+            .add(egui::Slider::new(&mut tuning.intensity_threshold, 0.0..=1.0).fixed_decimals(3))
             .on_hover_text(
                 "A candidate's mean haematoxylin optical density must exceed \
                  this to survive. Dimensionless, so it does not scale with the \
@@ -563,12 +576,9 @@ fn analysis(ui: &mut egui::Ui, app: &App, command: &mut Command) {
             )
             .changed();
         let mut max_background = f64::from(tuning.max_background);
+        ui.label("Max background");
         if ui
-            .add(
-                egui::Slider::new(&mut max_background, 0.0..=5.0)
-                    .text("Max background")
-                    .fixed_decimals(2),
-            )
+            .add(egui::Slider::new(&mut max_background, 0.0..=5.0).fixed_decimals(2))
             .on_hover_text(
                 "Nuclei sitting on a background above this are discarded. \
                  Only has an effect when the background radius is above zero.",
@@ -654,12 +664,18 @@ fn slider(
     kind: Unit,
     hover: &str,
 ) -> bool {
+    // The name goes *above* the slider rather than after it. `Slider::text`
+    // lays the label out inline, so the widget's width plus the text is what
+    // the panel has to fit — and the panel is capped (see `panel_cap`), so the
+    // text is what gets clipped. At a 1100px window with every panel open this
+    // showed "Background radius" as "Bac". §8.1c is the same shape: a panel
+    // whose contents refuse to be narrower than the cap that binds them.
+    //
+    // Found by looking, which is the only way it could have been: every
+    // layout test here asserts on rectangles, and the rectangles were right.
+    ui.label(format!("{label} ({unit})"));
     let changed = ui
-        .add(
-            egui::Slider::new(value, range)
-                .text(format!("{label} ({unit})"))
-                .fixed_decimals(1),
-        )
+        .add(egui::Slider::new(value, range).fixed_decimals(1))
         .on_hover_text(hover)
         .changed();
     if let Some(mpp) = mpp {
@@ -778,7 +794,12 @@ fn overview_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
 /// the crate boundary stops a `Display` reaching `qupath-pipeline`, and this
 /// stops a control writing anywhere but [`App::appearance`].
 fn appearance_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
-    ui.label(egui::RichText::new("Display").strong());
+    ui.label(egui::RichText::new("Brightness and contrast").strong());
+    ui.label(
+        egui::RichText::new("Changes how the slide looks, not what gets counted.")
+            .weak()
+            .small(),
+    );
     let mut appearance = app.appearance;
     let mut changed = false;
 
@@ -802,18 +823,26 @@ fn appearance_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
         // QuPath's dialog does and what a user dragging hard expects.
         let mut min = appearance.min;
         let mut max = appearance.max;
+        ui.label("Darkest");
         if ui
-            .add(egui::Slider::new(&mut min, 0.0..=254.0).text("Black"))
-            .on_hover_text("The value shown as black. QuPath's minDisplay.")
+            .add(egui::Slider::new(&mut min, 0.0..=254.0))
+            .on_hover_text(
+                "Pixels this dark and darker show as black. Raise it to deepen \
+                 the shadows. (QuPath calls this minDisplay.)",
+            )
             .changed()
         {
             appearance.min = min;
             appearance.max = appearance.max.max(min + 1.0);
             changed = true;
         }
+        ui.label("Brightest");
         if ui
-            .add(egui::Slider::new(&mut max, 1.0..=255.0).text("White"))
-            .on_hover_text("The value shown as white. QuPath's maxDisplay.")
+            .add(egui::Slider::new(&mut max, 1.0..=255.0))
+            .on_hover_text(
+                "Pixels this bright and brighter show as white. Lower it to \
+                 brighten the image. (QuPath calls this maxDisplay.)",
+            )
             .changed()
         {
             appearance.max = max;
@@ -824,15 +853,13 @@ fn appearance_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
         // An optical density, not a byte: a stain amount runs 0 to about 2, so
         // the byte range would put every real value in the bottom one percent
         // of the scale. `Stain::full` records the same thing.
+        ui.label("Strength");
         if ui
-            .add(
-                egui::Slider::new(&mut appearance.full, 0.1..=3.0)
-                    .text("Full black")
-                    .fixed_decimals(2),
-            )
+            .add(egui::Slider::new(&mut appearance.full, 0.1..=3.0).fixed_decimals(2))
             .on_hover_text(
-                "The stain optical density shown as full black. An optical \
-                 density, not a byte — it does not share the range above.",
+                "How much stain counts as fully dark. Lower it for more \
+                 contrast, raise it for a paler picture. This is an optical \
+                 density rather than a brightness, so it has its own scale.",
             )
             .changed()
         {
@@ -840,9 +867,13 @@ fn appearance_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
         }
     }
 
+    // Set apart from the sliders. Butted straight up against them it reads as
+    // another row of the same stack rather than as the thing that undoes them,
+    // which is what looking at `chrome-slide.png` showed.
+    ui.add_space(6.0);
     if ui
         .button("Reset")
-        .on_hover_text("Back to the slide as it was read.")
+        .on_hover_text("Back to the slide's original colours.")
         .clicked()
     {
         *command = Command::ResetAppearance;
@@ -852,21 +883,60 @@ fn appearance_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
         *command = Command::SetAppearance(appearance);
     }
 
-    ui.label(
-        egui::RichText::new(
-            "Display only. Detection reads the slide's own pixels, whatever \
-             this shows.",
+    ui.add_space(4.0);
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(
+                "Cell detection always reads the original pixels, so nothing \
+                 here can change a count.",
+            )
+            .weak()
+            .small(),
         )
-        .weak()
-        .small(),
+        .wrap(),
     );
+}
+
+/// The first letter upper-cased, for a sentence assembled from fragments.
+fn capitalise(text: &str) -> String {
+    let mut characters = text.chars();
+    match characters.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
+        None => String::new(),
+    }
 }
 
 fn metadata(ui: &mut egui::Ui, app: &App, command: &mut Command) {
     ui.heading("Slide");
     ui.separator();
     let Some(open) = &app.open else {
-        ui.label(egui::RichText::new("No slide open.").weak());
+        ui.label(egui::RichText::new("No slide open. Use the File menu, or press o.").weak());
+        // Say what the panel *will* hold rather than only that it is empty.
+        // Turning "Brightness and contrast" on with no slide open otherwise
+        // opens a panel that shows nothing and does not say why, which reads
+        // as the toggle having failed — the same class of confusion as a
+        // control whose panel is closed. Found by looking, per §6.
+        if app.show_overview || app.show_appearance {
+            ui.add_space(6.0);
+            let mut waiting = Vec::new();
+            if app.show_overview {
+                waiting.push("the overview map");
+            }
+            if app.show_appearance {
+                waiting.push("the brightness and contrast controls");
+            }
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!(
+                        "{} will appear here once a slide is open.",
+                        capitalise(&waiting.join(" and ")),
+                    ))
+                    .weak()
+                    .small(),
+                )
+                .wrap(),
+            );
+        }
         return;
     };
     let slide = open.slide();
@@ -1007,7 +1077,7 @@ fn scalebar(ui: &mut egui::Ui, bar: &qupath_viewer::Scalebar) {
 /// gesture was invisible, which is how a dead scroll wheel survived unnoticed.
 /// The status bar fixed one gesture's worth of that; this is the rest.
 fn help(ui: &mut egui::Ui) {
-    ui.heading("Gestures and keys");
+    ui.heading("Mouse and keyboard");
     ui.separator();
     egui::Grid::new("help-grid")
         .num_columns(2)

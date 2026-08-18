@@ -865,7 +865,23 @@ impl App {
     /// the library and has to stay structural here.
     fn display_command(&mut self, command: &Command) {
         match command {
-            Command::ToggleAppearance => self.show_appearance = !self.show_appearance,
+            // Turning one of these on opens the panel it lives in. Both are
+            // shown inside the slide panel, which is closed by default, so
+            // ticking "Display" used to do nothing at all — the user ticks a
+            // box, sees no change, and concludes the control is broken. A
+            // toggle whose effect is invisible is worse than a missing one.
+            Command::ToggleOverview => {
+                self.show_overview = !self.show_overview;
+                if self.show_overview {
+                    self.show_metadata = true;
+                }
+            }
+            Command::ToggleAppearance => {
+                self.show_appearance = !self.show_appearance;
+                if self.show_appearance {
+                    self.show_metadata = true;
+                }
+            }
             // No reload, and deliberately: the tiles in the cache are the
             // slide's own pixels and the transform is applied on the way to the
             // frame, so a drag of these sliders costs a redraw rather than a
@@ -918,7 +934,7 @@ impl App {
             Command::ToggleAnalysis => self.show_analysis = !self.show_analysis,
             Command::ToggleMetadata => self.show_metadata = !self.show_metadata,
             Command::ToggleHelp => self.show_help = !self.show_help,
-            Command::ToggleOverview => self.show_overview = !self.show_overview,
+            Command::ToggleOverview => self.display_command(&command),
             Command::JumpTo(centre) => {
                 if let Some(open) = &mut self.open {
                     // Through `look`, so the jump is clamped like every other
@@ -1429,6 +1445,90 @@ impl App {
     }
 }
 
+// The `winit` event loop's side of `App`. It lives here rather than in
+// `main.rs` because the orphan rule requires it: `ApplicationHandler` and
+// `App` cannot both be foreign to the crate that connects them, and `App`
+// moved into the library so `examples/chrome` could lay the interface out
+// without a window.
+use winit::application::ApplicationHandler;
+use winit::event_loop::ActiveEventLoop;
+use winit::window::WindowId;
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+        let attributes = Window::default_attributes()
+            .with_title("QuPath Rust")
+            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 860.0));
+        let window = Arc::new(
+            event_loop
+                .create_window(attributes)
+                .expect("create the window"),
+        );
+        self.start(&window);
+        self.window = Some(window);
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+
+        // `RedrawRequested` is not input, and must never reach `egui`.
+        //
+        // It is the *answer* to a redraw request rather than a reason for one,
+        // and `egui_winit` answers it with `repaint: true` — so passing it on
+        // closes a loop that needs no input to sustain itself: render, receive
+        // `RedrawRequested`, ask to render again. Measured at **90 frames a
+        // second and 100% of one core** on a window sitting still, which is
+        // precisely what `ControlFlow::Wait` is set to prevent.
+        //
+        // It is handled here, ahead of `egui`, rather than by testing the event
+        // twice. See `docs/VIEWER.md` §3.6.
+        if matches!(event, WindowEvent::RedrawRequested) {
+            self.render(&window);
+            return;
+        }
+
+        // Every *other* event goes to the interface first, which says whether
+        // it wants it. Without this a drag that started on a slider also pans
+        // the slide, and a scroll over a panel zooms the view underneath it.
+        let Some(egui) = self.egui.as_mut() else {
+            return;
+        };
+        let response = egui.on_window_event(&window, &event);
+        if response.repaint {
+            window.request_redraw();
+        }
+
+        match event {
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Resized(size) => {
+                self.resize(size.width, size.height);
+                window.request_redraw();
+            }
+            other => {
+                if self.input(&window, &other, response.consumed) {
+                    window.request_redraw();
+                }
+            }
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // One more frame while tiles are still landing, and none once they have
+        // all landed. This is what keeps the viewer at zero CPU at rest while
+        // still filling in as a pan's tiles arrive.
+        if self.wants_another_frame()
+            && let Some(window) = &self.window
+        {
+            window.request_redraw();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1669,6 +1769,48 @@ mod tests {
             assert!(
                 display.is_identity(),
                 "({min}, {max}) should fall back, and gave {display:?}",
+            );
+        }
+    }
+
+    /// Ticking "Display" from a standing start must show something. The
+    /// controls live inside the slide panel and that panel is closed by
+    /// default, so the toggle on its own left the user having ticked a box and
+    /// seen nothing change — which reads as a broken control rather than a
+    /// closed panel. The same is true of the overview.
+    ///
+    /// Asserted as the gesture rather than the field: `show_appearance` being
+    /// true is not the property that matters, `show_appearance && show_metadata`
+    /// is, because that is the one that puts pixels on screen.
+    #[test]
+    fn turning_on_a_control_opens_the_panel_it_lives_in() {
+        for (command, showing) in [
+            (
+                Command::ToggleAppearance,
+                (|app: &App| app.show_appearance) as fn(&App) -> bool,
+            ),
+            (Command::ToggleOverview, |app: &App| app.show_overview),
+        ] {
+            let mut app = App::new(None);
+            app.show_metadata = false;
+            app.show_overview = false;
+            app.show_appearance = false;
+
+            app.display_command(&command);
+            assert!(showing(&app), "{command:?} did not turn the control on");
+            assert!(
+                app.show_metadata,
+                "{command:?} turned a control on inside a closed panel",
+            );
+
+            // Turning it back off leaves the panel alone: the user may have
+            // opened it deliberately, and closing it under them is the mirror
+            // of the bug above.
+            app.display_command(&command);
+            assert!(!showing(&app));
+            assert!(
+                app.show_metadata,
+                "{command:?} closed the panel under the user"
             );
         }
     }

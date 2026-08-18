@@ -2241,6 +2241,7 @@ dependencies = [
  "bytemuck",
  "egui",
  "egui-winit",
+ "png",
  "qupath-pipeline",
  "qupath-slide",
  "qupath-viewer",

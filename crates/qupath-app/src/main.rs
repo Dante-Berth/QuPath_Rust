@@ -40,18 +40,9 @@
 //! comes up empty and asks for a slide. `--release` matters: a debug build
 //! decodes JPEG tiles slowly enough to be annoying.
 
-mod chrome;
-mod detect;
-mod state;
+use winit::event_loop::{ControlFlow, EventLoop};
 
-use std::sync::Arc;
-
-use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{Window, WindowId};
-
-use state::App;
+use qupath_app::state::App;
 
 fn main() {
     let path = std::env::args()
@@ -69,80 +60,5 @@ fn main() {
     if let Err(error) = event_loop.run_app(&mut app) {
         eprintln!("{error}");
         std::process::exit(1);
-    }
-}
-
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
-        }
-        let attributes = Window::default_attributes()
-            .with_title("QuPath Rust")
-            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 860.0));
-        let window = Arc::new(
-            event_loop
-                .create_window(attributes)
-                .expect("create the window"),
-        );
-        self.start(&window);
-        self.window = Some(window);
-    }
-
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let Some(window) = self.window.clone() else {
-            return;
-        };
-
-        // `RedrawRequested` is not input, and must never reach `egui`.
-        //
-        // It is the *answer* to a redraw request rather than a reason for one,
-        // and `egui_winit` answers it with `repaint: true` — so passing it on
-        // closes a loop that needs no input to sustain itself: render, receive
-        // `RedrawRequested`, ask to render again. Measured at **90 frames a
-        // second and 100% of one core** on a window sitting still, which is
-        // precisely what `ControlFlow::Wait` is set to prevent.
-        //
-        // It is handled here, ahead of `egui`, rather than by testing the event
-        // twice. See `docs/VIEWER.md` §3.6.
-        if matches!(event, WindowEvent::RedrawRequested) {
-            self.render(&window);
-            return;
-        }
-
-        // Every *other* event goes to the interface first, which says whether
-        // it wants it. Without this a drag that started on a slider also pans
-        // the slide, and a scroll over a panel zooms the view underneath it.
-        let Some(egui) = self.egui.as_mut() else {
-            return;
-        };
-        let response = egui.on_window_event(&window, &event);
-        if response.repaint {
-            window.request_redraw();
-        }
-
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => {
-                self.resize(size.width, size.height);
-                window.request_redraw();
-            }
-            other => {
-                if self.input(&window, &other, response.consumed) {
-                    window.request_redraw();
-                }
-            }
-        }
-    }
-
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        // One more frame while tiles are still landing, and none once they have
-        // all landed. This is what keeps the viewer at zero CPU at rest while
-        // still filling in as a pan's tiles arrive.
-        if self.wants_another_frame()
-            && let Some(window) = &self.window
-        {
-            window.request_redraw();
-        }
     }
 }

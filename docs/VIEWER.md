@@ -12,6 +12,39 @@ and on recorded output, never on appearance" — is *harder* here, because the
 output of this project genuinely is an appearance. §6 below says what to do
 about that.
 
+## What it does, in a paragraph
+
+Open a whole-slide image, look at it, and count cells in what is on screen.
+Panning and zooming pick the pyramid level for you, so a whole 46,000-pixel
+slide costs about a hundred tiles rather than twenty thousand. Pressing `d`
+runs QuPath's cell detection over the visible region on a background thread
+and draws the outlines over the image. What you find can be saved as GeoJSON
+that QuPath opens.
+
+Two things it deliberately will not do: edit annotations, and write
+`data.qpdata`. Both are explained in §0 and §8.8.
+
+```sh
+cargo run -p qupath-app --release -- data/CMU-1.svs
+```
+
+Drag to pan, scroll to zoom, `f` to fit the slide, `d` to detect, `o` to open.
+The **View** menu opens the side panels — the slide panel holds the overview
+map and the brightness and contrast controls.
+
+## How to read this file
+
+It is a record of decisions, not a tutorial, and it is written for whoever has
+to change this code next. Each numbered section says what was built, what it
+was ported from, and — most usefully — what went wrong on the way, because
+that is the part that is not recoverable from the source. The §-references are
+cross-links between those decisions; you can follow them or ignore them, but
+nothing later depends on having read them in order.
+
+If you are looking for something specific: §3 is the viewport and level
+selection, §6 is why appearance is checked by looking rather than asserting,
+§8 is the interface, and §8.8 is what is still missing.
+
 ## 0. What this is not
 
 - **Not a QuPath replacement**, with two clauses now deliberately revised.
@@ -135,9 +168,17 @@ take a slide path defaulting to `data/CMU-1.svs`.
 # about the cursor, right-drag a box to zoom to that region, f to fit. `d`
 # detects cells in what is on screen and `h` hides the outlines again; the run
 # happens on another thread, so the view keeps moving while it works. The View
-# menu opens the analysis, slide and gesture panes (§8).
+# menu opens the analysis pane, the slide panel — which carries the overview
+# map and the brightness controls (§8.4, §8.7) — and the mouse/keyboard help.
 cargo run -p qupath-app --release
 cargo run -p qupath-app --release -- data/CMU-1.svs
+
+# The application's own panels, rendered to PNGs with no window and no GPU.
+# This is §6's "check appearance by looking" applied to the interface rather
+# than to the image; §8.7 lists what it caught. Without a slide path it renders
+# the empty states, which are what a first-time user meets.
+cargo run -p qupath-app --example chrome --release
+cargo run -p qupath-app --example chrome --release -- data/CMU-1.svs
 
 # The viewer. Drag to pan, scroll to zoom, f to fit, escape to quit. The title
 # bar carries the backend, the level, the tile count, resident texture memory,
@@ -1372,9 +1413,17 @@ writer gets right while getting the field names wrong.
 
 ### 8.7 The brightness/contrast panel — the controls, and where the range lives
 
-§8.5's transform, with a hand on it. Three channel buttons (original,
-haematoxylin, eosin), a black and a white slider for the original colour, and a
-"full black" slider for the stain channels.
+**What it is, plainly.** Open the slide panel and there are three buttons —
+original, haematoxylin, eosin — and a couple of sliders. The buttons switch
+between the slide's own colours and the two stains pulled apart from them:
+haematoxylin shows the nuclei and drops nearly everything else, eosin shows the
+opposite. The sliders set which pixel values count as black and white, or for
+a stain channel, how much of it counts as fully dark. None of it touches the
+numbers a detection produces.
+
+The rest of this section is why it is built the way it is.
+
+§8.5's transform, with a hand on it.
 
 **In the slide panel, not floating over the image.** QuPath opens this as a
 dialog anchored over the viewer. Here it goes under the overview in the metadata
@@ -1426,10 +1475,34 @@ both ends, which is the one control §8.5's pictures did not already cover. At
 same field is uniformly pale with the nuclei as faint grey. Both are what the
 control is for, and a slider whose two ends looked alike would be the bug.
 
-**What has not been looked at is the panel itself.** The application launches
-and runs with the transform in the frame path, but the pane's own layout and
-colours have been seen only as offscreen renders of the *transform*, never in a
-real window. §6's standard is looking, and this has not been looked at.
+**And the panel itself has now been looked at**, which §6 asks for and which
+nothing in this project had done for any pane. `examples/chrome` lays the
+interface out with `egui` and rasterises it through `Framebuffer::draw_mesh` —
+no window, no GPU, the same call the application makes on a machine with no
+adapter (§3.4b), so what it writes is what that machine draws.
+
+Four things it found, none of which a test here would have:
+
+- **The analysis panel's slider labels were clipped.** `Slider::text` lays the
+  name out *inline*, so the widget plus its text is what has to fit a panel
+  that `panel_cap` binds — "Background radius" showed as "Bac". Every slider
+  now puts its name on the line above. This is §8.1c's shape exactly: contents
+  that refuse to be narrower than the cap that binds them, and the layout tests
+  asserted on rectangles that were all correct.
+- **A `▸` in the empty-state text rendered as `□`.** No glyph in the default
+  atlas. Written and read back within the hour.
+- **Turning a control on inside a closed panel did nothing visible.** The
+  overview and the brightness controls both live in the slide panel, which is
+  closed by default, so ticking either left the user having ticked a box and
+  seen nothing — which reads as a broken toggle.
+  `turning_on_a_control_opens_the_panel_it_lives_in` asserts the gesture rather
+  than the field, because `show_appearance` being true is not the property that
+  matters; `show_appearance && show_metadata` is.
+- **Reset butted straight against the sliders**, reading as another row of the
+  same stack rather than the thing that undoes them.
+
+What is still unseen is the interface *in a real window* — these are offscreen
+renders, and the trackpad and the window manager are not in them.
 
 ### 8.8 What is still missing
 
@@ -1447,11 +1520,11 @@ In the order it is worth having.
 - **A JPEG encoder for `thumbnail.jpg`.** `project.rs` returns the JSON files
   and leaves the thumbnail to the caller, because nothing in this workspace
   encodes JPEG. QuPath tolerates its absence.
-- **A look at the panels in a real window.** §8.7's controls, §8.4's overview
-  pane and the metadata pane have been asserted and rendered offscreen, and the
-  application launches with all of them in the frame path, but the panes' own
-  layout and colours have never been seen on screen. §6 says appearance is
-  checked by looking, and this is the part of the interface that has not been.
+- **A look at the interface in a real window.** `examples/chrome` renders the
+  panels offscreen and §8.7 records the four bugs that found, but an offscreen
+  render is not a window: it has no trackpad, no window manager, no resizing
+  and no hover states. The panels are no longer unlooked-at; the *running
+  application* still is.
 - **Parity for the two file formats.** Nothing here has been opened *by QuPath*.
   Both formats were checked against a JSON parser and against the Java that
   writes them, which is a stronger claim than "it validates" and a weaker one

@@ -35,3 +35,4 @@ __pycache__/
 # regenerable from a slide and are looked at rather than committed.
 /display-*.png
 /overview-*.png
+/chrome-*.png
