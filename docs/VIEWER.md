@@ -1282,7 +1282,7 @@ QuPath replacement", which §0 rules out.
 narrower than the argument above: the format is a *specification to follow*, so
 following it exactly is interoperability rather than a second application. The
 browser pane is **not** written and is the part that would be, and there is
-still no `data.qpdata` — see §8.7.
+still no `data.qpdata` — see §8.8.
 
 ### 8.4 The overview — the invariant is that the two mappings agree
 
@@ -1345,9 +1345,7 @@ comparing against the real numbers caught it.
 display is byte-identical to no display at all and §3.4b's agreement between the
 two backends does not become conditional on a display being set.
 
-What is missing is the **dialog**. There is no way to move the range or pick a
-channel from the interface; the transform is reachable from the library and from
-`examples/panes` only.
+What was missing was the **dialog**, and §8.7 is it.
 
 ### 8.6 GeoJSON — the part that is wrong in a way that looks right
 
@@ -1372,13 +1370,71 @@ by round-tripping real output through a JSON parser rather than only by the
 brace-balance test, because balanced braces are exactly what a hand-rolled
 writer gets right while getting the field names wrong.
 
-### 8.7 What is still missing
+### 8.7 The brightness/contrast panel — the controls, and where the range lives
+
+§8.5's transform, with a hand on it. Three channel buttons (original,
+haematoxylin, eosin), a black and a white slider for the original colour, and a
+"full black" slider for the stain channels.
+
+**In the slide panel, not floating over the image.** QuPath opens this as a
+dialog anchored over the viewer. Here it goes under the overview in the metadata
+pane, for §8.1c's reason and the overview's and the scalebar's: anything drawn
+over the slide sits inside the slide's rectangle, and what lands there is a
+hit-test that stops agreeing with what is drawn. Three items have now taken this
+decision the same way, which makes it the rule rather than three coincidences.
+
+**The panel holds an `Appearance`, not a `Display`.** A `Display` with no stain
+has forgotten which stain it was, and one rebuilt whenever the channel changes
+has forgotten the range — so a user who dials in a range, looks at haematoxylin
+and comes back finds their range gone. `Appearance` keeps the range, the channel
+and the stain contrast as three independent fields and computes the `Display`,
+which is what makes the controls independent of each other.
+`the_commands_leave_the_display_where_the_panel_asked` asserts on where a *run*
+of commands leaves the state rather than on what one returns, because a single
+`SetAppearance` is individually correct in every version of this that loses the
+range.
+
+**The stain numbers are read, not typed.** `Stains::coefficients` and the new
+`Stains::max_values` are what the channel buttons build from.
+§8.5 records typing a plausible haematoxylin vector from the *stain* matrix
+where the inverted matrix's row was wanted, and that nothing failed — the
+channel looked like a working stain channel. `max_values` was exposed for the
+same reason it matters: a background typed as `[255, 255, 255]` because that is
+what it usually is would be right for the default stains and silently wrong for
+a slide carrying its own.
+`the_stain_channels_carry_the_pipelines_own_numbers` compares what the panel
+builds against what the pipeline computes, which is the only check a
+plausible-but-wrong vector cannot pass.
+
+**Display only, still structurally.** The transform is applied in `render`, on
+the way from the tile cache to the frame. The cache holds the slide's own
+pixels, so moving a slider costs a redraw rather than a reload — and nothing
+`Detector::start` is handed has been through it. The crate boundary of §8.5
+stops a `Display` reaching `qupath-pipeline`; `App::display_command` is the
+interface's half, and it touches two fields and no detector.
+
+**The range sliders cannot make an impossible range.** Dragging black past white
+pushes white along, as QuPath's dialog does. `Appearance::display` still falls
+back to the identity for an inverted or empty range, and
+`an_impossible_range_falls_back_rather_than_inverting` exercises the fallback
+precisely because the sliders no longer can: a guard nothing reaches is one
+nobody notices has stopped working.
+
+**Looked at, per §6.** `examples/panes` now renders the "full black" slider at
+both ends, which is the one control §8.5's pictures did not already cover. At
+0.3 the nuclei saturate to solid black against near-white stroma; at 3.0 the
+same field is uniformly pale with the nuclei as faint grey. Both are what the
+control is for, and a slider whose two ends looked alike would be the bug.
+
+**What has not been looked at is the panel itself.** The application launches
+and runs with the transform in the frame path, but the pane's own layout and
+colours have been seen only as offscreen renders of the *transform*, never in a
+real window. §6's standard is looking, and this has not been looked at.
+
+### 8.8 What is still missing
 
 In the order it is worth having.
 
-- **The brightness/contrast dialog.** §8.5's transform has no controls. This is
-  the smallest remaining item and the one with a user-visible hole where the
-  work already exists behind it.
 - **The project browser pane.** §8.3's format is written and nothing in the
   application creates or opens a project, so `project.rs` is a library with no
   caller. Writing the pane is what would make it real; it is also the point at
@@ -1391,6 +1447,11 @@ In the order it is worth having.
 - **A JPEG encoder for `thumbnail.jpg`.** `project.rs` returns the JSON files
   and leaves the thumbnail to the caller, because nothing in this workspace
   encodes JPEG. QuPath tolerates its absence.
+- **A look at the panels in a real window.** §8.7's controls, §8.4's overview
+  pane and the metadata pane have been asserted and rendered offscreen, and the
+  application launches with all of them in the frame path, but the panes' own
+  layout and colours have never been seen on screen. §6 says appearance is
+  checked by looking, and this is the part of the interface that has not been.
 - **Parity for the two file formats.** Nothing here has been opened *by QuPath*.
   Both formats were checked against a JSON parser and against the Java that
   writes them, which is a stronger claim than "it validates" and a weaker one

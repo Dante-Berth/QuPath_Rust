@@ -30,3 +30,8 @@ target
 /docs/profiles/*.log
 
 __pycache__/
+
+# `examples/panes` writes its PNGs to the working directory; they are
+# regenerable from a slide and are looked at rather than committed.
+/display-*.png
+/overview-*.png

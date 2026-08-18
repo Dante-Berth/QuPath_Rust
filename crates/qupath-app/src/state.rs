@@ -19,11 +19,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use qupath_pipeline::Micron;
+use qupath_pipeline::{Micron, Stains};
 use qupath_slide::Slide;
 use qupath_viewer::compose::{self, Framebuffer, MeshVertex, Texture};
 use qupath_viewer::overview::Overview;
-use qupath_viewer::{ScreenPoint, SlidePoint, SlideTiles, TileCache, TileLoader, Viewport};
+use qupath_viewer::{
+    Display, ScreenPoint, SlidePoint, SlideTiles, Stain, TileCache, TileLoader, Viewport,
+};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::Window;
@@ -248,6 +250,118 @@ struct Software {
     vertices: Vec<MeshVertex>,
 }
 
+/// Which channel the viewer is showing.
+///
+/// QuPath's brightness/contrast dialog lists the original colour alongside the
+/// deconvolved stains and switches between them, rather than treating a stain
+/// as a mode of its own. This enum is that list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Channel {
+    /// The slide as read.
+    #[default]
+    Original,
+    /// Haematoxylin, which is stain 0 of QuPath's default H&E.
+    Haematoxylin,
+    /// Eosin, stain 1.
+    Eosin,
+}
+
+impl Channel {
+    /// The three, in the order the dialog lists them.
+    pub const ALL: [Self; 3] = [Self::Original, Self::Haematoxylin, Self::Eosin];
+
+    /// What the button says.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Original => "Original",
+            Self::Haematoxylin => "Haematoxylin",
+            Self::Eosin => "Eosin",
+        }
+    }
+
+    /// This channel's row of the deconvolution matrix, or `None` for the
+    /// original colour.
+    ///
+    /// Read from [`Stains`] rather than typed, which is the whole reason
+    /// `Stains::max_values` was exposed: `docs/VIEWER.md` §8.5 records that the
+    /// first attempt at these numbers typed a plausible vector from the *stain*
+    /// matrix where the inverted matrix's row was wanted, and that nothing
+    /// failed — the channel looked like a working stain channel. Numbers that
+    /// are read cannot be plausible-but-wrong.
+    #[must_use]
+    fn stain(self, full: f64) -> Option<Stain> {
+        let index = match self {
+            Self::Original => return None,
+            Self::Haematoxylin => 0,
+            Self::Eosin => 1,
+        };
+        let stains = Stains::h_and_e();
+        Some(Stain {
+            coefficients: stains.coefficients()[index],
+            background: stains.max_values(),
+            full,
+        })
+    }
+}
+
+/// What the brightness/contrast panel holds, and what it renders down to.
+///
+/// Separate from [`Display`] because the dialog outlives any one of them: a
+/// user who dials in a range, looks at haematoxylin and goes back to the
+/// original colour expects their range to still be there. A [`Display`] with
+/// `stain: None` has forgotten which stain it was, and a [`Display`] built
+/// fresh each time the channel changes has forgotten the range. Keeping the
+/// three fields and computing the [`Display`] is what makes the panel's
+/// controls independent of each other.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Appearance {
+    /// The value shown as black, for the original colour.
+    pub min: f32,
+    /// The value shown as white, for the original colour.
+    pub max: f32,
+    /// Which channel is showing.
+    pub channel: Channel,
+    /// The optical density shown as full black, for the stain channels.
+    ///
+    /// Held here rather than derived because it is the stain channels' contrast
+    /// control — the byte range means nothing to an optical density, per
+    /// [`Stain::full`]'s documentation.
+    pub full: f64,
+}
+
+impl Default for Appearance {
+    /// The slide as read: QuPath's own default display, which is the full byte
+    /// range and no stain.
+    fn default() -> Self {
+        Self {
+            min: 0.0,
+            max: 255.0,
+            channel: Channel::default(),
+            full: 1.5,
+        }
+    }
+}
+
+impl Appearance {
+    /// The transform this appearance asks for.
+    ///
+    /// A range the user has collapsed or inverted falls back to the identity
+    /// rather than to a negative scale, because [`Display::range`] refuses it
+    /// for `scalebar`'s reason and a panel is not the place to decide what an
+    /// impossible range should look like. The sliders below cannot produce one
+    /// — the panel keeps them apart — so this is the guard for a value arriving
+    /// some other way.
+    #[must_use]
+    pub fn display(self) -> Display {
+        let base = Display::range(self.min, self.max).unwrap_or_default();
+        match self.channel.stain(self.full) {
+            Some(stain) => base.with_stain(stain),
+            None => base.without_stain(),
+        }
+    }
+}
+
 /// The whole application.
 pub struct App {
     pub window: Option<Arc<Window>>,
@@ -335,6 +449,15 @@ pub struct App {
     /// that answers it. QuPath shows its overview by default for the same
     /// reason.
     pub show_overview: bool,
+    /// Whether the brightness/contrast controls are showing.
+    pub show_appearance: bool,
+    /// How the slide is being shown: the display range and the stain channel.
+    ///
+    /// Held on [`App`] rather than on [`Open`] because it is a property of the
+    /// viewer, not of the slide: QuPath's dialog keeps its settings when the
+    /// image changes, and a user comparing two slides at the same range would
+    /// have to dial it in twice otherwise.
+    pub appearance: Appearance,
 }
 
 impl App {
@@ -366,6 +489,8 @@ impl App {
             show_metadata: false,
             show_help: false,
             show_overview: true,
+            show_appearance: false,
+            appearance: Appearance::default(),
             uploaded_overview: false,
         }
     }
@@ -727,6 +852,30 @@ impl App {
         }
     }
 
+    /// The commands that change only how the slide is shown.
+    ///
+    /// Split out of [`App::run`] because they need no window, which is what
+    /// lets them be asserted: building an `App` is possible headless but
+    /// building a `Window` is not, and the question worth asking about these is
+    /// where a *run* of them leaves the state — whether a channel survives a
+    /// range being moved afterwards — not what one of them returns.
+    ///
+    /// Nothing here touches [`Detector`], and that is the point rather than an
+    /// omission: `docs/VIEWER.md` §8.5's display-only claim is structural in
+    /// the library and has to stay structural here.
+    fn display_command(&mut self, command: &Command) {
+        match command {
+            Command::ToggleAppearance => self.show_appearance = !self.show_appearance,
+            // No reload, and deliberately: the tiles in the cache are the
+            // slide's own pixels and the transform is applied on the way to the
+            // frame, so a drag of these sliders costs a redraw rather than a
+            // round trip to the file.
+            Command::SetAppearance(appearance) => self.appearance = *appearance,
+            Command::ResetAppearance => self.appearance = Appearance::default(),
+            _ => {}
+        }
+    }
+
     /// Carries out what the interface asked for.
     pub fn run(&mut self, command: Command, window: &Window) {
         match command {
@@ -788,6 +937,9 @@ impl App {
             // on change would start dozens of runs across one drag and show the
             // answer to a parameter the user had already moved past. `Detect`
             // is the deliberate act, as it is in QuPath's dialog.
+            Command::ToggleAppearance | Command::SetAppearance(_) | Command::ResetAppearance => {
+                self.display_command(&command);
+            }
             Command::SetTuning(tuning) => self.tuning = tuning,
             Command::ResetTuning => self.tuning = Micron::default(),
             Command::Fit => {
@@ -971,10 +1123,17 @@ impl App {
             self.uploaded_overview = true;
         }
         state.frame.clear(compose::CLEAR);
+        // The display transform is applied here, on the way to the frame, and
+        // nowhere earlier: the tiles in the cache are the slide's own pixels,
+        // so changing the range costs a redraw and not a reload, and nothing
+        // the detector reads has been through it. That is the structural half
+        // of `docs/VIEWER.md` §8.5's display-only claim — `Detector::start` is
+        // handed the view and the path, never a `Display`.
+        let display = self.appearance.display();
         for (rect, tile) in &draws {
             state
                 .frame
-                .draw_tile(*rect, &tile.pixels, tile.width, tile.height);
+                .draw_tile_with(*rect, &tile.pixels, tile.width, tile.height, display);
         }
         drop(draws);
         // Over the tiles and under the chrome. A panel drawn first would have
@@ -1415,5 +1574,102 @@ mod tests {
         assert!(!guard(f64::NAN));
         assert!(!guard(0.0));
         assert!(guard(1.0));
+    }
+
+    /// The stain coefficients must be the *inverted* matrix's row. Typing a
+    /// plausible vector from the stain matrix is the mistake
+    /// `docs/VIEWER.md` §8.5 records, and nothing failed when it happened —
+    /// the channel looked like a working stain channel. This asserts that what
+    /// the panel builds is what the pipeline computes, which is the only check
+    /// a plausible-but-wrong vector cannot pass.
+    #[test]
+    fn the_stain_channels_carry_the_pipelines_own_numbers() {
+        let stains = Stains::h_and_e();
+        for (channel, index) in [(Channel::Haematoxylin, 0), (Channel::Eosin, 1)] {
+            let display = Appearance {
+                channel,
+                ..Appearance::default()
+            }
+            .display();
+            let stain = display.stain().expect("a stain channel has a stain");
+            assert_eq!(
+                stain.coefficients,
+                stains.coefficients()[index],
+                "{} took the wrong row",
+                channel.label(),
+            );
+            assert_eq!(stain.background, stains.max_values());
+        }
+        assert!(
+            Appearance::default().display().stain().is_none(),
+            "the original colour is not a stain channel",
+        );
+    }
+
+    /// The default must be the identity, so opening the application draws
+    /// exactly what a build without any of this draws — the property
+    /// `docs/VIEWER.md` §3.4b's two backends rest on.
+    #[test]
+    fn the_default_appearance_changes_nothing() {
+        assert!(Appearance::default().display().is_identity());
+    }
+
+    /// Where the state ends up after a run of commands, rather than what one
+    /// command returns: the panel sends a whole `Appearance` every frame, so
+    /// the question is whether a channel picked earlier survives a range moved
+    /// later, and whether `Reset` puts everything back at once.
+    #[test]
+    fn the_commands_leave_the_display_where_the_panel_asked() {
+        let mut app = App::new(None);
+        assert!(!app.show_appearance);
+        app.display_command(&Command::ToggleAppearance);
+        assert!(app.show_appearance);
+
+        app.display_command(&Command::SetAppearance(Appearance {
+            channel: Channel::Eosin,
+            ..Appearance::default()
+        }));
+        app.display_command(&Command::SetAppearance(Appearance {
+            min: 40.0,
+            max: 200.0,
+            ..app.appearance
+        }));
+        assert_eq!(
+            app.appearance.channel,
+            Channel::Eosin,
+            "moving the range must not forget the channel",
+        );
+        assert_eq!((app.appearance.min, app.appearance.max), (40.0, 200.0));
+
+        app.display_command(&Command::ResetAppearance);
+        assert!(
+            app.appearance.display().is_identity(),
+            "reset puts the range and the channel back together",
+        );
+        assert!(
+            app.show_appearance,
+            "reset is the display, not the panel: the panel stays open",
+        );
+    }
+
+    /// A range that cannot be a range falls back to the identity rather than to
+    /// a negative scale. The sliders keep the two ends apart so they cannot
+    /// produce one, which is exactly why this is worth asserting: the guard is
+    /// for a value arriving some other way, and an unexercised guard is one
+    /// nobody notices has stopped working.
+    #[test]
+    fn an_impossible_range_falls_back_rather_than_inverting() {
+        for (min, max) in [(200.0, 50.0), (128.0, 128.0), (f32::NAN, 255.0)] {
+            let display = Appearance {
+                min,
+                max,
+                ..Appearance::default()
+            }
+            .display();
+            assert!(
+                display.is_identity(),
+                "({min}, {max}) should fall back, and gave {display:?}",
+            );
+        }
     }
 }

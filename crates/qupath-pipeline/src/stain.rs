@@ -139,6 +139,19 @@ impl Stains {
         self.coefficients
     }
 
+    /// The per-channel white point, QuPath's `maxValues`.
+    ///
+    /// Exposed for the same reason [`Self::coefficients`] is, and for one more:
+    /// the viewer's display path duplicates this arithmetic rather than
+    /// depending on this crate (`docs/VIEWER.md` §7), so the numbers it copies
+    /// have to be *readable* from here. A background typed as `[255.0; 3]`
+    /// because that is what it usually is would be right for the default stains
+    /// and silently wrong for a slide carrying its own.
+    #[must_use]
+    pub fn max_values(&self) -> [f64; 3] {
+        self.max_values
+    }
+
     /// Converts an RGB tile to a haematoxylin optical-density image.
     ///
     /// `out` is reused across tiles, so this allocates nothing in a tile loop.

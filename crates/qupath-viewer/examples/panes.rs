@@ -174,6 +174,29 @@ fn main() {
                     full: 1.5,
                 }),
             ),
+            // The two ends of the panel's "Full black" slider, which is the
+            // stain channels' contrast control and the one thing the panel adds
+            // that §8.5's transform did not already have a picture of. At 0.3
+            // everything above a faint density saturates to black; at 3.0 the
+            // whole slide is pale. Both are what the control is *for*, and
+            // neither is a bug — but a slider whose two ends looked the same
+            // would be, and that is what this is here to show.
+            (
+                "haematoxylin-full-0.3",
+                Display::new().with_stain(Stain {
+                    coefficients: HAEMATOXYLIN,
+                    background: [255.0, 255.0, 255.0],
+                    full: 0.3,
+                }),
+            ),
+            (
+                "haematoxylin-full-3.0",
+                Display::new().with_stain(Stain {
+                    coefficients: HAEMATOXYLIN,
+                    background: [255.0, 255.0, 255.0],
+                    full: 3.0,
+                }),
+            ),
         ];
         for (name, display) in displays {
             let mut frame = Framebuffer::new(size, size);

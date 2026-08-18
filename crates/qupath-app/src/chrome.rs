@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use qupath_pipeline::Micron;
 use qupath_viewer::{ScreenPoint, SlidePoint};
 
-use crate::state::{App, cursor_slide_position, describe, display_name};
+use crate::state::{App, Appearance, Channel, cursor_slide_position, describe, display_name};
 
 /// What the interface is asking the application to do.
 ///
@@ -68,6 +68,18 @@ pub enum Command {
     SetTuning(Micron),
     /// Put the detection parameters back to QuPath's defaults.
     ResetTuning,
+    /// Show or hide the brightness/contrast controls.
+    ToggleAppearance,
+    /// Replace the display settings.
+    ///
+    /// Carries the whole [`Appearance`] for [`Command::SetTuning`]'s reason,
+    /// and it applies more strongly here: the channel buttons and the range
+    /// sliders are edits to the same value, so sending them separately would
+    /// make a click on a channel and a drag of a slider in the same frame two
+    /// commands where only one can be reported.
+    SetAppearance(Appearance),
+    /// Put the display back to the slide as read.
+    ResetAppearance,
 }
 
 /// Sets the look once, at startup.
@@ -214,6 +226,19 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
                 let mut overview = app.show_overview;
                 if ui.checkbox(&mut overview, "Overview").clicked() {
                     command = Command::ToggleOverview;
+                    ui.close();
+                }
+                let mut appearance = app.show_appearance;
+                if ui
+                    .checkbox(&mut appearance, "Display")
+                    .on_hover_text(
+                        "Brightness, contrast and stain channels. Shows in the \
+                         slide panel; changes what is drawn, never what is \
+                         detected.",
+                    )
+                    .clicked()
+                {
+                    command = Command::ToggleAppearance;
                     ui.close();
                 }
             });
@@ -738,6 +763,105 @@ fn overview_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
     ui.label(egui::RichText::new("Click to jump").weak().small());
 }
 
+/// The brightness/contrast controls: `docs/VIEWER.md` §8.7, which was §8.8's
+/// first missing item until it was done.
+///
+/// QuPath puts these in a floating dialog. They go in this pane instead, for
+/// §8.1c's reason and the overview's: a window over the image sits inside the
+/// slide's rectangle, and what lands there is a hit-test that stops agreeing
+/// with what is drawn.
+///
+/// The controls edit an [`Appearance`] and hand it back through
+/// [`Command::SetAppearance`], so this function keeps taking `&App` — see
+/// [`Command::SetTuning`]. Nothing here can reach the detector, which is the
+/// half of §8.5's display-only claim that the interface is responsible for:
+/// the crate boundary stops a `Display` reaching `qupath-pipeline`, and this
+/// stops a control writing anywhere but [`App::appearance`].
+fn appearance_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
+    ui.label(egui::RichText::new("Display").strong());
+    let mut appearance = app.appearance;
+    let mut changed = false;
+
+    ui.horizontal(|ui| {
+        for channel in Channel::ALL {
+            if ui
+                .selectable_label(appearance.channel == channel, channel.label())
+                .clicked()
+                && appearance.channel != channel
+            {
+                appearance.channel = channel;
+                changed = true;
+            }
+        }
+    });
+
+    if appearance.channel == Channel::Original {
+        // The two ends are kept apart rather than clamped together, so the
+        // sliders cannot produce the empty or inverted range `Display::range`
+        // refuses. Dragging `min` past `max` pushes `max` along, which is what
+        // QuPath's dialog does and what a user dragging hard expects.
+        let mut min = appearance.min;
+        let mut max = appearance.max;
+        if ui
+            .add(egui::Slider::new(&mut min, 0.0..=254.0).text("Black"))
+            .on_hover_text("The value shown as black. QuPath's minDisplay.")
+            .changed()
+        {
+            appearance.min = min;
+            appearance.max = appearance.max.max(min + 1.0);
+            changed = true;
+        }
+        if ui
+            .add(egui::Slider::new(&mut max, 1.0..=255.0).text("White"))
+            .on_hover_text("The value shown as white. QuPath's maxDisplay.")
+            .changed()
+        {
+            appearance.max = max;
+            appearance.min = appearance.min.min(max - 1.0);
+            changed = true;
+        }
+    } else {
+        // An optical density, not a byte: a stain amount runs 0 to about 2, so
+        // the byte range would put every real value in the bottom one percent
+        // of the scale. `Stain::full` records the same thing.
+        if ui
+            .add(
+                egui::Slider::new(&mut appearance.full, 0.1..=3.0)
+                    .text("Full black")
+                    .fixed_decimals(2),
+            )
+            .on_hover_text(
+                "The stain optical density shown as full black. An optical \
+                 density, not a byte — it does not share the range above.",
+            )
+            .changed()
+        {
+            changed = true;
+        }
+    }
+
+    if ui
+        .button("Reset")
+        .on_hover_text("Back to the slide as it was read.")
+        .clicked()
+    {
+        *command = Command::ResetAppearance;
+    } else if changed && *command == Command::None {
+        // After the button, for `tuning`'s reason: one command per frame, and
+        // a dropped slider frame is invisible where a dropped press is not.
+        *command = Command::SetAppearance(appearance);
+    }
+
+    ui.label(
+        egui::RichText::new(
+            "Display only. Detection reads the slide's own pixels, whatever \
+             this shows.",
+        )
+        .weak()
+        .small(),
+    );
+}
+
 fn metadata(ui: &mut egui::Ui, app: &App, command: &mut Command) {
     ui.heading("Slide");
     ui.separator();
@@ -755,6 +879,15 @@ fn metadata(ui: &mut egui::Ui, app: &App, command: &mut Command) {
     if app.show_overview {
         overview_pane(ui, app, command);
         ui.add_space(8.0);
+    }
+
+    // Below the overview and above the metadata, because it is a control where
+    // both of those are readouts, and QuPath's dialog opens over the image for
+    // the same reason — it is the thing a hand is on.
+    if app.show_appearance {
+        appearance_pane(ui, app, command);
+        ui.add_space(8.0);
+        ui.separator();
     }
 
     ui.label(egui::RichText::new(display_name(&open.path)).strong());
