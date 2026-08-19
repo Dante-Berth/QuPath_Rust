@@ -117,6 +117,23 @@ const CTRL_SCROLL_STEPS: f64 = 3.0;
 /// hundred. Below this the gesture is abandoned and the view is left alone.
 const BAND_MINIMUM_PX: f32 = 8.0;
 
+/// Converts a rectangle from `egui`'s logical points into physical pixels.
+///
+/// Free rather than a method so the arithmetic can be asserted with no window
+/// and no display server, which is the only way this particular bug is
+/// reachable from a test: it is invisible at the scale factor of 1.0 that a
+/// development machine and every headless run both have. See
+/// [`App::slide_area`].
+fn scale_area(area: (f32, f32, f32, f32), pixels_per_point: f32) -> (f32, f32, f32, f32) {
+    let (left, top, right, bottom) = area;
+    (
+        left * pixels_per_point,
+        top * pixels_per_point,
+        right * pixels_per_point,
+        bottom * pixels_per_point,
+    )
+}
+
 /// One tile and where it goes, in window pixels — the draw list, in the same
 /// shape `examples/window.rs` builds it.
 type Draw<'a> = ((f32, f32, f32, f32), &'a Decoded);
@@ -398,7 +415,18 @@ pub struct App {
     pub detector: Detector,
     /// The window rectangle the slide occupies — what is left after the
     /// toolbar and the status bar have taken their strips — as
-    /// `(left, top, right, bottom)` in window pixels.
+    /// `(left, top, right, bottom)` in **physical** window pixels.
+    ///
+    /// The unit matters and was wrong once. `chrome::draw` reads this from
+    /// `egui`'s `available_rect`, which is in *logical points*, while
+    /// `self.cursor` comes from winit's `CursorMoved` in *physical pixels*.
+    /// Those agree only where the scale factor is 1.0. Anywhere else the
+    /// cursor's coordinates were compared against a rectangle in the wrong
+    /// units, so [`App::cursor_over_slide`] read false over most of the window
+    /// and every gesture gated on it -- scroll-to-zoom, drag-to-pan and the
+    /// zoom band alike -- silently did nothing. It is converted at the point it
+    /// is stored so there is one unit below this line rather than a conversion
+    /// at each of the three call sites.
     ///
     /// Recorded during layout because it is the only reliable answer to "is the
     /// pointer over the slide or over the interface". `egui`'s own
@@ -1024,7 +1052,12 @@ impl App {
             command = asked;
             slide_area = Some(area);
         });
-        self.slide_area = slide_area;
+        // Into *physical* pixels, which is the unit `self.cursor` and the
+        // compositor's frame are both in. `chrome::draw` reads the rectangle
+        // from `egui`, whose coordinates are logical points -- the two are the
+        // same numbers only at a scale factor of 1.0, which is the one machine
+        // this was developed on. See [`App::slide_area`].
+        self.slide_area = slide_area.map(|area| scale_area(area, output.pixels_per_point));
         if let Some(egui) = self.egui.as_mut() {
             egui.handle_platform_output(window, output.platform_output);
         }
@@ -1559,6 +1592,55 @@ mod tests {
         } else {
             steps
         }
+    }
+
+    /// The cursor is over the slide at a scale factor that is not 1.0.
+    ///
+    /// This is the bug rather than its arithmetic. `chrome::draw` hands back a
+    /// rectangle in `egui`'s logical points and `self.cursor` is in winit's
+    /// physical pixels, so at a scale factor of 2.0 a cursor in the middle of
+    /// the slide has coordinates *past the right edge* of the unconverted
+    /// rectangle. Every gesture gated on `cursor_over_slide` — scroll-to-zoom,
+    /// drag-to-pan, the zoom band — then does nothing, which is what "pinch
+    /// zoom stopped working" was.
+    ///
+    /// Asserted through `slide_area` set the way `frame` sets it rather than
+    /// against `scale_area` alone, because the arithmetic was never in doubt:
+    /// what was wrong is that nothing applied it. Setting the field raw is what
+    /// this failed at before the fix.
+    #[test]
+    fn the_cursor_is_over_the_slide_at_a_scale_factor_of_two() {
+        // The layout `egui` reports for a 1280x860 physical window at 2.0: a
+        // 640x430 point window with a toolbar strip off the top and a status
+        // bar off the bottom, leaving the slide the middle.
+        let reported = (0.0, 30.0, 640.0, 400.0);
+
+        let mut app = App::new(None);
+        app.slide_area = Some(scale_area(reported, 2.0));
+
+        // The centre of the slide, in the physical pixels `CursorMoved` gives.
+        app.cursor = ScreenPoint::new(640.0, 460.0);
+        assert!(
+            app.cursor_over_slide(),
+            "the middle of the slide must be over the slide at a scale factor of 2.0"
+        );
+
+        // And the status bar is still outside it, so this did not pass by
+        // making the rectangle unbounded.
+        app.cursor = ScreenPoint::new(640.0, 820.0);
+        assert!(
+            !app.cursor_over_slide(),
+            "the status bar must not be over the slide"
+        );
+
+        // The value that would have made this fail is reachable: with the
+        // rectangle left in points, the same centre cursor reads as outside.
+        app.slide_area = Some(reported);
+        app.cursor = ScreenPoint::new(640.0, 460.0);
+        assert!(
+            !app.cursor_over_slide(),
+            "unconverted, the centre reads as outside -- this is what regressed"
+        );
     }
 
     /// A jump from the overview lands where it was aimed, and stays on the

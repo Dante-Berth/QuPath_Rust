@@ -1164,6 +1164,34 @@ code** — the question that settled this was answered by looking at winit's
 Linux backend, and the next person should be able to look at their own device
 instead.
 
+#### It came back, and the cause was not the gesture code at all
+
+Reported from use a second time: *pad zoom stopped working.* None of the above
+was wrong and none of it was the problem, which is the reason this is written
+down rather than folded into the section above.
+
+`cursor_over_slide` compares `self.cursor` against `self.slide_area`. The cursor
+comes from winit's `CursorMoved` in **physical pixels**; the area came from
+`chrome::draw`, which reads `egui`'s `available_rect` in **logical points**.
+Those are the same numbers at a scale factor of 1.0 and at no other, so on a
+scaled display the cursor's coordinates were being tested against a rectangle
+smaller than the one drawn — at 2.0, the middle of the slide reads as past its
+right edge. Every gesture gated on that predicate stopped: not just the
+trackpad, but scroll-to-zoom, drag-to-pan and the zoom band, all silently and
+all at once. The rectangle is now converted where it is stored, so there is one
+unit below that line rather than a conversion at each of three call sites.
+
+Two things worth keeping. The first is that the *symptom* named one gesture and
+the cause was under all of them — the trackpad was simply the one being used at
+the time, and hunting in the trackpad code would have found nothing, because
+§8.1b had already made that code correct. The second is why no test caught it:
+a development machine and a headless run both have a scale factor of 1.0, so
+the bug is unreachable in exactly the two places code gets exercised. The test
+sets `slide_area` the way `frame` sets it and asserts at 2.0, and its last
+assertion is that leaving the rectangle unconverted puts the centre outside —
+the value that would have made it fail, which §6's rule says to check is
+reachable.
+
 ### 8.1c Three panels at once — **done**, and it was not a cosmetic problem
 
 §6 has said throughout that appearance is unverified, and §8.1 predicted the
