@@ -670,12 +670,17 @@ not fire, because the run read the level the viewer drew and the pixels behind a
 window stayed near the window's own size at any scale —
 `the_level_the_viewer_shows_keeps_a_run_under_the_cap_at_any_zoom` still asserts
 that of `region_for` alone. Asking for a finer level than the view is exactly
-the case that cap was written for, so it is now load-bearing rather than
-theoretical. A fitted view of CMU-1 is 1444 Mpx at level 0; capped at 64 Mpx, a
-run reads the middle **21%** of the slide's width, and the status bar says
-"centre of the view only" when it does. That beats both detecting nothing and a
-fifteen-second freeze, but it is a partial answer — and it is why detecting a
-*whole* slide needs tiling rather than a bigger cap (§8.8).
+the case that cap was written for, so it became load-bearing rather than
+theoretical.
+
+At 64 Mpx it was also too low, and §8.9 is what measuring it properly found: the
+rate it was set from was taken on glass and on too few tiles to fill the thread
+pool, and the memory it was guarding was never a function of the region in the
+first place. It is now 2048 Mpx. A fitted view of CMU-1 is 1514 Mpx at level 0
+and runs whole — all **382,432** nuclei in **33.5 s** — rather than the middle
+21% of the slide's width it used to return. The cap still fires on anything
+larger, shrinking about the centre with the status bar saying "centre of the
+view only" when it does.
 
 **A result must never outlive the slide it was found on.** Outlines are in that
 slide's coordinates, so drawing them over a different slide puts plausible
@@ -703,10 +708,12 @@ it.
   until they are moved together; the software path needs no wgpu at all, so it
   went first. Composition is 1.27 ms against a 16.7 ms frame (§3.4b), so this
   is a missing optimisation and not a missing feature.
-- **Detection cannot be interrupted**, per above. A run over a region the cap
-  had to shrink is the case that would want it, and since the level cap that
-  case is now reachable from the interface: any sufficiently zoomed-out run on
-  CMU-1 hits it.
+- **Detection cannot be interrupted, and reports no progress fraction**, per
+  above. This mattered little at 1.24 s and matters considerably at the 33.5 s
+  a whole-slide run now takes (§8.9): the window stays live and a second run
+  supersedes the first, so nothing is stuck, but there is no way to stop a run
+  and no way to see how far along it is. Both need a callback through
+  `run_collecting`, which is a change to the pipeline rather than to this.
 - **A coarse run gives coarse outlines.** A nucleus detected at level 2 is
   traced in level-2 pixels and scaled up, so it is blocky when zoomed back in.
   This is honest — the run never read the detail — but it means the outlines
@@ -1567,22 +1574,75 @@ Four things it found, none of which a test here would have:
 What is still unseen is the interface *in a real window* — these are offscreen
 renders, and the trackpad and the window manager are not in them.
 
+### 8.9 Whole-slide detection — **done**, and the entry that asked for it was wrong
+
+§8.8 listed "tiled whole-slide detection" at the top of what was missing, on
+the reasoning that "Detect cells" makes one `run_collecting` call, that
+`MAX_PIXELS` therefore bounds it to the middle 21% of a fitted CMU-1, and that
+fixing it meant a tile loop with overlap and seam deduplication — "a real piece
+of work rather than a parameter change".
+
+Every step of that was wrong, and it is kept here rather than quietly replaced
+because the way it was wrong is the useful part: **it was reasoning about the
+application without reading the layer underneath it.** `qupath_pipeline`
+already tiles, already runs those tiles in parallel, and already removes the
+duplicates that land on seams — `run_collecting`'s own documentation says
+"duplicates across tile seams already removed", and the whole-slide run reports
+the stage doing it (428,496 → 382,432, a 10.8% cut). The tile loop I was
+proposing to write exists, is tested, and is what ROADMAP §2 was about.
+
+What actually stood in the way was one constant, set from a bad measurement.
+`MAX_PIXELS` was 64 Mpx, chosen against a rate of 4.5 Mpx/s to hold a run near
+fifteen seconds. That rate came from two views that were mostly **glass** and,
+worse, too small to occupy the thread pool — 4 tiles across 20 threads. Measured
+on a region that saturates them, the rate is **40.8 Mpx/s**, nine times higher.
+
+The memory half was a guess that turned out to be answerable by measuring:
+
+| region | tiles | peak resident |
+|---|---|---|
+| 17 Mpx | 4 | 1092 MB |
+| 212 Mpx | 48 | 5657 MB |
+| 1514 Mpx (whole slide) | 5776 | 5609 MB |
+
+Peak is set by **how many tiles are in flight**, which is the thread count, and
+not by the region — the whole slide costs no more than any region large enough
+to fill the threads. The objects themselves are 340 bytes each, so all 382,432
+of CMU-1's nuclei add about 124 MB on top of that ceiling.
+
+So the fix was the parameter change I had explicitly ruled out. `MAX_PIXELS` is
+2048 Mpx, a fitted CMU-1 runs the whole slide at level 0 in **33.5 s**, and
+`a_fitted_view_of_cmu1_reads_the_whole_slide` pins it with the slide's real
+extent so the cap cannot drift back under a whole slide unnoticed. The cap is
+still a cap: a slide larger than CMU-1 is shrunk about its centre and labelled,
+as before.
+
+The rule this yields belongs beside §6's: **before writing a component, read
+what the layer below already does.** §6's rule is about not trusting a
+measurement you have not tried to falsify; this one is about not trusting a
+*gap* you have not tried to find already filled. The cost of getting it wrong
+here would have been a duplicate tile loop wrapped around a working one, which
+is the kind of thing that looks like progress.
+
+What remains genuinely absent is **cancellation and a progress fraction**. §3.6
+lists them as not offered, and at 33.5 s they matter more than they did at 1.24
+s: the run is on a worker thread with the window live and `Detector::start`
+free to supersede it, so the application stays usable, but a person who starts
+a whole-slide run has no way to stop it and no idea how far along it is. That
+needs a callback through `run_collecting`, which is a pipeline change rather
+than an application one.
+
 ### 8.8 What is still missing
 
 In the order it is worth having.
 
-- **Tiled whole-slide detection.** The one gap a person meets by using the
-  application rather than by reading it. "Detect cells" reads one region in one
-  `run_collecting` call, so `MAX_PIXELS` bounds it, and since §3.6's level cap a
-  fitted view of CMU-1 gets the middle 21% of the slide's width — labelled, but
-  still a partial answer to a question that reads like a whole-slide one. The
-  fix is not a bigger cap: 1444 Mpx at level 0 is a quarter-hour of pipeline at
-  the measured 4.5 Mpx/s, in one uninterruptible call. It is a loop over tiles
-  with overlap, deduplicating objects that straddle a seam, which is what QuPath
-  does and is a real piece of work rather than a parameter change. It also wants
-  the two things §3.6 lists as not offered — cancellation and a progress
-  fraction — which become honest the moment there is a tile count to report, and
-  are the reason this is worth doing as one piece.
+- **Cancellation and a progress fraction for detection.** Promoted here by
+  §8.9: a whole-slide run is 33.5 s, and a run that long with no way to stop it
+  and no sense of how far along it is is the gap a person now meets first. Both
+  need `run_collecting` to take a callback it can poll between tiles — the tile
+  loop is already there to hang it on, and the tile count is already the honest
+  denominator, which is what makes the fraction a real one rather than a timer.
+  It is a pipeline change, which is why it is not done here.
 - **The project browser pane.** §8.3's format is written and nothing in the
   application creates or opens a project, so `project.rs` is a library with no
   caller. Writing the pane is what would make it real; it is also the point at

@@ -38,10 +38,13 @@
 //! screenful of tissue found 1357, when the whole slide holds far more nuclei
 //! than one screenful.
 //!
-//! The cost is real and is bounded by [`MAX_PIXELS`] rather than by the zoom:
-//! a run started while zoomed out reads the middle of the view rather than all
-//! of it, and says so. Detecting a whole slide properly needs tiling, which is
-//! not here yet.
+//! The cost is real and is bounded by [`MAX_PIXELS`] rather than by the zoom.
+//! That cap now sits above a whole slide: `qupath_pipeline` already tiles
+//! internally, in parallel, and already removes the duplicates that fall on
+//! tile seams, so a whole-slide run needs no tiling *here* — measured on CMU-1,
+//! all 382,432 nuclei at level 0 in 33.5 s, with peak memory set by the thread
+//! count rather than by the region. See [`MAX_PIXELS`] for the measurements and
+//! for what the previous cap got wrong.
 //!
 //! Objects found at a coarse level are also coarse — outlines traced in level
 //! pixels and scaled up — which is still true of any run above level 0 and is
@@ -79,34 +82,61 @@ use qupath_viewer::{Overlay, Viewport};
 /// cap expressed in level-0 pixels would refuse the cheap one and allow the
 /// expensive one.
 ///
-/// Measured on CMU-1 rather than extrapolated: a fitted view reads level 2 and
-/// runs 5.64 Mpx in **1.24 s**, and a 1:1 view of tissue runs 1.05 Mpx in
-/// 0.38 s. That is around 4.5 Mpx/s, *below* the 16.5 Mpx/s of
-/// `docs/benchmarks/rust-pipeline-region.txt`, because that figure is for a
-/// dense level-0 tissue region and these views are mostly glass — the pipeline
-/// is not linear in area. At the measured rate this cap is about **fifteen
-/// seconds**, which is the ceiling on a run that has gone wrong rather than a
-/// duration anything normal reaches.
+/// # What this does *not* bound, and why that was the mistake
 ///
-/// It is a cap on the region, not a refusal: [`region_for`] shrinks the view's
-/// rectangle about its centre and the caller says so. Detecting the middle of
-/// what you asked for beats detecting nothing.
+/// This was 64 Mpx, chosen against a measured 4.5 Mpx/s to put a run's ceiling
+/// at about fifteen seconds. Both halves of that were wrong, and the way they
+/// were wrong is worth keeping.
 ///
-/// It used to be true that this did not fire, because the run read the level
-/// the viewer drew and the pixels behind a window stayed near the window's own
-/// size at any scale — `the_level_the_viewer_shows_keeps_a_run_under_the_cap_at_any_zoom`
-/// still asserts that of `region_for` alone. [`MAX_MICRONS_PER_PIXEL`] changed
-/// what is asked for: a run started while zoomed out now reads a finer level
-/// than the view, which is exactly "a run at a level far finer than the view".
+/// The rate was read off two views that are mostly **glass**. The pipeline is
+/// not linear in area and it is not linear in *content* either: a region with
+/// nothing in it spends its time decoding and finds nothing to trace, so it
+/// reports a low Mpx/s that says more about the tissue than the throughput.
+/// Worse, neither view had tiles enough to occupy the thread pool. Measured on
+/// a region that does — 212 Mpx over 48 tiles on 20 threads — the rate is
+/// **40.8 Mpx/s**, nine times the figure this cap was set from. The whole of
+/// CMU-1 at level 0 is 1514 Mpx and `run_collecting` returns all **382,432**
+/// nuclei from it in **33.5 s**.
 ///
-/// So this cap is now load-bearing rather than theoretical, and it is what
-/// bounds the cost of the level cap. A fitted view of CMU-1 is 1444 Mpx at
-/// level 0; capped, a run reads the middle **21%** of the slide's width, and
-/// the status bar says "centre of the view only" when it does. Detecting the
-/// middle of what you asked for beats both detecting nothing and a fifteen
-/// second freeze — but it is a partial answer, and it is the reason detecting
-/// a *whole* slide needs tiling rather than a bigger cap.
-const MAX_PIXELS: u64 = 64 << 20;
+/// The other half was a guess about memory that turned out to be answerable.
+/// `qupath_pipeline::run_collecting` streams tiles and accumulates only the
+/// objects, so peak memory is set by **how many tiles are in flight at once**,
+/// which is the thread count, and not by the region. Measured: 4 tiles peak at
+/// 1092 MB, 48 tiles at 5657 MB, and the whole slide at 5609 MB — the same
+/// ceiling as 48 tiles, because 20 threads cannot hold more than 20 tiles of
+/// scratch whatever they are asked for. The detections themselves are 340 bytes
+/// an object, so all 382,432 of them come to about 124 MB on top. **A whole
+/// slide costs no more peak memory than a region large enough to fill the
+/// threads.**
+///
+/// So a cap that shrinks the region buys nothing in memory and, at the real
+/// rate, very little in time. It bounds only the wait.
+///
+/// # What it is now
+///
+/// 2048 Mpx, which admits the whole of CMU-1 at level 0 with room over. At the
+/// measured 40.8 Mpx/s that is about **fifty seconds** at the very top — long,
+/// and the run is on a worker thread with the window still live, the status bar
+/// counting, and `Detector::start` free to supersede it. That is the ceiling on
+/// a run somebody asked for deliberately, not a duration a careless gesture
+/// reaches: the level cap keeps a zoomed-out run on a coarse level unless the
+/// slide's own pixel size demands otherwise.
+///
+/// It is still a cap on the region, not a refusal: [`region_for`] shrinks the
+/// view's rectangle about its centre and the caller says so. Detecting the
+/// middle of what you asked for beats detecting nothing, and a slide larger
+/// than CMU-1 still lands there rather than running unbounded.
+///
+/// It used to be true that this did not fire at all, because the run read the
+/// level the viewer drew and the pixels behind a window stayed near the
+/// window's own size at any scale —
+/// `the_level_the_viewer_shows_keeps_a_run_under_the_cap_at_any_zoom` still
+/// asserts that of `region_for` alone. [`MAX_MICRONS_PER_PIXEL`] changed what is
+/// asked for: a run started while zoomed out now reads a finer level than the
+/// view. With the cap where it is, a fitted view of CMU-1 no longer trips it —
+/// which is the point, since that is exactly the gesture that means "detect
+/// this slide".
+const MAX_PIXELS: u64 = 2048 << 20;
 
 /// The coarsest pixel size a run may read, in µm per pixel.
 ///
@@ -767,16 +797,43 @@ mod tests {
         }
     }
 
+    /// A fitted view of CMU-1 at level 0 reads the whole slide, uncapped.
+    ///
+    /// This is the gesture the cap used to spoil: "fit, then detect" means
+    /// "detect this slide", and under the old 64 Mpx cap it returned the middle
+    /// 21% of the slide's width labelled as a partial answer. The numbers are
+    /// CMU-1's real level-0 extent, so this fails if the cap is ever lowered
+    /// back under a whole slide without that being a decision somebody made.
+    #[test]
+    fn a_fitted_view_of_cmu1_reads_the_whole_slide() {
+        let level = level(0, 46_000, 32_914, 1.0);
+        // Fitted: the zoom that fits *both* axes, which is the smaller of the
+        // two ratios and is height-limited for this slide in this window. The
+        // view is then wider than the slide, and step 2 clips it back.
+        let zoom = (1280.0 / 46_000.0f64).min(860.0 / 32_914.0);
+        let fitted = view((23_000.0, 16_457.0), zoom, (1280, 860));
+        let (region, capped) = region_for(fitted, &level).expect("on the slide");
+
+        assert!(!capped, "a fitted CMU-1 must not be capped");
+        assert_eq!(region.width, 46_000);
+        assert_eq!(region.height, 32_914);
+        // 1514 Mpx, which is what the 33.5 s measurement in `MAX_PIXELS` is of.
+        let pixels = u64::from(region.width) * u64::from(region.height);
+        assert!(pixels <= MAX_PIXELS, "{pixels} px is over the cap");
+    }
+
     #[test]
     fn an_enormous_region_is_capped_about_its_centre() {
         // The cap's own case: level 0 held fixed while the view is zoomed out,
         // which is not what the viewer does by itself but is what an explicit
-        // "detect at full resolution" would ask for. Over a gigapixel, which is
-        // ninety seconds of pipeline. What is asserted is the three things the
-        // cap must get right — it fits, it is centred on what the uncapped
-        // region was centred on, and it keeps the view's shape.
-        let level = level(0, 46_000, 32_000, 1.0);
-        let whole = view((23_000.0, 16_000.0), 0.02, (1280, 860));
+        // "detect at full resolution" would ask for. This level is deliberately
+        // *larger than CMU-1* — 4.4 Gpx against its 1.5 — because the cap no
+        // longer fires on CMU-1 at all, which is the point of where it now sits.
+        // What is asserted is the three things the cap must get right when it
+        // does fire: it fits, it is centred on what the uncapped region was
+        // centred on, and it keeps the view's shape.
+        let level = level(0, 80_000, 55_000, 1.0);
+        let whole = view((40_000.0, 27_500.0), 0.02, (1280, 860));
         let (region, capped) = region_for(whole, &level).expect("on the slide");
 
         assert!(capped);
@@ -795,17 +852,23 @@ mod tests {
             f64::from(region.y) + f64::from(region.height) / 2.0,
         );
         assert!(
-            (centre_x - 23_000.0).abs() <= 1.0,
+            (centre_x - 40_000.0).abs() <= 1.0,
             "off centre at {centre_x}"
         );
         assert!(
-            (centre_y - 16_000.0).abs() <= 1.0,
+            (centre_y - 27_500.0).abs() <= 1.0,
             "off centre at {centre_y}"
         );
 
+        // The view at this zoom is wider than the level, so step 2 clips it to
+        // the level and the capped region keeps *that* shape rather than the
+        // window's. Asserted against the level for exactly that reason.
         let aspect = f64::from(region.width) / f64::from(region.height);
         let wanted = f64::from(level.width) / f64::from(level.height);
-        assert!((aspect - wanted).abs() < 0.01, "shape changed: {aspect}");
+        assert!(
+            (aspect - wanted).abs() < 0.05,
+            "shape changed: {aspect} against {wanted}"
+        );
     }
 
     #[test]
@@ -813,15 +876,16 @@ mod tests {
         // The boundary, from both sides. A cap that fires one pixel early is
         // invisible; a cap that fires one pixel late is a region the pipeline
         // spends longer on than the budget allows.
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "the square root of a 64 Mpx cap is 8192, which is not near u32's range"
-        )]
-        let side = (MAX_PIXELS as f64).sqrt() as u32;
-        let level = level(0, side * 2, side * 2, 1.0);
-        let centre = f64::from(side);
+        // The cap is 2^31, which is not a perfect square, so a side derived by
+        // truncating its root would be *under* it and would assert nothing
+        // about the boundary. A power-of-two rectangle hits it exactly: this is
+        // the pair of sides whose product is MAX_PIXELS.
+        let (wide, high) = (1u32 << 16, 1u32 << 15);
+        assert_eq!(u64::from(wide) * u64::from(high), MAX_PIXELS);
+        let level = level(0, wide * 2, high * 2, 1.0);
+        let (centre_x, centre_y) = (f64::from(wide), f64::from(high));
 
-        let exact = view((centre, centre), 1.0, (side, side));
+        let exact = view((centre_x, centre_y), 1.0, (wide, high));
         let (region, capped) = region_for(exact, &level).expect("on the slide");
         assert_eq!(
             u64::from(region.width) * u64::from(region.height),
@@ -829,7 +893,7 @@ mod tests {
         );
         assert!(!capped);
 
-        let over = view((centre, centre), 1.0, (side + 2, side + 2));
+        let over = view((centre_x, centre_y), 1.0, (wide + 2, high + 2));
         let (region, capped) = region_for(over, &level).expect("on the slide");
         assert!(capped);
         assert!(u64::from(region.width) * u64::from(region.height) <= MAX_PIXELS);
