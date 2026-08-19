@@ -870,11 +870,25 @@ impl App {
             Key::Named(NamedKey::Escape) => {
                 // Not an exit. In an application escape closes a dialog, and
                 // taking the window down on a stray keypress is what makes an
-                // example an example. What it does do is abandon a zoom
-                // rectangle mid-drag, which is the way out of a box drawn in
-                // the wrong place that does not require guessing where the
-                // corner was.
-                self.band.take().is_some()
+                // example an example. What it does do is abandon whatever is in
+                // progress, which is now two things.
+                //
+                // The band goes first and alone: a person drawing a zoom
+                // rectangle while a detection runs in the background means the
+                // rectangle, and stopping their run instead would be a
+                // surprising amount of lost work for one keypress.
+                if self.band.take().is_some() {
+                    return true;
+                }
+                // A zoom rectangle in the wrong place and a whole-slide run
+                // started by mistake are the same gesture: undo the thing I
+                // just started. The `Stop` button in the status bar is the
+                // discoverable form of this; escape is the fast one.
+                if self.detector.is_running() {
+                    self.run(Command::StopDetecting, window);
+                    return true;
+                }
+                false
             }
             _ => false,
         }
@@ -950,6 +964,15 @@ impl App {
                 self.uploaded_overview = false;
                 self.detector.clear();
                 self.message = String::from("Open a slide to begin.");
+            }
+            Command::StopDetecting => {
+                // No `is_running` guard: `cancel` is harmless when nothing is
+                // going, and the run does not stop here anyway — the worker
+                // sees the flag on its next tile and the result arrives through
+                // `poll` like any other. Repainting is what shows the status
+                // bar changing when it does.
+                self.detector.cancel();
+                window.request_redraw();
             }
             Command::Detect => {
                 if let Some(open) = &self.open {

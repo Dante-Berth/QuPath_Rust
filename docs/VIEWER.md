@@ -694,12 +694,21 @@ the requested region in slide coordinates every time. That is the assertion
 that catches a downsample applied wrongly, which is otherwise invisible — every
 nucleus is drawn at a plausible-looking place that is not the right one.
 
-**What is not offered:** no cancellation and no progress fraction.
-`run_collecting` is one synchronous call with nothing to poll and nothing to
-interrupt, so the status bar reports what is actually known — a run is going,
-and how long it has been going. A bar advancing on a timer would be an
-invention, and starting a second run supersedes the first rather than stopping
-it.
+**Cancellation and a progress fraction, since §8.10.** For most of this
+milestone neither was offered, and the reason was good: `run_collecting` was one
+synchronous call with nothing to poll, so the status bar reported the one thing
+it knew — a run is going, and how long it has been going — because a bar
+advancing on a timer would have been an invention.
+
+What changed is what is knowable, not the rule. `run_collecting_watched` takes a
+`Progress` handle the pipeline writes two atomics into, and the denominator is
+the run's own tile count, fixed before the first tile starts. So the bar is
+tiles finished over tiles total: a measurement, in jumps, with no finish
+estimate beside it because tiles over glass and tiles over tissue cost quite
+different amounts. `Stop` in the status bar and escape both end a run, within
+about one tile — measured at 1.45 s on a whole-slide level-0 run. Starting a
+second run still supersedes the first; stopping is the different gesture, and it
+leaves no successor.
 
 **What is not done**, stated rather than left to be discovered:
 
@@ -708,12 +717,6 @@ it.
   until they are moved together; the software path needs no wgpu at all, so it
   went first. Composition is 1.27 ms against a 16.7 ms frame (§3.4b), so this
   is a missing optimisation and not a missing feature.
-- **Detection cannot be interrupted, and reports no progress fraction**, per
-  above. This mattered little at 1.24 s and matters considerably at the 33.5 s
-  a whole-slide run now takes (§8.9): the window stays live and a second run
-  supersedes the first, so nothing is stuck, but there is no way to stop a run
-  and no way to see how far along it is. Both need a callback through
-  `run_collecting`, which is a change to the pipeline rather than to this.
 - **A coarse run gives coarse outlines.** A nucleus detected at level 2 is
   traced in level-2 pixels and scaled up, so it is blocky when zoomed back in.
   This is honest — the run never read the detail — but it means the outlines
@@ -1632,17 +1635,80 @@ a whole-slide run has no way to stop it and no idea how far along it is. That
 needs a callback through `run_collecting`, which is a pipeline change rather
 than an application one.
 
+### 8.10 Cancellation and a progress fraction — **done**, in the pipeline
+
+§8.9 left these as the top gap: a whole-slide run is 33.5 s, and a run that long
+with no way to stop it and no sense of how far along it is is what a person
+meets first. §3.6 had listed both as "not offered" since the beginning, and the
+reason given was sound — `run_collecting` was one synchronous call with nothing
+to poll, so a bar beside it would have been advancing on a timer, which §6 calls
+an invention rather than a measurement.
+
+What changed is not the honesty rule but what is knowable. The pipeline already
+tiles, so there is a **denominator that exists before the first tile starts**:
+the run's own tile count. Tiles finished over tiles total is a measurement.
+
+**A handle, not a callback.** The obvious shape is a closure the loop calls, and
+it is the wrong one here: the loop is a rayon `par_iter`, so a callback fires
+from whichever of twenty workers finished a tile, and every caller would need it
+`Sync` and would be drawing its progress from inside the pipeline's threads.
+`Progress` inverts that — the pipeline only ever writes two atomics, wait-free,
+and the reader polls when it suits. The viewer reads it once a frame. A reader
+that never polls costs the run two relaxed increments per tile.
+
+**What the fraction is honest about.** Tiles, not time. Tiles over glass are far
+cheaper than tiles over tissue, so it advances in jumps, and no finish estimate
+is offered beside it because a linear extrapolation would be exactly the fiction
+the old elapsed-seconds display was written to avoid. Before the grid is built
+there is no denominator, and `Detector::fraction` returns `None` for that gap
+rather than `Some(0.0)` — a bar at zero and a bar that is stuck look identical.
+
+**The bug this found, which is the part worth keeping.** `Progress::start`
+originally cleared the cancelled flag, so a handle could be reused. That is the
+tidy-looking version and it is a silent failure: `cancel` and the run's start
+happen on *different threads* — in the viewer, the UI thread and a worker — so a
+stop requested in the window between them is wiped by the run it was meant to
+stop. Clearing is now the caller's job, in `Progress::reset`, done before the
+worker is spawned.
+
+It was caught because `cancelling_stops_the_run_before_it_finishes_its_tiles`
+asserts the run stopped **early**, not merely that it returned an error. A test
+that checked only the error would have passed against an implementation that ran
+all 16 tiles and reported cancellation at the end — which is the exact failure
+this feature exists to prevent, and is indistinguishable from the outside. That
+is §6's rule in its narrow form: know what value would have made the check fail.
+
+**What stopping actually costs, measured.** The flag is read at the top of each
+tile, so a run ends within about one tile — and one tile is not negligible. A
+2052 px tile at level 0 is around 1.7 s on one thread. `examples/stop_a_run.rs`
+runs the whole slide, asks it to stop at three seconds, and reports: stopped
+**1.45 s later**, after 36 of 391 tiles, with the fraction reading 8.95% when
+asked. The first version of this documentation claimed "well under a second at
+any level", which that measurement contradicted; the interface now says "a
+second or two" because that is what it does.
+
+The integration tests cancel *before* the run starts rather than racing a
+sleeping thread against a fixture that finishes in a second — deliberately, so
+they test the same branch without being flaky. `stop_a_run` is the other half,
+and it is an example rather than a test for the reason `gestures.rs` is: it
+measures wall-clock behaviour on a real slide, which is a thing to look at
+rather than a thing to assert.
+
+**In the window.** The status bar shows a real bar with the percentage written
+into it, and a `Stop` button beside it. Escape stops a run too — it already
+meant "abandon what is in progress" for a zoom rectangle, and a whole-slide run
+started by mistake is the same gesture. The band wins when both are live, since
+a person drawing a rectangle during a background run means the rectangle. A
+stopped run keeps the previous overlay and says "Detection stopped after 36 of
+391 tiles", which tells the person how much of the slide the outlines they are
+still looking at do *not* cover. It never says "failed": stopping was the
+instruction, and `Outcome::Cancelled` is a separate variant from
+`Outcome::Failed` so a reworded error string cannot turn one into the other.
+
 ### 8.8 What is still missing
 
 In the order it is worth having.
 
-- **Cancellation and a progress fraction for detection.** Promoted here by
-  §8.9: a whole-slide run is 33.5 s, and a run that long with no way to stop it
-  and no sense of how far along it is is the gap a person now meets first. Both
-  need `run_collecting` to take a callback it can poll between tiles — the tile
-  loop is already there to hang it on, and the tile count is already the honest
-  denominator, which is what makes the fraction a real one rather than a timer.
-  It is a pipeline change, which is why it is not done here.
 - **The project browser pane.** §8.3's format is written and nothing in the
   application creates or opens a project, so `project.rs` is a library with no
   caller. Writing the pane is what would make it real; it is also the point at

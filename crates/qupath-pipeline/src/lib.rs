@@ -54,6 +54,7 @@ mod detections;
 mod merge;
 mod objects;
 mod overlaps;
+mod progress;
 mod refine;
 mod stain;
 mod tiles;
@@ -71,6 +72,7 @@ pub use detections::{AREA, Detections, MEAN};
 pub use merge::{FOREGROUND, Merger};
 pub use objects::{Extent, ObjectFilter, RegionStats};
 pub use overlaps::{Candidate, resolve_overlaps};
+pub use progress::Progress;
 pub use refine::{BoundaryRefiner, CLEANUP_SIGMA, SIGMA_FLOOR};
 pub use stain::Stains;
 pub use tiles::{MAX_TILE_SIZE, PREFERRED_TILE_SIZE, Tile, tile_grid, tile_overlap};
@@ -473,6 +475,21 @@ pub enum PipelineError {
         /// The level's height.
         level_height: u32,
     },
+
+    /// The run was stopped by [`Progress::cancel`].
+    ///
+    /// Distinct from a failure because the caller needs to tell them apart: a
+    /// cancelled run is what the person asked for and wants no error in the
+    /// status bar, where a decode that failed wants one. Carries how far it had
+    /// got, because "stopped after 41 of 5776 tiles" is a more useful thing to
+    /// report than "stopped".
+    #[error("detection cancelled after {done} of {total} tiles")]
+    Cancelled {
+        /// Tiles finished before the run stopped.
+        done: u64,
+        /// Tiles the run would have processed.
+        total: u64,
+    },
 }
 
 /// Per-worker scratch, allocated once per rayon job and reused for every tile
@@ -609,7 +626,7 @@ const LAPLACIAN: [f32; 9] = [0.0, -1.0, 0.0, -1.0, 4.0, -1.0, 0.0, -1.0, 0.0];
 /// Fails if the level does not exist, the region leaves it, or a tile cannot
 /// be decoded.
 pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, PipelineError> {
-    let (outcome, _) = run_inner(slide, region, params, false)?;
+    let (outcome, _) = run_inner(slide, region, params, false, None)?;
     Ok(outcome)
 }
 
@@ -637,7 +654,36 @@ pub fn run_collecting(
     region: Region,
     params: Params,
 ) -> Result<(Outcome, Detections), PipelineError> {
-    let (outcome, detections) = run_inner(slide, region, params, true)?;
+    let (outcome, detections) = run_inner(slide, region, params, true, None)?;
+    Ok((
+        outcome,
+        detections.expect("run_inner returns detections when asked for them"),
+    ))
+}
+
+/// [`run_collecting`], watched through `progress` and stoppable through it.
+///
+/// Identical in what it detects — the handle is written to and read from, and
+/// changes nothing about the run — so every claim [`run_collecting`] makes holds
+/// here. `a_watched_run_finds_what_an_unwatched_one_finds` asserts that rather
+/// than leaving it to this sentence.
+///
+/// Pass a handle that outlives the call, and read it from another thread while
+/// this one blocks: `Progress::fraction` for how far along, `Progress::cancel`
+/// to stop. A cancelled run returns [`PipelineError::Cancelled`], which is not
+/// a failure and should not be reported as one.
+///
+/// # Errors
+///
+/// Fails if the level does not exist, the region leaves it, or a tile cannot be
+/// decoded — and returns [`PipelineError::Cancelled`] if the run was stopped.
+pub fn run_collecting_watched(
+    slide: &Slide,
+    region: Region,
+    params: Params,
+    progress: &Progress,
+) -> Result<(Outcome, Detections), PipelineError> {
+    let (outcome, detections) = run_inner(slide, region, params, true, Some(progress))?;
     Ok((
         outcome,
         detections.expect("run_inner returns detections when asked for them"),
@@ -649,6 +695,7 @@ fn run_inner(
     region: Region,
     params: Params,
     collect: bool,
+    progress: Option<&Progress>,
 ) -> Result<(Outcome, Option<Detections>), PipelineError> {
     let level = slide
         .levels()
@@ -687,6 +734,12 @@ fn run_inner(
         params.tile_overlap,
     );
 
+    // The denominator, known before any tile runs, which is what makes the
+    // fraction a real one. See `progress`' module documentation.
+    if let Some(progress) = progress {
+        progress.start(tiles.len() as u64);
+    }
+
     let clocks = StageClocks::default();
     let markers = AtomicU64::new(0);
     let labelled = AtomicU64::new(0);
@@ -712,6 +765,19 @@ fn run_inner(
         .enumerate()
         .map(|(index, tile)| {
             SCRATCH.with_borrow_mut(|scratch| {
+                // Before any work, so a cancelled run stops within one tile
+                // rather than one tile plus a decode. Every worker still in
+                // flight takes this branch on its next tile, and rayon's
+                // `collect` propagates the first error it sees.
+                if let Some(progress) = progress
+                    && progress.is_cancelled()
+                {
+                    return Err(PipelineError::Cancelled {
+                        done: progress.done(),
+                        total: tiles.len() as u64,
+                    });
+                }
+
                 let rect = tile.padded;
                 let width = rect.width as usize;
                 pixels.fetch_add(
@@ -846,7 +912,7 @@ fn run_inner(
                 // thing a tile cannot decide alone: whether a neighbour found the
                 // same nucleus. Only objects reaching another tile's rectangle
                 // can, so only those get a mask built for them.
-                Ok(harvest(
+                let harvested = harvest(
                     scratch,
                     index,
                     tile,
@@ -854,7 +920,13 @@ fn run_inner(
                     width,
                     found.nuclei,
                     collect.then_some(params.level),
-                ))
+                );
+                // Last, so the count never runs ahead of the work: a reader
+                // seeing n tiles done can rely on n tiles' objects existing.
+                if let Some(progress) = progress {
+                    progress.finished_tile();
+                }
+                Ok(harvested)
             })
         })
         .collect();

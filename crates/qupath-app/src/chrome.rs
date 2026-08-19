@@ -36,6 +36,12 @@ pub enum Command {
     Actual,
     /// Detect cells in what the view is showing, replacing any run going.
     Detect,
+    /// Stop the run in flight, leaving no successor.
+    ///
+    /// Distinct from `Detect`, which also ends the run going: that one replaces
+    /// it, this one just stops. A whole-slide run started by mistake wants the
+    /// core back.
+    StopDetecting,
     /// Show or hide the outlines of what was detected, without re-running.
     ToggleOverlay,
     /// Show or hide the analysis panel.
@@ -1092,7 +1098,7 @@ fn help(ui: &mut egui::Ui) {
             for (gesture, effect) in [
                 ("Left-drag", "Pan. The view stays on the slide."),
                 ("Right-drag", "Draw a box; releasing zooms to it."),
-                ("Escape", "Abandon a box mid-drag."),
+                ("Escape", "Abandon a box mid-drag, or stop a detection run."),
                 (
                     "Scroll",
                     "Zoom about the cursor. Two fingers on a trackpad.",
@@ -1140,10 +1146,16 @@ fn help(ui: &mut egui::Ui) {
 ///
 /// The button is disabled while a run is going *and* says so in its label,
 /// because a control that is merely greyed out is indistinguishable from one
-/// that is broken. The elapsed time is what stands in for a progress fraction:
-/// `run_collecting` reports nothing until it returns, and a bar that advanced
-/// on a timer would be an invention rather than a measurement — see `detect`'s
-/// module documentation.
+/// that is broken.
+///
+/// While a run is going this shows a real fraction and a way to stop. Both were
+/// absent for as long as `run_collecting` was one opaque call — the elapsed
+/// time stood in for the fraction, because a bar advancing on a timer would
+/// have been an invention rather than a measurement. `run_collecting_watched`
+/// changed what is knowable: the denominator is the run's own tile count, fixed
+/// before the first tile starts, so the bar measures something. It is still
+/// tiles and not time, which is why no finish estimate is offered beside it —
+/// tiles over glass are far cheaper than tiles over tissue.
 fn detection(ui: &mut egui::Ui, app: &App, command: &mut Command) {
     let running = app.detector.is_running();
     ui.add_enabled_ui(app.open.is_some() && !running, |ui| {
@@ -1162,11 +1174,45 @@ fn detection(ui: &mut egui::Ui, app: &App, command: &mut Command) {
     });
 
     if running {
-        ui.add(egui::Spinner::new().size(14.0));
-        if let Some(elapsed) = app.detector.elapsed() {
-            ui.label(
-                egui::RichText::new(format!("detecting… {:.0} s", elapsed.as_secs_f64())).weak(),
-            );
+        let elapsed = app
+            .detector
+            .elapsed()
+            .map(|elapsed| format!("{:.0} s", elapsed.as_secs_f64()))
+            .unwrap_or_default();
+        match app.detector.fraction() {
+            // A real fraction, so a real bar. The percentage is written into it
+            // rather than left to the fill, because a bar at 3% and a bar that
+            // is stuck look identical.
+            Some(fraction) => {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "a fraction in 0.0..=1.0; f32 carries it to seven digits"
+                )]
+                let fraction = fraction as f32;
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .desired_width(90.0)
+                        .text(egui::RichText::new(format!("{:.0}%", fraction * 100.0)).small()),
+                );
+                ui.label(egui::RichText::new(elapsed).weak());
+            }
+            // Between the worker starting and the tile grid being built there
+            // is no denominator yet. A spinner says "going" without claiming a
+            // position, which is the honest thing for that gap.
+            None => {
+                ui.add(egui::Spinner::new().size(14.0));
+                ui.label(egui::RichText::new(format!("detecting… {elapsed}")).weak());
+            }
+        }
+        if ui
+            .button("Stop")
+            .on_hover_text(
+                "Stop the run. It ends within a second or two \u{2014} one tile\u{2019}s \
+                 work \u{2014} and the outlines from the last finished run are kept.",
+            )
+            .clicked()
+        {
+            *command = Command::StopDetecting;
         }
     } else if let Some(overlay) = &app.detector.overlay {
         // Only once there is something to show or hide. A toggle for an overlay

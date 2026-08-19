@@ -67,10 +67,11 @@
 //! drawn.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
-use qupath_pipeline::{self as pipeline, Micron, Params, Region};
+use qupath_pipeline::{self as pipeline, Micron, Params, Progress, Region};
 use qupath_slide::{Level, Slide};
 use qupath_viewer::{Overlay, Viewport};
 
@@ -215,12 +216,36 @@ pub struct Detector {
     pub overlay: Option<Overlay>,
     /// A sentence about the last run, for the status bar.
     pub message: Option<String>,
+    /// How far the run in flight has got, and the way to stop it.
+    ///
+    /// One handle for the life of the detector rather than one per run: the
+    /// worker holds a clone of the `Arc` and writes to it, this side reads it
+    /// once a frame and can `cancel` it from the UI thread. Reset by
+    /// [`Detector::start`] *before* the worker is spawned, which is the order
+    /// `qupath_pipeline::Progress::reset` documents and the reason it is the
+    /// caller's job.
+    progress: Arc<Progress>,
 }
 
 /// What a finished run sends back.
 struct Message {
     generation: u64,
-    result: Result<(Overlay, Summary), String>,
+    result: Outcome,
+}
+
+/// How a run ended.
+///
+/// Cancellation is a third case rather than an error, because the status bar
+/// must not call it a failure: it is what the person asked for. Keeping it
+/// typed here rather than matching on an error string is the difference between
+/// a distinction the compiler holds and one a message format could break.
+enum Outcome {
+    /// The run finished and found these.
+    Found(Overlay, Summary),
+    /// The run was stopped, having done this many of this many tiles.
+    Cancelled { done: u64, total: u64 },
+    /// The run failed.
+    Failed(String),
 }
 
 /// The numbers a finished run reports, kept apart from the geometry because
@@ -260,6 +285,7 @@ impl Detector {
             started: None,
             overlay: None,
             message: None,
+            progress: Arc::new(Progress::new()),
         }
     }
 
@@ -273,6 +299,39 @@ impl Detector {
     #[must_use]
     pub fn elapsed(&self) -> Option<Duration> {
         self.started.map(|started| started.elapsed())
+    }
+
+    /// How far the run in flight has got, in `0.0..=1.0`.
+    ///
+    /// `None` when nothing is running, and also for the moment between the
+    /// worker being spawned and the pipeline building its tile grid — the
+    /// status bar shows the elapsed time it already showed, rather than a zero
+    /// that would read as a stalled run.
+    ///
+    /// Tiles finished over tiles total, which is not time: tiles over glass are
+    /// far cheaper than tiles over tissue, so this advances in jumps. That is
+    /// the honest number and the reason no finish time is offered with it.
+    #[must_use]
+    pub fn fraction(&self) -> Option<f64> {
+        self.is_running()
+            .then(|| self.progress.fraction())
+            .flatten()
+    }
+
+    /// Asks the run in flight to stop.
+    ///
+    /// Takes effect within about one tile rather than instantly — measured at
+    /// **1.45 s** on a whole-slide level-0 run, which is one tile's work on one
+    /// thread. So [`Detector::is_running`] stays true for a second or two
+    /// afterwards and the result arrives through [`Detector::poll`] like any
+    /// other. Harmless when nothing is running.
+    ///
+    /// This is a *stop*, not a supersede: [`Detector::start`] already replaces a
+    /// run, and the difference is that this one leaves no successor. A person
+    /// who started a whole-slide run by mistake wants the core back, not another
+    /// run.
+    pub fn cancel(&self) {
+        self.progress.cancel();
     }
 
     /// Throws away the overlay and anything in flight.
@@ -323,6 +382,11 @@ impl Detector {
 
         self.generation += 1;
         let generation = self.generation;
+        // Before the worker exists, so a `cancel` from this thread can never be
+        // wiped by the run it was meant to stop. `Progress::reset` documents the
+        // race this order avoids.
+        self.progress.reset();
+        let progress = Arc::clone(&self.progress);
         let (sender, receiver) = channel();
         self.incoming = Some(receiver);
         self.started = Some(Instant::now());
@@ -336,8 +400,8 @@ impl Detector {
         // run instead of waiting ninety seconds for one.
         std::thread::spawn(move || {
             let started = Instant::now();
-            let result = detect(&path, index, region, tuning).map(|(overlay, objects)| {
-                (
+            let result = match detect(&path, index, region, tuning, &progress) {
+                Ok((overlay, objects)) => Outcome::Found(
                     overlay,
                     Summary {
                         objects,
@@ -347,8 +411,14 @@ impl Detector {
                         capped,
                         deepened,
                     },
-                )
-            });
+                ),
+                // Matched on the variant rather than on the message, so a
+                // reworded error cannot turn a cancellation into a failure.
+                Err(pipeline::PipelineError::Cancelled { done, total }) => {
+                    Outcome::Cancelled { done, total }
+                }
+                Err(error) => Outcome::Failed(error.to_string()),
+            };
             // Ignored deliberately: a closed channel means the viewer moved on
             // or shut down, and there is nobody left to tell.
             let _ = sender.send(Message { generation, result });
@@ -387,11 +457,21 @@ impl Detector {
         self.started = None;
 
         match message.result {
-            Ok((overlay, summary)) => {
+            Outcome::Found(overlay, summary) => {
                 self.message = Some(describe(&summary));
                 self.overlay = Some(overlay);
             }
-            Err(error) => {
+            Outcome::Cancelled { done, total } => {
+                // Said plainly and without the word "failed": stopping was the
+                // instruction. The tile counts are in it because "stopped at 41
+                // of 5776" tells the person how much of the slide the overlay
+                // they are still looking at does *not* cover.
+                self.message = Some(format!("Detection stopped after {done} of {total} tiles."));
+                // The previous overlay is kept, for the same reason a failure
+                // keeps it: a stopped run is not a reason to throw away results
+                // the person is still looking at.
+            }
+            Outcome::Failed(error) => {
                 self.message = Some(format!("Detection failed: {error}"));
                 // The previous overlay is kept. A failed run is not a reason to
                 // throw away results the user is still looking at.
@@ -439,8 +519,9 @@ fn detect(
     level: usize,
     region: Region,
     tuning: Micron,
-) -> Result<(Overlay, usize), String> {
-    let slide = Slide::open(path).map_err(|error| error.to_string())?;
+    progress: &Progress,
+) -> Result<(Overlay, usize), pipeline::PipelineError> {
+    let slide = Slide::open(path)?;
     // The slide's own pixel size, not an assumed one. `Params::default`
     // hardcodes CMU-1's 0.4990 µm/px, so a slide scanned at any other size got
     // every micron-derived filter at the wrong scale -- see `VIEWER.md` §8.0.
@@ -452,8 +533,7 @@ fn detect(
             .microns_per_pixel()
             .map_or_else(Params::default, |mpp| tuning.at(mpp))
     };
-    let (outcome, detections) =
-        pipeline::run_collecting(&slide, region, params).map_err(|error| error.to_string())?;
+    let (outcome, detections) = pipeline::run_collecting_watched(&slide, region, params, progress)?;
 
     // Read off the level table rather than assumed. A run at any level but 0
     // has a downsample that is not 1, and an overlay built as though it were
@@ -804,6 +884,52 @@ mod tests {
     /// 21% of the slide's width labelled as a partial answer. The numbers are
     /// CMU-1's real level-0 extent, so this fails if the cap is ever lowered
     /// back under a whole slide without that being a decision somebody made.
+    /// A detector that has never run reports no progress and survives a stop.
+    ///
+    /// The reachable bad state here is a `fraction` of `Some(0.0)` before
+    /// anything starts, which a status bar would draw as a bar sitting at zero
+    /// — indistinguishable from a run that has stalled on its first tile. It
+    /// must be `None`, so the interface can show nothing at all.
+    #[test]
+    fn an_idle_detector_reports_no_fraction() {
+        let detector = Detector::new();
+        assert!(!detector.is_running());
+        assert_eq!(detector.fraction(), None);
+
+        // Stopping nothing is not an error, because the `Stop` button and the
+        // escape key can both arrive after a run has already finished — the
+        // result is in flight and `is_running` is still true when the key goes
+        // down. A guard that panicked or a flag left set would break the *next*
+        // run, which is the failure this asserts against.
+        detector.cancel();
+        detector.cancel();
+        assert!(!detector.is_running());
+        assert_eq!(detector.fraction(), None);
+    }
+
+    /// `fraction` is gated on a run being in flight, not on the handle alone.
+    ///
+    /// A finished run leaves its handle reading 1.0 — that is what
+    /// `a_finished_run_leaves_the_handle_complete` asserts in the pipeline's own
+    /// suite. If `fraction` read the handle unconditionally, the status bar
+    /// would show a full progress bar forever after the first run, next to a
+    /// control that is no longer running. The `is_running` gate is what makes it
+    /// disappear, and this pins that gate.
+    #[test]
+    fn a_detector_that_is_not_running_hides_a_completed_fraction() {
+        let detector = Detector::new();
+        // Standing in for a finished run: the handle carries a full fraction,
+        // which is exactly the state a completed run leaves behind.
+        detector.progress.reset();
+        detector.progress.cancel();
+        assert!(!detector.is_running());
+        assert_eq!(
+            detector.fraction(),
+            None,
+            "a completed run's fraction must not outlive the run"
+        );
+    }
+
     #[test]
     fn a_fitted_view_of_cmu1_reads_the_whole_slide() {
         let level = level(0, 46_000, 32_914, 1.0);
