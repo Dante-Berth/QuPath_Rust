@@ -630,18 +630,52 @@ the outlines it finds; `h` hides them without re-running, and `d` starts a run.
 The pipeline call and the `Overlay` are unchanged from what §3.5 built, so
 `crates/qupath-app/src/detect.rs` is two decisions and no new geometry.
 
-**The region is the view, at the level the viewer is showing it at** — not at
-level 0. That is what makes the button's cost independent of the zoom, and it
-is the whole reason the feature is usable: on `CMU-1.svs` a fitted view reads
+**The region is the view; the level is the coarsest one that can still resolve
+a nucleus** — capped at **1.0 µm/px**, which is not always the level the viewer
+is drawing. This was originally the viewer's own level, and that is recorded
+here rather than quietly replaced, because the reasoning for it was sound and
+the thing it missed is the interesting part. Reading the viewer's level made
+the button's cost independent of the zoom: on `CMU-1.svs` a fitted view reads
 level 2, where the entire slide is 5.6 Mpx and the run takes **1.24 s**, while
-the same view at level 0 is 1.5 Gpx. A 1:1 view of tissue is 1.05 Mpx and
-**0.38 s** for 1357 nuclei. `region_for` is a pure function of a viewport and a
-level — the conversion into level pixels, the clip to the level, the cap, and a
-view panned off the slide are all unit tests with no slide and no window.
+the same view at level 0 is 1.5 Gpx.
 
-The cap exists but does not fire in normal use, and the test says so rather
-than the comment: the viewer reads the level that matches the zoom, so the
-pixels behind a window stay near the window's own size at every scale.
+What that got wrong is that a level cheap enough to *draw* is not always fine
+enough to *measure*. Detection parameters are in microns and the pipeline
+converts them with the level's pixel size, so a coarse run is arithmetically
+consistent — but no conversion puts back evidence the downsampling removed. At
+CMU-1's level 2 a pixel is 2.0 µm and `Micron::min_area`'s 10 µm² is under four
+pixels of area, so what cleared the filters was clumps of stained tissue whose
+size and contrast at that downsample resemble a nucleus at level 0. The counts
+say it: a fitted whole-slide view found **1638** objects where one screenful of
+tissue found **1357**, when the whole slide holds far more nuclei than one
+screenful. That is a result that looks like a result, which is the failure this
+file is written against.
+
+So the rule is a *cap* rather than a fixed level 0 — a run at a moderate zoom
+still reads the cheap level it always did, and 1.0 µm/px keeps the smallest
+surviving object at ten pixels of area, enough for a shape rather than a blob.
+On CMU-1, whose levels are 0.499, 2.0 and 8.0 µm/px, only level 0 clears it, so
+a zoomed-out run there reads level 0. A slide recording no pixel size gets the
+viewer's level unchanged: without one there is no way to know what any level
+resolves, and `Params::default`'s assumed pixel size is deliberately not reused,
+because guessing the physical scale is exactly what produces the confident wrong
+answer this is meant to prevent. A 1:1 view of tissue is 1.05 Mpx and **0.38 s**
+for 1357 nuclei, unchanged — at that zoom the two rules pick the same level.
+`region_for` is a pure function of a viewport and a level — the conversion into
+level pixels, the clip to the level, the cap, and a view panned off the slide
+are all unit tests with no slide and no window.
+
+**The tradeoff moved onto `MAX_PIXELS`.** It used to be true that the cap did
+not fire, because the run read the level the viewer drew and the pixels behind a
+window stayed near the window's own size at any scale —
+`the_level_the_viewer_shows_keeps_a_run_under_the_cap_at_any_zoom` still asserts
+that of `region_for` alone. Asking for a finer level than the view is exactly
+the case that cap was written for, so it is now load-bearing rather than
+theoretical. A fitted view of CMU-1 is 1444 Mpx at level 0; capped at 64 Mpx, a
+run reads the middle **21%** of the slide's width, and the status bar says
+"centre of the view only" when it does. That beats both detecting nothing and a
+fifteen-second freeze, but it is a partial answer — and it is why detecting a
+*whole* slide needs tiling rather than a bigger cap (§8.8).
 
 **A result must never outlive the slide it was found on.** Outlines are in that
 slide's coordinates, so drawing them over a different slide puts plausible
@@ -670,8 +704,9 @@ it.
   went first. Composition is 1.27 ms against a 16.7 ms frame (§3.4b), so this
   is a missing optimisation and not a missing feature.
 - **Detection cannot be interrupted**, per above. A run over a region the cap
-  had to shrink is the case that would want it, and that case is currently
-  unreachable from the interface.
+  had to shrink is the case that would want it, and since the level cap that
+  case is now reachable from the interface: any sufficiently zoomed-out run on
+  CMU-1 hits it.
 - **A coarse run gives coarse outlines.** A nucleus detected at level 2 is
   traced in level-2 pixels and scaled up, so it is blocky when zoomed back in.
   This is honest — the run never read the detail — but it means the outlines
@@ -1508,6 +1543,18 @@ renders, and the trackpad and the window manager are not in them.
 
 In the order it is worth having.
 
+- **Tiled whole-slide detection.** The one gap a person meets by using the
+  application rather than by reading it. "Detect cells" reads one region in one
+  `run_collecting` call, so `MAX_PIXELS` bounds it, and since §3.6's level cap a
+  fitted view of CMU-1 gets the middle 21% of the slide's width — labelled, but
+  still a partial answer to a question that reads like a whole-slide one. The
+  fix is not a bigger cap: 1444 Mpx at level 0 is a quarter-hour of pipeline at
+  the measured 4.5 Mpx/s, in one uninterruptible call. It is a loop over tiles
+  with overlap, deduplicating objects that straddle a seam, which is what QuPath
+  does and is a real piece of work rather than a parameter change. It also wants
+  the two things §3.6 lists as not offered — cancellation and a progress
+  fraction — which become honest the moment there is a tile count to report, and
+  are the reason this is worth doing as one piece.
 - **The project browser pane.** §8.3's format is written and nothing in the
   application creates or opens a project, so `project.rs` is a library with no
   caller. Writing the pane is what would make it real; it is also the point at
