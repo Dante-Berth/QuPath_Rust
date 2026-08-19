@@ -46,21 +46,60 @@ segmentation, `refineBoundary`, and the area filter.
 **What is missing is the tail**, and none of it changes how many objects there
 are: ROI vertices, cell expansion, the measurements.
 
-**The count**, on the profiled 4000x4000 region of CMU-1:
+**The count.** This was quoted for several sessions as 26,647 objects against
+QuPath's 25,757 cells — **1.035x** — on the profiled 4000x4000 region. That
+number is still exactly right and it was the wrong number to quote, because it
+is one region measured once, and it is the **best of ten**.
+
+Measured across ten regions of CMU-1, chosen by the slide rather than by hand
+(`cargo run --release --example tissue_scan -p qupath-slide` ranks them by
+optical density; picking coordinates by eye put four of the first six on glass,
+where there is nothing to disagree about):
 
 | | |
 | --- | ---: |
-| pipeline objects | 26,647 |
-| QuPath cells | 25,757 |
-| gap | **1.035x** |
+| pipeline objects | 156,979 |
+| QuPath cells | 147,351 |
+| gap, pooled | **1.0653** |
+| range across regions | **1.012 – 1.129** |
 
-From 1.86x, and every step of the way there was measured against the step before
-it rather than predicted. **Do not read 1.035x as clean.** `DIVERGENCES.md`
-D-008: QuPath resolves its seam overlaps on *cells*, using smoothed polygon
-geometry, where this compares nucleus pixel masks. A cell is larger than its
-nucleus, so QuPath removes at least as many duplicates as this does — and 1,712
-were removed here against a residual gap of 890. Same order of magnitude, so
-that is the first place to look, not the last.
+Reproduce with `./parity/record-cell-counts.sh` then
+`cargo run --release --example cell_counts -p qupath-pipeline`.
+
+**D-008 is real but is not the whole gap, and the sweep is what shows it.** The
+prediction was that the gap comes from resolving seam overlaps on nucleus masks
+where QuPath resolves them on larger, smoothed cells. Three of the ten regions
+are small enough to be a **single tile** — no seams at all, zero duplicates
+removed — so their gap is everything that is *not* seam resolution. They still
+disagree: 1.0121, 1.0177, and **1.1130**.
+
+**What the gap actually tracks is cell density, inversely:**
+
+| region | cells/Mpx | ratio | tiles |
+| --- | ---: | ---: | ---: |
+| single-tile-no-seams-2 | 1741 | 1.0177 | 1 |
+| profiled-99pc-tissue | 1688 | 1.0346 | 4 |
+| single-tile-no-seams | 1597 | 1.0121 | 1 |
+| dense-2 | 1542 | 1.0337 | 4 |
+| dense-5 | 1135 | 1.0817 | 4 |
+| dense-4 | 1066 | 1.1293 | 4 |
+| dense-7 | 1038 | 1.1041 | 4 |
+| dense-3 | 1007 | 1.0624 | 4 |
+| single-tile-no-seams-3 | 931 | 1.1130 | 1 |
+
+Dense regions agree to within 1–3.5%, sparse ones diverge by 6–13%, and the
+seam count does not sort the table — density does. That points away from
+`overlaps.rs` and at the **filters**: a sparse region is mostly background, so
+what differs is which faint candidates survive the mean-intensity and area
+tests. `ObjectFilters.json` pins those stages against QuPath on 17 recorded
+images and they pass, which means the disagreement is in what reaches them —
+the background estimate, or the threshold applied to it — rather than in the
+tests themselves.
+
+**So the honest statement is: 1.065x pooled, 1.012–1.129 by region, direction
+always the same (this over-counts), cause identified as density-dependent and
+not primarily D-008.** That is a weaker claim than the file used to make and a
+better-founded one.
 
 **The time**: 70.1 Mpx/s on a 9000x9000 region, 25 tiles on 20 threads — a grid
 large enough to fill the pool. That is **down** from 80.4 and it is not a

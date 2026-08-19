@@ -22,7 +22,7 @@ build.
 | `qupath-watershed` | Marker-controlled flood, bucket queue, 4/8-connected labelling, filled-region tracing | `WatershedFlood.json`, 3 cases; `RegionalMaxima.json` labels, 13 surfaces; `ObjectFilters.json` regions, 17 images | queue 20-32x vs heap; flood 1.40x vs previous; labelling and tracing identical |
 | `qupath-filters` | MIN/MAX rank filter, Gaussian blur, convolution, morphological reconstruction | `RankFilterMinMax.json` 42 cases; `GaussianBlur.json` 10 kernels + 12 images; `LaplacianConvolution.json` 5 scales + 17 images; `RegionalMaxima.json` 11 reconstructions + 13 surfaces | rank 3.1-9.7x vs ImageJ; blur, convolution and reconstruction bit-identical |
 | `qupath-slide` | Aperio SVS / tiled TIFF reader | `SlideRegion.json`, 5 regions | 4000x4000 region in 0.09 s |
-| `qupath-pipeline` | Tiles a region QuPath's way and streams each tile through every stage from the deconvolution to the area filter | `ColourDeconvolution*.json`; `ObjectFilters.json` statistics and decisions, 17 images; `MergeAndSplit.json`; `RefineBoundary.json` | 70.1 Mpx/s on a saturated grid; 26,647 objects against QuPath's 25,757 cells |
+| `qupath-pipeline` | Tiles a region QuPath's way and streams each tile through every stage from the deconvolution to the area filter | `ColourDeconvolution*.json`; `ObjectFilters.json` statistics and decisions, 17 images; `MergeAndSplit.json`; `RefineBoundary.json` | 70.1 Mpx/s on a saturated grid; 1.065x QuPath's cell count pooled over ten regions (1.012-1.129 by region) |
 
 **The detection chain is closed.** Every stage `WatershedCellDetection` runs from
 the colour deconvolution to the objects it goes on to measure is ported, pinned
@@ -32,7 +32,11 @@ the regional maxima, the labelling, the flood, the region tracing, the intensity
 filter, the merge, the shape split, `refineBoundary` and the area filter.
 
 **On the profiled 4000x4000 region that is 26,647 objects against QuPath's
-25,757 cells — 1.035x, from 1.86x.** Each figure below is the stage measured
+25,757 cells — 1.035x, from 1.86x.** Read that as one region, not as the
+result: measured over ten regions the pooled gap is **1.065x** and the range is
+**1.012–1.129**, with this region the best of them. See `docs/MEMO.md` §2 for
+the sweep and what the gap actually tracks, which is not the seam resolution
+D-008 predicted. Each figure below is the stage measured
 against the stage before it, never a prediction:
 
 | Stage | Objects | Change |
@@ -594,7 +598,9 @@ never computes.
 
 ### 1.6 The claim
 
-**Object counts: 26,647 against QuPath's 25,757, 1.035x**, on the profiled
+**Object counts: 26,647 against QuPath's 25,757, 1.035x** — one region, and the
+best of the ten later measured; the pooled figure is 1.065x, see `docs/MEMO.md`
+§2 — on the profiled
 4000x4000 region at QuPath's own tiling. That is the first end-to-end count
 comparison this project has been able to make, and D-008 says where the residual
 most likely is.

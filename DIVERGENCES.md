@@ -263,8 +263,31 @@ readily as cells than as nuclei. QuPath therefore removes **at least** as many
 duplicates as this does, and this pipeline's object count is an over-count by
 whatever that difference is. Measured on the profiled region: 1,712 of 28,359
 nuclei are resolved away here, 6.0%, against a residual gap to QuPath of 890
-objects — so the two are the same order of magnitude and this is the first place
-to look for that gap, not the last.
+objects — the same order of magnitude, which is what made this look like the
+explanation.
 
-**Status:** known, quantified in direction, unfixable before cell expansion and
-ROI vertices land. `docs/ROADMAP.md` §1.5b steps 4 and 5.
+**It is not the main explanation, and the ten-region sweep is what settled it.**
+`parity/record-cell-counts.sh` and `examples/cell_counts.rs` compare both
+implementations over ten regions of CMU-1. Three are small enough to be a
+**single tile** — no seams, zero duplicates resolved, so whatever gap remains
+cannot be this entry. Those three come out at **1.0121, 1.0177 and 1.1130**,
+the last of which is the *worst* ratio of any region in the sweep including the
+multi-tile ones.
+
+What the gap tracks instead is **cell density, inversely**: regions above ~1500
+cells/Mpx agree to within 1–3.5% whether or not they have seams, and regions
+below ~1100 diverge by 6–13% whether or not they have seams. Sorting the sweep
+by seam count does not order the ratios; sorting by density does.
+
+So this entry stands as written — the mechanism is real, the direction is right,
+and it still contributes — but it is **not** where the remaining gap mostly
+lives, and the previous phrasing pointed the next reader at the wrong file.
+Sparse regions are mostly background, so the thing that differs is which faint
+candidates survive; `ObjectFilters.json` pins the filters themselves against
+QuPath on 17 images and they pass, which puts the suspicion on what reaches
+them — the background estimate and its threshold — rather than on the tests.
+
+**Status:** known, quantified in direction, contributes but does not dominate.
+Unfixable before cell expansion and ROI vertices land (`docs/ROADMAP.md` §1.5b
+steps 4 and 5). The density-dependent remainder is a separate and currently
+unexplained divergence; see `docs/MEMO.md` §2.

@@ -1,0 +1,19 @@
+{
+  "slide": "CMU-1.svs",
+  "width": 46000,
+  "height": 32914,
+  "microns_per_pixel": 0.499000,
+  "stains": "Color deconvolution stains: Hematoxylin: 0,651 0,701 0,29, Eosin: 0,216 0,801 0,558, Residual: 0,316 -0,598 0,737",
+  "regions": [
+    {"name": "profiled-99pc-tissue", "x": 27776, "y": 5952, "width": 4000, "height": 4000, "cells": 25757, "ms": 17580.7},
+    {"name": "dense-2", "x": 8000, "y": 16000, "width": 4000, "height": 4000, "cells": 23527, "ms": 16303.2},
+    {"name": "dense-3", "x": 36000, "y": 4000, "width": 4000, "height": 4000, "cells": 15364, "ms": 13552.6},
+    {"name": "dense-4", "x": 16000, "y": 20000, "width": 4000, "height": 4000, "cells": 16271, "ms": 13880.2},
+    {"name": "dense-5", "x": 12000, "y": 26000, "width": 4000, "height": 4000, "cells": 17315, "ms": 14652.7},
+    {"name": "dense-6", "x": 40000, "y": 8000, "width": 4000, "height": 4000, "cells": 16204, "ms": 13892.5},
+    {"name": "dense-7", "x": 30000, "y": 12000, "width": 4000, "height": 4000, "cells": 15834, "ms": 14499.0},
+    {"name": "single-tile-no-seams", "x": 28000, "y": 6000, "width": 2048, "height": 2048, "cells": 6389, "ms": 3851.7},
+    {"name": "single-tile-no-seams-2", "x": 8000, "y": 16000, "width": 2048, "height": 2048, "cells": 6965, "ms": 3564.9},
+    {"name": "single-tile-no-seams-3", "x": 16000, "y": 20000, "width": 2048, "height": 2048, "cells": 3725, "ms": 2674.8}
+  ]
+}

@@ -44,6 +44,37 @@ invoking a recorder, so running one there that cannot start does not merely
 fail — it empties a committed fixture and, under `set -e`, takes every recorder
 after it down too.
 
+## End-to-end cell counts
+
+Every other fixture here pins one *stage* against QuPath. `CellCounts.json` pins
+the number the whole pipeline exists to produce, over several regions of one
+slide:
+
+```bash
+./parity/record-cell-counts.sh                       # QuPath's side, needs a JVM
+cargo run --release --example cell_counts -p qupath-pipeline   # ours, and the table
+```
+
+The regions are chosen **by the slide**, from
+`cargo run --release --example tissue_scan -p qupath-slide`, which ranks
+non-overlapping candidates by optical density on the coarsest level. This is not
+fussiness: the first version of the script guessed six regions by eye and four
+came back with 0, 15, 37 and 790 cells. A region of glass cannot disagree about
+anything, so a sweep full of them reports agreement it has not tested.
+
+Three regions are deliberately small enough to be a **single tile**. They have no
+seams, so their gap isolates everything that is not seam resolution — which is
+what showed that `DIVERGENCES.md` D-008, the standing explanation for the gap,
+does not account for most of it. A control that cannot come out differently from
+the treatment is not a control; these can, and did.
+
+Unlike the stage fixtures, this one is **not** asserted by a Rust test. There is
+no tolerance at which "the cell count matches" is currently true — it is 1.065x
+pooled and up to 1.129x by region — and writing a test with a 1.15x bound would
+be picking a number to pass rather than to measure. It is a reported comparison
+until the remaining divergence is understood, per the rule below about never
+widening a tolerance.
+
 ## Tolerances
 
 Exact equality with QuPath does not hold in general: Java dropped `strictfp`

@@ -24,6 +24,7 @@ target
 /data
 # Compiled profiling driver
 /profile/build
+/parity/build
 # Raw JFR recordings and their JVM logs are megabytes and regenerable from
 # profile/run.sh; the derived *-hot.txt summaries are committed instead.
 /docs/profiles/*.jfr
