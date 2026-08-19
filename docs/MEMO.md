@@ -4,8 +4,10 @@ Twenty minutes of orientation before `ROADMAP.md`. It says what this project is
 for, what is actually finished, what is actually faster, and what to distrust.
 
 `ROADMAP.md` is the detail and the plan. `DIVERGENCES.md` is every place the port
-deliberately differs from QuPath. This file is the view from above, and it is
-short on purpose.
+deliberately differs from QuPath. `EVOLUTION.md` is what we learned and what it
+cost — the reverted experiments and the recurring mistakes, which is the part
+`git log` preserves badly. This file is the view from above, and it is short on
+purpose.
 
 ---
 

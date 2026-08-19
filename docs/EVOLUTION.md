@@ -1,0 +1,133 @@
+# Evolution — what we learned, and what it cost
+
+The lessons that outlived the commit that taught them.
+
+`git log` already holds what changed and why, at length: the commit messages
+here run to thirty lines and carry the reasoning. **This file does not repeat
+them.** It exists for the two things git preserves badly:
+
+- **A lesson that recurs.** The same mistake made in three places is one
+  entry here, not three commits to notice a pattern in.
+- **A change that was reverted.** Work that did not survive leaves no code
+  behind, so the only trace is a commit message filed under some other
+  title — "four changes it did not want" is inside a commit about the stage
+  table. Nobody finds that a month later, and the experiment gets repeated.
+
+Read `MEMO.md` for where the project stands, `ROADMAP.md` for the plan,
+`VIEWER.md` for the viewer, `../DIVERGENCES.md` (repo root) for deliberate
+differences from QuPath. This is the layer under all four: why the approach is what it is.
+
+## How to read an entry
+
+Newest first. Each names the commit that taught it, so `git show` gives the
+full account. An entry earns its place by being **transferable** — something
+that would change what the next person tries. A fix that is only interesting
+inside one function belongs in that function's doc comment, not here.
+
+---
+
+## 2026-08 — Looking at a thing is a test that assertions are not
+
+`a14dc59`, `25abc5d`
+
+Four real interface bugs shipped under a green test suite: clipped slider
+labels, a `▸` with no glyph in the atlas, a checkbox whose effect lived in a
+closed panel, and a Reset button that read as another slider row.
+
+The layout tests passed the whole time, and they were not weak tests. **They
+asserted on rectangles, and the rectangles were correct.** What was wrong was
+what the rectangles looked like once filled — text longer than its box, a glyph
+the font did not have, a control in a panel nobody had opened.
+
+Nothing in the project had ever looked at a pane. `examples/chrome` lays the
+interface out with egui and rasterises it through the same software path the
+application uses on a machine with no GPU, so no window and no adapter is
+needed. Four bugs in the first look.
+
+**Transferable:** when the output is an appearance, an assertion on geometry
+is a proxy, and proxies fail quietly. Render it and look. The corollary is in
+`VIEWER.md` §6 and it is stronger than it sounds — offscreen renders are still
+not the running application, and hover, resize and trackpad remain unlooked-at.
+
+**Related:** the checkbox bug is the same shape as the memory
+`test-where-state-ends-up` — the test asserted the gesture (`show_appearance`
+became true) rather than the property that matters
+(`show_appearance && show_metadata`).
+
+## 2026-08 — A cheap level to draw is not a fine enough level to measure
+
+`a14dc59`
+
+Detection read the pyramid level the viewer was drawing. That level is chosen
+to keep *drawing* cheap and says nothing about whether a nucleus survives it.
+At CMU-1's level 2 a pixel is 8 µm and a nucleus is 5–10, so a run started
+while zoomed out found clumps of stained tissue and reported them as an object
+count.
+
+The evidence had been sitting in the module header, written down and read as a
+curiosity: a fitted whole-slide view found **1638** objects where one screenful
+of tissue found **1357**. The whole slide holds far more nuclei than one
+screenful — the coarse run was not finding them.
+
+**Transferable:** parameters in physical units are not enough. The pipeline
+converted microns correctly at every level; what no conversion can do is put
+back evidence the downsampling removed. When a unit conversion makes a
+computation *arithmetically* valid at any scale, ask separately whether the
+evidence survives that scale.
+
+**And:** a number you wrote down and shrugged at is a bug report. Both figures
+were in the file, in a paragraph explaining something else.
+
+## 2026-08 — Verify against the artefact, not against the assumed artefact
+
+`a14dc59`
+
+The tests for the level cap were first written against an assumed CMU-1
+pyramid: four levels, powers of four, level 1 clearing the limit at
+0.998 µm/px. The real file has **three** levels — 0.499, 1.996, 7.984 µm/px —
+and level 1 does not clear it. The test failed and the assumption was wrong,
+not the code.
+
+**Transferable:** a fixture invented from a plausible model of the data will
+agree with code written from the same model, and both can be wrong together.
+Read the real file once. It cost one throwaway example binary here.
+
+## 2026-08 — A cap documented as never firing becomes load-bearing silently
+
+`a14dc59`
+
+`MAX_PIXELS` carried a paragraph explaining that it does not fire in practice,
+which was true: the run read the level the viewer drew, so the pixels behind a
+window stayed near the window's size at any zoom.
+
+The level cap invalidated that in one line. A zoomed-out run now reads level 0,
+a fitted view of CMU-1 is 1444 Mpx, and the cap became the only thing standing
+between the button and a fifteen-second freeze — reading the middle 21% of the
+slide instead.
+
+**Transferable:** "this guard never fires" is a statement about the *callers*,
+not the guard. It expires the moment a caller changes, and nothing fails when
+it does. Grep for the guard's own justification when changing what feeds it.
+
+## 2026-08 — Loop-level tuning ran out before memory traffic did
+
+See the memory `loop-level-tuning-is-exhausted`, and `ROADMAP.md` §5.
+
+Inner-loop rewrites came back at ~1.0x in place, repeatedly, across several
+stages. What remained was memory traffic and doing less work — which is
+`SKILL.md` §0's stated order, arrived at the expensive way.
+
+**Transferable:** the ordering in §0 is not advice, it is a measured property
+of this codebase. Starting at SIMD means measuring 1.0x several times first.
+
+## 2026-08 — Two-binary A/B has a ~5% floor here
+
+See the memory `measure-on-the-saturated-grid`.
+
+Comparing two binaries cannot resolve anything under about 5% on this machine;
+4-tile runs use only P-cores and flatter the result. Sweeping a runtime
+parameter within one binary is the measurement that works.
+
+**Transferable:** below 5%, a two-binary comparison reports noise with a
+confident sign. This is why `ROADMAP.md` §5 asks for the same machine, the
+same thread count and the same fixture on every claim.

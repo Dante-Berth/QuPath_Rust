@@ -229,3 +229,30 @@ These exist because they are the observed failure modes, not hypothetical ones.
 - Work on a branch, one logical change per commit,
   `cargo test && cargo clippy -- -D warnings && cargo fmt --check` green before
   every commit. Never `--no-verify`.
+- **Record the lesson, not the change, in `docs/EVOLUTION.md`.** Not every
+  commit, and not every N commits — a fixed cadence produces filler on a quiet
+  week and misses the one that mattered on a busy one. `git log` already holds
+  what changed; that file holds what would change what the next person *tries*.
+
+  Write an entry when a commit produces one of these, and it is usually neither
+  the largest nor the hardest commit:
+
+  - **A reverted or abandoned experiment.** Highest value in the file, because
+    the code is gone and the only trace is a commit titled after something
+    else. Includes anything measured at ~1.0x and dropped. Record it *with the
+    number* — an experiment recorded without its measurement gets repeated.
+  - **A wrong assumption that a test agreed with.** A fixture built from a
+    model of the data will agree with code built from the same model. When the
+    real artefact disagreed, that is transferable.
+  - **A mistake made in more than one place.** Three commits fixing one shape
+    of bug is one entry, written the third time.
+  - **An invalidated invariant** — a guard documented as never firing that now
+    fires, a comment whose justification a caller change expired.
+
+  Do **not** write an entry for a fix that is only interesting inside one
+  function; that belongs in its doc comment. If an entry cannot say what a
+  reader should do differently, it is a changelog line and `git log` has it.
+
+  Cite the commit hash and keep the newest first. Adding the entry in the same
+  commit as the work is fine and preferred — it is the moment the reasoning is
+  still in your head.
