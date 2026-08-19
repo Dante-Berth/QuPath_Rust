@@ -291,3 +291,61 @@ them — the background estimate and its threshold — rather than on the tests.
 Unfixable before cell expansion and ROI vertices land (`docs/ROADMAP.md` §1.5b
 steps 4 and 5). The density-dependent remainder is a separate and currently
 unexplained divergence; see `docs/MEMO.md` §2.
+
+## D-009 — The count gap concentrates in the merge and the shape split, on clumped tissue
+
+**Not a decided divergence.** This is the narrowing of the density-dependent
+remainder D-008 leaves open, recorded because the search space it rules out is
+worth more than the answer it does not yet reach.
+
+**The measurement.** Three regions of CMU-1 small enough to be a *single tile*,
+so no seams exist and D-008 cannot apply. Stage-by-stage object counts:
+
+| region | seeds | after intensity | after merge | after split | after area | QuPath | ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| dense, 1597 c/Mpx | 18,819 | 10,974 | 6,116 | 9,607 | 6,466 | 6,389 | 1.0121 |
+| dense, 1741 c/Mpx | 19,337 | 12,095 | 6,771 | 10,653 | 7,088 | 6,965 | 1.0177 |
+| sparse, 931 c/Mpx | 17,101 | 8,568 | 3,761 | 8,119 | 4,146 | 3,725 | **1.1130** |
+
+**Where it is not.** Everything upstream of the merge is *proportionally the
+same*: mean object size after the intensity filter is 127.2, 127.2 and 127.8
+labelled pixels respectively, so nuclei are not a different scale on the region
+that disagrees. The `max_background` mask — the one data-dependent branch in the
+background subtraction — **never fires on any of the three**, checked directly,
+so it is not the explanation despite looking like the obvious candidate. The
+area filter's `max_area` bound rejects **zero** objects on all three, so
+under-splitting into over-large blobs is not it either.
+
+**Where it is.** Two adjacent stages move together and only on the sparse region:
+
+- the **merge** keeps 0.557 and 0.560 of its input on the dense regions and
+  **0.439** on the sparse one — it is bridging far more candidates into shared
+  blobs;
+- the **shape split** then recovers 1.57x and 1.57x against **2.16x** — it is
+  cutting those larger blobs back into more pieces.
+
+Net through the pair is 0.875, 0.881 and **0.948**: the split does not fully
+undo the extra merging, and what comes out the far side is more objects than
+QuPath finds. Both filters downstream also reject more there (faint 7.9% against
+2.9%, small 48.9% against 32.7%), which is consistent with a population of
+fragments the split produced rather than with the filters themselves differing —
+`ObjectFilters.json` pins those tests against QuPath on 17 recorded images and
+they pass.
+
+**What this suggests, without asserting it.** The merge's `filter(MAX)` +
+`AND` pair bridges candidates sitting in one positive-LoG region, and the EDM
+watershed splits what it produces. On clumped tissue — which is what a sparse
+region's nuclei are, clustered rather than evenly spread — more candidates fall
+in one LoG region, so the pair does more work in both directions and any
+difference from `MaximumFinder` in where the split lands is amplified. QuPath's
+`toWatershed` and this `Segmenter` agreeing on isolated blobs but diverging on
+heavily-merged ones would produce exactly this signature.
+
+**What would settle it:** a fixture recording QuPath's object count *at the
+merge and split boundaries* rather than only end to end, on a clumped tile.
+`MergeAndSplit.json` pins the pair on synthetic shapes and passes; what it does
+not have is a real clumped tile where the two stages do most of their work.
+
+**Status:** narrowed, not explained. Do not treat the two dense regions'
+1.012–1.018 as the project's parity figure any more than the old 1.035x — see
+`docs/MEMO.md` §2 for the pooled number.

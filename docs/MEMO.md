@@ -92,9 +92,18 @@ seam count does not sort the table — density does. That points away from
 `overlaps.rs` and at the **filters**: a sparse region is mostly background, so
 what differs is which faint candidates survive the mean-intensity and area
 tests. `ObjectFilters.json` pins those stages against QuPath on 17 recorded
-images and they pass, which means the disagreement is in what reaches them —
-the background estimate, or the threshold applied to it — rather than in the
-tests themselves.
+images and they pass, which means the disagreement is in what reaches them.
+
+**Narrowed further in D-009**, on the three single-tile regions where no seam
+resolution happens at all. It is not the background mask (never fires), not
+object scale (127.2, 127.2, 127.8 px/object), and not over-large blobs
+(`max_area` rejects zero). It is the **merge and the shape split**, which move
+together and only on the clumped region: the merge keeps 0.557/0.560 of its
+input on the dense regions against **0.439** on the sparse one, and the split
+recovers 1.57x/1.57x against **2.16x**. Net through the pair is 0.875, 0.881,
+**0.948** — the split does not fully undo the extra merging. What would settle
+it is a fixture recording QuPath's counts at those two boundaries on a real
+clumped tile, which `MergeAndSplit.json` does not have.
 
 **So the honest statement is: 1.065x pooled, 1.012–1.129 by region, direction
 always the same (this over-counts), cause identified as density-dependent and
