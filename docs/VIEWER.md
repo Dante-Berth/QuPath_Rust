@@ -373,6 +373,31 @@ None was arithmetic, and the second two would have been invisible to a reader.
   a measurement may claim, applied to a comparison instead of a ratio: the
   confound was the measurement, not the thing measured.
 
+#### A fifth, and it is the interface reporting on itself
+
+The status bar says how many tiles the frame drew and how many outlines it
+drew, and both are computed in `draw` — which runs **after** `chrome::draw` has
+been laid out, because the commands the layout produces change what that frame
+shows. So the numbers on screen are always the previous frame's.
+
+While anything is moving that is invisible. At rest it is not, because the last
+frame's numbers are never shown at all: nothing asks for another frame, so the
+loop sleeps holding them. What that looks like is pressing `d`, waiting for the
+run, and reading **"0 of 4027 outlined" over a screen covered in outlines** —
+and it stays there until the mouse is moved, which is exactly the shape of the
+three bugs above.
+
+The fix is one flag: `draw` compares the counts it computed against the ones it
+is replacing, and `wants_another_frame` reports one more frame if they differ.
+It costs a frame after a change and nothing at rest, and it terminates because
+the frame that reports the new numbers computes the same ones again.
+
+Worth noting how it was found, because no test would have: the counts were
+correct, the outlines were on screen, and every assertion about either passes.
+It took pressing `d` in a real window and reading the status bar — and then a
+probe through the real `segments_into` to rule out the culling, which is where
+the number would have come from if it had been a real zero.
+
 #### A fourth one, found later, and the example had a workaround for it
 
 The three above were found by looking. This one was found by reading

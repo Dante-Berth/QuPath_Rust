@@ -482,6 +482,23 @@ pub struct App {
     pub show_metadata: bool,
     /// Whether the gesture and key list is showing.
     pub show_help: bool,
+    /// Whether the last frame computed a number the interface has not shown
+    /// yet.
+    ///
+    /// `chrome::draw` is laid out **before** the frame is composed, because the
+    /// commands it produces change what that frame shows. The consequence is
+    /// that the two counts the status bar reports about the frame —
+    /// [`App::outlined`] and [`Open::drawn`] — are always the *previous*
+    /// frame's, and the last frame's are never reported at all, because
+    /// nothing asks for another one.
+    ///
+    /// That is invisible for the tile count and misleading for the outlines: a
+    /// detection that finishes while the view is still says "0 of 4027
+    /// outlined" over a screen covered in outlines, and stays there until the
+    /// mouse is moved. Set when a frame's numbers differ from the ones that
+    /// were laid out, cleared by the frame that shows them — so it costs one
+    /// extra frame after a change and nothing at rest.
+    unreported: bool,
     /// Whether the slide just opened still needs fitting to the *visible*
     /// rectangle.
     ///
@@ -549,6 +566,7 @@ impl App {
             appearance: Appearance::default(),
             uploaded_overview: false,
             refit: false,
+            unreported: false,
         }
     }
 
@@ -634,6 +652,8 @@ impl App {
     /// picture.
     pub fn wants_another_frame(&self) -> bool {
         self.pending.is_some()
+            // One more frame to report what the last one drew; see the field.
+            || self.unreported
             // A run in flight sends nothing until it finishes, so there is no
             // event to wake the loop on: the frames while one is going are what
             // turns the spinner and, at the end, what notices the result. This
@@ -1388,6 +1408,12 @@ impl App {
                 .frame
                 .draw_segments(&band_segments(from, self.cursor), BAND_COLOUR);
         }
+        // Recorded before the assignment: these are what the *next* layout will
+        // report, and if they differ from what this frame's layout showed then
+        // the interface is a frame behind and owes one more. See
+        // [`App::unreported`].
+        self.unreported =
+            outlined != self.outlined || self.open.as_ref().is_some_and(|open| open.drawn != drawn);
         self.outlined = outlined;
         if let Some(open) = &mut self.open {
             open.drawn = drawn;
@@ -1976,6 +2002,35 @@ mod tests {
             bottom_row(&primitives, &textures, 1.0, PHYSICAL),
             0,
             "unscaled, nothing reaches the bottom row -- this is what regressed",
+        );
+    }
+
+    /// A frame whose numbers are not on screen yet asks for another.
+    ///
+    /// The interface is laid out before the frame is composed — deliberately,
+    /// since the commands it produces change what that frame shows — so the
+    /// status bar's "N of M outlined" and "N tiles drawn" are always the
+    /// previous frame's. At rest that means the *last* frame's numbers are
+    /// never shown at all, because nothing asks for another one.
+    ///
+    /// What that looked like: press `d`, wait for the run, and read "0 of 4027
+    /// outlined" over a screen covered in outlines, until the mouse was moved.
+    /// Verified in a real window before and after — `docs/VIEWER.md` §6's
+    /// "checked by looking", which is what a number in a status bar is.
+    #[test]
+    fn a_frame_whose_numbers_are_not_on_screen_yet_asks_for_another() {
+        let mut app = App::new(None);
+        assert!(
+            !app.wants_another_frame(),
+            "a viewer with nothing to do sleeps, which is what keeps it at zero CPU"
+        );
+
+        // What `draw` sets when the counts it just computed differ from the
+        // ones the layout above it reported.
+        app.unreported = true;
+        assert!(
+            app.wants_another_frame(),
+            "the interface is a frame behind and must not be left there"
         );
     }
 
