@@ -469,6 +469,16 @@ pub struct App {
     pub show_metadata: bool,
     /// Whether the gesture and key list is showing.
     pub show_help: bool,
+    /// Whether the slide just opened still needs fitting to the *visible*
+    /// rectangle.
+    ///
+    /// [`Open::new`] fits to the window, because it runs before the frame is
+    /// laid out and there is no rectangle to consult yet — on the very first
+    /// slide there has never been one. Taken by the next [`App::render`], once
+    /// [`App::slide_area`] has been recorded and before the frame is drawn, so
+    /// a slide arrives fitted to what can actually be seen rather than to the
+    /// window the chrome is covering.
+    refit: bool,
     /// Whether the overview picture has been handed to the renderer for the
     /// slide currently open.
     ///
@@ -525,6 +535,7 @@ impl App {
             show_appearance: false,
             appearance: Appearance::default(),
             uploaded_overview: false,
+            refit: false,
         }
     }
 
@@ -571,6 +582,7 @@ impl App {
                 self.recent.truncate(RECENT);
                 self.open = Some(open);
                 self.uploaded_overview = false;
+                self.refit = true;
             }
             Err(error) => {
                 // Kept open. Failing to open a second slide must not close the
@@ -842,10 +854,8 @@ impl App {
     fn key(&mut self, window: &Window, key: &Key) -> bool {
         match key.as_ref() {
             Key::Character("f") => {
-                if let Some(open) = &mut self.open {
-                    let (width, height) = (open.view.width, open.view.height);
-                    let fitted = Viewport::fit(open.slide(), width, height);
-                    open.look(fitted);
+                if self.open.is_some() {
+                    self.fit();
                     return true;
                 }
                 false
@@ -896,6 +906,44 @@ impl App {
                 false
             }
             _ => false,
+        }
+    }
+
+    /// Fits the whole slide into the part of the window that is not chrome.
+    ///
+    /// Shared by the `f` key and the toolbar's button so the two cannot drift,
+    /// and going through [`Viewport::fit_into`] rather than `fit` because the
+    /// toolbar, the status bar and any open side panel are drawn *over* the
+    /// slide: fitting to the window puts their strips' worth of slide behind
+    /// them, and a control that promises the whole slide has to deliver it.
+    fn fit(&mut self) {
+        let area = self.slide_area;
+        if let Some(open) = &mut self.open {
+            let fitted = match area {
+                Some(area) => open.view.fit_into(open.slide(), area),
+                // No layout yet, which is the first frame only.
+                None => Viewport::fit(open.slide(), open.view.width, open.view.height),
+            };
+            open.look(fitted);
+        }
+    }
+
+    /// The middle of what is on screen, for the controls that zoom about a
+    /// point rather than about the cursor.
+    ///
+    /// The middle of the *slide's* rectangle, not of the window: with a side
+    /// panel open the two are a hundred pixels apart, and zooming about the
+    /// window's middle then walks the thing being looked at sideways out of
+    /// view. Falls back to the window before the first layout.
+    fn middle(&self) -> ScreenPoint {
+        match self.slide_area {
+            Some((left, top, right, bottom)) => {
+                ScreenPoint::new(left.midpoint(right), top.midpoint(bottom))
+            }
+            None => self
+                .open
+                .as_ref()
+                .map_or(ScreenPoint::new(0.0, 0.0), |open| centre(&open.view)),
         }
     }
 
@@ -1025,24 +1073,20 @@ impl App {
             }
             Command::SetTuning(tuning) => self.tuning = tuning,
             Command::ResetTuning => self.tuning = Micron::default(),
-            Command::Fit => {
-                if let Some(open) = &mut self.open {
-                    let (width, height) = (open.view.width, open.view.height);
-                    let fitted = Viewport::fit(open.slide(), width, height);
-                    open.look(fitted);
-                }
-            }
+            Command::Fit => self.fit(),
             Command::Zoom(steps) => {
+                let anchor = self.middle();
                 if let Some(open) = &mut self.open {
                     // The same 1.5 a scroll step uses, so the buttons and the
                     // wheel move the view by the same amount.
-                    open.look(open.view.zoom_about(1.5f64.powi(steps), centre(&open.view)));
+                    open.look(open.view.zoom_about(1.5f64.powi(steps), anchor));
                 }
             }
             Command::Actual => {
+                let anchor = self.middle();
                 if let Some(open) = &mut self.open {
                     let factor = 1.0 / open.view.scale;
-                    open.look(open.view.zoom_about(factor, centre(&open.view)));
+                    open.look(open.view.zoom_about(factor, anchor));
                 }
             }
         }
@@ -1090,6 +1134,12 @@ impl App {
             egui.handle_platform_output(window, output.platform_output);
         }
         self.run(command, window);
+        // After the layout and before the frame: a slide opened this frame was
+        // fitted to the window by `Open::new`, which had no rectangle to fit
+        // into yet. Now there is one.
+        if std::mem::take(&mut self.refit) {
+            self.fit();
+        }
 
         let primitives = self
             .context

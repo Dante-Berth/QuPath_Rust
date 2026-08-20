@@ -1334,6 +1334,38 @@ see. It is kept, because it pins the layout *ordering* the replica is good for.
 moved across the line is *how much window the slide gets*, which is a number.
 Colours and legibility are still unlooked-at.
 
+#### The rectangle was recorded and then not used for the one control named after it
+
+§8.1c gave the slide a rectangle and §8.1b's second half converted it into the
+right units. Neither asked what *else* should be reading it, and the answer was
+`Fit`.
+
+The viewport spans the whole framebuffer, because that is where the tiles are
+drawn; the chrome is painted over it. `Viewport::fit` fitted the slide to the
+**window**, so the toolbar and the status bar each ended up with a strip of
+slide behind them — on the 1885x1043 window this was looked at in, a tenth of
+the slide — and with a side panel open, a quarter of the width, all of it on
+one side. The one control whose entire promise is "you are now seeing all of
+it" was the control that did not deliver it.
+
+`Viewport::fit_into` takes the rectangle and centres the slide in *it*, so the
+overshoot on the unconstrained axis is split between the two visible sides
+instead of being pushed under a panel. `fit` is now that function over the
+whole window, so there is one implementation rather than two that agree at
+first. The test asserts on the projected corners — wherever the slide's four
+corners land, they land inside the rectangle a person can see — and its last
+assertion is that fitting to the window puts the bottom edge behind the status
+bar, which is the value that was reachable.
+
+Two smaller things came with it. A slide *opens* fitted, and `Open::new` runs
+before the frame is laid out, so there is no rectangle yet — on the first slide
+there has never been one. It fits to the window and the next `render` re-fits
+into the rectangle it has just recorded, before that frame is drawn, so the
+correction is never visible. And the toolbar's zoom buttons and `1:1` anchored
+on the middle of the *window*: with a side panel open that is a hundred pixels
+from the middle of what is being looked at, so zooming walked the tissue
+sideways. They anchor on the rectangle's middle now.
+
 ### 8.1d A scalebar — **done**, and the first piece that really is a translation
 
 §8 said the portable part of `qupath-gui-fx` is *the design, not the code*, with
@@ -1850,11 +1882,14 @@ In the order it is worth having.
 - **A JPEG encoder for `thumbnail.jpg`.** `project.rs` returns the JSON files
   and leaves the thumbnail to the caller, because nothing in this workspace
   encodes JPEG. QuPath tolerates its absence.
-- **A look at the interface in a real window.** `examples/chrome` renders the
-  panels offscreen and §8.7 records the four bugs that found, but an offscreen
-  render is not a window: it has no trackpad, no window manager, no resizing
-  and no hover states. The panels are no longer unlooked-at; the *running
-  application* still is.
+- **A look at the interface in a real window — started, and it paid at once.**
+  The application has now been run and photographed on X11 at
+  `WINIT_X11_SCALE_FACTOR=2`, which is what an offscreen render cannot be: a
+  headless run and a development machine both have a scale factor of 1.0, and
+  the two unit bugs above are invisible at 1.0 by construction. The first
+  photograph is what showed `Fit` leaving slide behind the status bar.
+  What is *still* unlooked-at is everything that needs a hand on the machine —
+  the trackpad, hover states, resizing, and the window manager.
 - **Parity for the two file formats.** Nothing here has been opened *by QuPath*.
   Both formats were checked against a JSON parser and against the Java that
   writes them, which is a stronger claim than "it validates" and a weaker one

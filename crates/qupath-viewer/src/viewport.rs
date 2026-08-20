@@ -35,6 +35,15 @@ pub struct Viewport {
     pub height: u32,
 }
 
+/// A window dimension as screen pixels.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a window dimension, well inside f32's exact integers"
+)]
+fn whole_pixels(value: u32) -> f32 {
+    value as f32
+}
+
 impl Viewport {
     /// A viewport showing the whole of `slide`'s level 0, centred, in a window
     /// of `width` by `height`.
@@ -43,14 +52,86 @@ impl Viewport {
     /// fits rather than being cropped on one side.
     #[must_use]
     pub fn fit(slide: &Slide, width: u32, height: u32) -> Self {
-        let base = &slide.levels()[0];
-        let scale = f64::from(width) / f64::from(base.width);
-        let vertical = f64::from(height) / f64::from(base.height);
+        let whole = (0.0, 0.0, whole_pixels(width), whole_pixels(height));
         Self {
-            centre: SlidePoint::new(f64::from(base.width) / 2.0, f64::from(base.height) / 2.0),
-            scale: scale.min(vertical),
+            centre: SlidePoint::new(0.0, 0.0),
+            scale: 1.0,
             width,
             height,
+        }
+        .fit_into(slide, whole)
+    }
+
+    /// The view showing the whole of `slide` inside `area` of the window.
+    ///
+    /// # Why a rectangle and not the window
+    ///
+    /// The viewport spans the whole framebuffer, because that is where the
+    /// tiles are drawn — but the chrome is drawn *over* it, so what a person
+    /// can actually see is the strip left between the toolbar and the status
+    /// bar, minus whatever side panels are open. [`Viewport::fit`] fitted the
+    /// slide to the window, so pressing a button labelled "fit the whole
+    /// slide" put the top and bottom of it behind the two bars — about a tenth
+    /// of the slide on a 1885x1043 window, and far more with a side panel
+    /// open, where the hidden part is a quarter of the width and all of it on
+    /// one side. The one control whose entire promise is "you are now seeing
+    /// all of it" was the control that did not.
+    ///
+    /// The slide is centred in `area` rather than in the window, so the
+    /// overshoot on the unconstrained axis is split between the two visible
+    /// sides instead of being pushed under a panel.
+    ///
+    /// A degenerate rectangle falls back to the whole window: before the first
+    /// frame there is no layout to consult, and a zero-width area would
+    /// otherwise be a division by zero rather than a missing one.
+    #[must_use]
+    pub fn fit_into(self, slide: &Slide, area: (f32, f32, f32, f32)) -> Self {
+        let base = &slide.levels()[0];
+        self.fit_extent_into(base.width, base.height, area)
+    }
+
+    /// [`Viewport::fit_into`] against an extent rather than a slide.
+    ///
+    /// Takes the numbers rather than the [`Slide`] for [`Viewport::clamp_to_extent`]'s
+    /// reason: it is what makes this assertable with no file on disk.
+    #[must_use]
+    pub fn fit_extent_into(
+        self,
+        slide_width: u32,
+        slide_height: u32,
+        area: (f32, f32, f32, f32),
+    ) -> Self {
+        let (left, top, right, bottom) = (
+            f64::from(area.0),
+            f64::from(area.1),
+            f64::from(area.2),
+            f64::from(area.3),
+        );
+        // Positive tests, so a NaN rectangle takes the fallback rather than
+        // carrying a NaN into the scale and blanking every later frame.
+        let usable = right - left > 0.0 && bottom - top > 0.0;
+        let (left, top, area_width, area_height) = if usable {
+            (left, top, right - left, bottom - top)
+        } else {
+            (0.0, 0.0, f64::from(self.width), f64::from(self.height))
+        };
+
+        let scale = (area_width / f64::from(slide_width.max(1)))
+            .min(area_height / f64::from(slide_height.max(1)));
+
+        // Solve for the centre that puts the slide's centre in the middle of
+        // `area`: `to_screen` is `(point - (centre - half)) * scale`, so
+        // `centre = point - target / scale + half`.
+        let (target_x, target_y) = (left + area_width / 2.0, top + area_height / 2.0);
+        let half_width = f64::from(self.width) / scale / 2.0;
+        let half_height = f64::from(self.height) / scale / 2.0;
+        Self {
+            centre: SlidePoint::new(
+                f64::from(slide_width) / 2.0 - target_x / scale + half_width,
+                f64::from(slide_height) / 2.0 - target_y / scale + half_height,
+            ),
+            scale,
+            ..self
         }
     }
 
@@ -437,6 +518,84 @@ mod tests {
             width: size.0,
             height: size.1,
         }
+    }
+
+    /// A fit shows the whole slide inside the rectangle it was given.
+    ///
+    /// The rectangle is what the chrome leaves — a toolbar strip off the top, a
+    /// status bar off the bottom, and a side panel down one edge. Fitting to
+    /// the *window* instead puts those strips' worth of slide underneath the
+    /// chrome, which is what a control labelled "fit the whole slide" must not
+    /// do: on a 1885x1043 window the two bars alone hide a tenth of it, and a
+    /// side panel hides a quarter of the width all on one side.
+    ///
+    /// Asserted on the projected corners, which is the property rather than the
+    /// arithmetic: wherever the slide's four corners land, they land inside the
+    /// rectangle a person can see.
+    #[test]
+    fn a_fit_puts_the_whole_slide_inside_the_rectangle_it_was_given() {
+        // CMU-1-Small-Region in the window this was looked at in, with the
+        // toolbar, the status bar and one side panel open.
+        const SLIDE: (u32, u32) = (2220, 2967);
+        let area = (480.0_f32, 56.0, 1885.0, 995.0);
+        let fitted = viewport((0.0, 0.0), 1.0, (1885, 1043)).fit_extent_into(SLIDE.0, SLIDE.1, area);
+
+        let corners = [
+            (0.0, 0.0),
+            (f64::from(SLIDE.0), 0.0),
+            (0.0, f64::from(SLIDE.1)),
+            (f64::from(SLIDE.0), f64::from(SLIDE.1)),
+        ];
+        for (x, y) in corners {
+            let at = fitted.to_screen(SlidePoint::new(x, y));
+            assert!(
+                at.x >= area.0 - 0.5
+                    && at.x <= area.2 + 0.5
+                    && at.y >= area.1 - 0.5
+                    && at.y <= area.3 + 0.5,
+                "corner {x},{y} landed at {at:?}, outside {area:?}",
+            );
+        }
+
+        // And it fills the rectangle on the constraining axis rather than
+        // shrinking to be safe: the slide is taller than it is wide here, so
+        // the height is what runs out.
+        let top = fitted.to_screen(SlidePoint::new(0.0, 0.0));
+        let bottom = fitted.to_screen(SlidePoint::new(0.0, f64::from(SLIDE.1)));
+        assert!(
+            (bottom.y - top.y - (area.3 - area.1)).abs() < 0.5,
+            "the slide should span the rectangle's height, not {}",
+            bottom.y - top.y,
+        );
+
+        // The value that would have made this fail is reachable: fitted to the
+        // whole window, the slide runs from the top edge to the bottom edge, so
+        // both bars have slide behind them.
+        let to_window = viewport((0.0, 0.0), 1.0, (1885, 1043)).fit_extent_into(
+            SLIDE.0,
+            SLIDE.1,
+            (0.0, 0.0, 1885.0, 1043.0),
+        );
+        let hidden = to_window.to_screen(SlidePoint::new(0.0, f64::from(SLIDE.1)));
+        assert!(
+            hidden.y > area.3,
+            "fitted to the window, the slide's bottom edge is behind the status bar",
+        );
+    }
+
+    /// A rectangle with no area falls back to the window rather than dividing
+    /// by zero.
+    ///
+    /// Reachable on the first frame, before any layout has been recorded, and
+    /// on a window dragged shut.
+    #[test]
+    fn a_degenerate_rectangle_fits_the_window_instead() {
+        let window = viewport((0.0, 0.0), 1.0, (1024, 768));
+        let fitted = window.fit_extent_into(4000, 3000, (0.0, 0.0, 0.0, 0.0));
+        let whole = window.fit_extent_into(4000, 3000, (0.0, 0.0, 1024.0, 768.0));
+        assert_eq!(fitted.scale, whole.scale);
+        assert_eq!(fitted.centre, whole.centre);
+        assert!(fitted.scale.is_finite());
     }
 
     #[test]
