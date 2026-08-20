@@ -633,6 +633,30 @@ reason this is a separate crate rather than a flag on `window.rs`:
 - **No slide is a state, not a blank window.** An empty grey rectangle is the
   commonest way an idle application looks broken.
 
+#### A hole that stays a hole, now said out loud
+
+`TileLoader::failed` counts tiles that could not be decoded, and its own
+documentation says the number is "worth seeing rather than watching redraw
+silently". Nothing read it.
+
+The failure it counts is permanent by design: a tile that fails is never asked
+for again, because a caller drives requests from what is *not* resident and
+would otherwise retry it on every redraw. So the square stays as it is, the
+underlay is drawn under it, and — because a failed tile is not outstanding —
+the spinner beside the status bar's tile counts is gone. What a person sees is
+a frame that looks finished with one region softer than the rest, which reads
+as a slow load that stalled rather than as a file that cannot be read there.
+
+The status bar now says "N unreadable" in the warning colour when there are
+any, with a tooltip saying they are not retried. Zero on a slide `qupath-slide`
+can open at all, since the codec check is per slide rather than per tile, so
+the label is absent in the ordinary case.
+
+The loader half is pinned — `a_failed_tile_is_not_held_as_delivered` and
+`a_tile_that_cannot_decode_is_not_asked_for_again` — and the label itself is
+§6's "checked by looking", which is the honest description of a string in a
+status bar.
+
 #### The idle claim, which was wrong twice
 
 This section first recorded **0% of one core** at rest, and that was measured

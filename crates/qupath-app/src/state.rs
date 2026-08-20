@@ -235,6 +235,19 @@ impl Open {
         (self.cache.bytes(), self.cache.len())
     }
 
+    /// Tiles that could not be decoded and will not be tried again.
+    ///
+    /// Zero on a slide `qupath-slide` can open at all, because the codec check
+    /// is per slide. Anything else is a **permanent hole** in the picture: the
+    /// loader refuses to ask for a failed tile a second time — deliberately,
+    /// or every redraw would retry it — so the gap never fills in, and the
+    /// underlay covering it makes it look like a slow load that has stalled.
+    /// [`TileLoader::failed`] says this is worth seeing rather than watching
+    /// redraw silently; the status bar is where it gets seen.
+    pub fn failed(&self) -> usize {
+        self.loader.failed()
+    }
+
     /// Tiles the loader still owes.
     ///
     /// Including the ones already in the channel: a tile that has been decoded

@@ -354,6 +354,27 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
                     ui.label(format!("{outstanding} loading"));
                 }
 
+                // Said, rather than left as a hole in the picture. A tile that
+                // cannot be decoded is never asked for again — otherwise every
+                // redraw would retry it — so the gap is permanent, and the
+                // underlay drawn under it makes it look like a load that has
+                // stalled rather than one that has failed. The spinner beside
+                // this is gone by then, which is what makes the frame look
+                // finished.
+                let unreadable = open.failed();
+                if unreadable > 0 {
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new(format!("{unreadable} unreadable"))
+                            .color(ui.visuals().warn_fg_color),
+                    )
+                    .on_hover_text(
+                        "Tiles this slide's codec could not decode. They are \
+                         not retried, so those squares stay as they are — what \
+                         is drawn there is the coarser level underneath.",
+                    );
+                }
+
                 if let Some(overlay) = &app.detector.overlay
                     && app.show_overlay
                 {
