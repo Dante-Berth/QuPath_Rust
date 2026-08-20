@@ -1202,6 +1202,47 @@ assertion is that leaving the rectangle unconverted puts the centre outside —
 the value that would have made it fail, which §6's rule says to check is
 reachable.
 
+#### And it was only half fixed, because the fix was on the wrong side
+
+The paragraph above is correct and the bug it describes is fixed. What it did
+not ask is the other half of the same question: the rectangle the interface
+*reports* was converted, and the units the interface is **drawn** in were never
+looked at.
+
+`egui` tessellates in logical points. `Framebuffer::draw_mesh` takes the
+framebuffer's own **physical** pixels — the frame is `winit`'s `Resized`, which
+is physical, and the slide's tiles are already drawn in it. `Software::mesh`
+handed one straight to the other. At a scale factor of 1.0 that is right; at
+2.0 the entire interface was drawn at **half size into the top-left corner** of
+the window — a toolbar across half the width, a status bar through the middle
+of the tissue, and everything below and right of them bare, over a slide drawn
+at full size.
+
+So the two halves were wrong in *opposite directions*, which is why fixing one
+did not surface the other: `slide_area` scaled the reported rectangle **up**
+while the drawing stayed **down**, and `cursor_over_slide` then answered
+correctly for a layout that was nowhere on the screen. The gestures worked; the
+picture did not match them.
+
+Both conversions now happen in one place each, and `draw_interface` is a free
+function rather than a `Software` method for a reason worth stating: `Software`
+owns a `softbuffer::Surface`, which needs a window, so nothing that went
+through it could be asserted at all. Taking a `&mut Framebuffer` instead makes
+the whole software path — texture deltas, meshes, clip rectangles — run
+headless, which is what
+`the_interface_is_drawn_across_the_whole_window_at_a_scale_factor_of_two`
+does. It rasterises the real interface at 2.0 into a 1280x860 frame and counts
+the painted pixels in the **last row**, which the status bar's background
+covers and nothing else reaches. The check §6 asks for is the second
+assertion: rasterised unscaled, that row is `0` of `1280` pixels.
+
+The general lesson, and it is the one §5 states about coordinate spaces: a unit
+conversion applied at the boundary that *reports* a value is not the same fix
+as applying it at the boundary that *consumes* one, and a test of the
+conversion function passes happily while its caller ignores the argument. This
+test fails on a `pixels_per_point` that is accepted and dropped, which is what
+the bug actually was.
+
 ### 8.1c Three panels at once — **done**, and it was not a cosmetic problem
 
 §6 has said throughout that appearance is unverified, and §8.1 predicted the

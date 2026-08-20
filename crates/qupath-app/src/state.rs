@@ -1089,7 +1089,7 @@ impl App {
         let primitives = self
             .context
             .tessellate(output.shapes, output.pixels_per_point);
-        self.draw(&primitives, &output.textures_delta);
+        self.draw(&primitives, &output.textures_delta, output.pixels_per_point);
 
         self.costs.push(started.elapsed());
         if self.costs.len() > WINDOW {
@@ -1151,7 +1151,17 @@ impl App {
     }
 
     /// Composes the slide and the interface, and presents.
-    fn draw(&mut self, primitives: &[egui::ClippedPrimitive], delta: &egui::TexturesDelta) {
+    ///
+    /// `pixels_per_point` is `egui`'s scale factor, and it is needed here
+    /// because the two halves of the frame arrive in different units: the tiles
+    /// are already in the framebuffer's physical pixels, and `primitives` are
+    /// in logical points. See [`draw_interface`].
+    fn draw(
+        &mut self,
+        primitives: &[egui::ClippedPrimitive],
+        delta: &egui::TexturesDelta,
+        pixels_per_point: f32,
+    ) {
         // The draw list, built before the framebuffer is borrowed: the slide's
         // tiles back to front, exactly as `window.rs` builds it.
         let mut draws: Vec<Draw<'_>> = Vec::new();
@@ -1235,68 +1245,141 @@ impl App {
             open.drawn = drawn;
         }
 
-        state.apply(delta);
-        for primitive in primitives {
-            let egui::epaint::Primitive::Mesh(mesh) = &primitive.primitive else {
-                // `Callback` is for a renderer that draws its own thing inside
-                // the interface. Nothing here does, so it is skipped rather
-                // than asserted on.
-                continue;
-            };
-            state.mesh(primitive.clip_rect, mesh);
-        }
+        apply_textures(&mut state.textures, delta);
+        draw_interface(
+            &mut state.frame,
+            &state.textures,
+            &mut state.vertices,
+            primitives,
+            pixels_per_point,
+        );
 
         state.present();
     }
 }
 
-impl Software {
-    /// Applies `egui`'s texture changes: whole images and patches of them.
-    fn apply(&mut self, delta: &egui::TexturesDelta) {
-        for (id, image) in &delta.set {
-            let egui::ImageData::Color(source) = &image.image;
-            let [source_width, source_height] = source.size;
-            let pixels: Vec<[u8; 4]> = source.pixels.iter().map(|pixel| pixel.to_array()).collect();
+/// Applies `egui`'s texture changes to `textures`: whole images and patches of
+/// them.
+///
+/// Free rather than a method for the reason [`draw_interface`] is: together the
+/// two are the whole software path, and a test can then run it with no window.
+fn apply_textures(textures: &mut Vec<(egui::TextureId, Texture)>, delta: &egui::TexturesDelta) {
+    for (id, image) in &delta.set {
+        let egui::ImageData::Color(source) = &image.image;
+        let [source_width, source_height] = source.size;
+        let pixels: Vec<[u8; 4]> = source.pixels.iter().map(|pixel| pixel.to_array()).collect();
 
-            let at = self
-                .textures
-                .iter()
-                .position(|(existing, _)| existing == id);
-            match (image.pos, at) {
-                // A patch of an existing texture, which is what `egui` sends
-                // when a new glyph is rasterised into the atlas.
-                (Some([x, y]), Some(at)) => {
-                    let texture = &mut self.textures[at].1;
-                    let width = texture.width as usize;
-                    for row in 0..source_height {
-                        let from = row * source_width;
-                        let to = (y + row) * width + x;
-                        if to + source_width <= texture.pixels.len() {
-                            texture.pixels[to..to + source_width]
-                                .copy_from_slice(&pixels[from..from + source_width]);
-                        }
-                    }
-                }
-                // The whole texture, new or replaced.
-                _ => {
-                    let texture = Texture {
-                        width: source_width as u32,
-                        height: source_height as u32,
-                        pixels,
-                    };
-                    if let Some(at) = at {
-                        self.textures[at].1 = texture;
-                    } else {
-                        self.textures.push((*id, texture));
+        let at = textures.iter().position(|(existing, _)| existing == id);
+        match (image.pos, at) {
+            // A patch of an existing texture, which is what `egui` sends
+            // when a new glyph is rasterised into the atlas.
+            (Some([x, y]), Some(at)) => {
+                let texture = &mut textures[at].1;
+                let width = texture.width as usize;
+                for row in 0..source_height {
+                    let from = row * source_width;
+                    let to = (y + row) * width + x;
+                    if to + source_width <= texture.pixels.len() {
+                        texture.pixels[to..to + source_width]
+                            .copy_from_slice(&pixels[from..from + source_width]);
                     }
                 }
             }
-        }
-        for id in &delta.free {
-            self.textures.retain(|(existing, _)| existing != id);
+            // The whole texture, new or replaced.
+            _ => {
+                let texture = Texture {
+                    width: source_width as u32,
+                    height: source_height as u32,
+                    pixels,
+                };
+                if let Some(at) = at {
+                    textures[at].1 = texture;
+                } else {
+                    textures.push((*id, texture));
+                }
+            }
         }
     }
+    for id in &delta.free {
+        textures.retain(|(existing, _)| existing != id);
+    }
+}
 
+/// Rasterises `egui`'s tessellated interface into `frame`.
+///
+/// # The unit, which was wrong
+///
+/// `egui` lays out and tessellates in **logical points**, and `frame` is in
+/// **physical pixels**. Those are the same numbers only at a scale factor of
+/// 1.0 — the value a development machine and every headless render both have.
+/// Anywhere else the entire interface was drawn at `1 / pixels_per_point` of
+/// its size into the top-left corner of the window, over a slide drawn at full
+/// size: a toolbar half the width of the window, a status bar across the middle
+/// of the tissue, and everything below and right of them bare. It is the same
+/// mistake [`App::slide_area`] records one layer up, and it survived that fix
+/// because converting the rectangle the interface *reports* says nothing about
+/// the units the interface is *drawn* in — the two were wrong in opposite
+/// directions, so the hit-testing rectangle then named a strip of window the
+/// toolbar was nowhere near.
+///
+/// Converted here rather than at the two call sites below, for
+/// [`scale_area`]'s reason: one unit below this line.
+///
+/// # Why it is free
+///
+/// Taking the frame and the textures rather than a [`Software`] means the whole
+/// software path runs with no window and no display server, which is the only
+/// way this class of bug is reachable from a test at all —
+/// `the_interface_is_drawn_across_the_whole_window_at_a_scale_factor_of_two`
+/// is that test, and it fails on a `pixels_per_point` that is accepted and
+/// ignored rather than only on arithmetic that is wrong.
+fn draw_interface(
+    frame: &mut Framebuffer,
+    textures: &[(egui::TextureId, Texture)],
+    scratch: &mut Vec<MeshVertex>,
+    primitives: &[egui::ClippedPrimitive],
+    pixels_per_point: f32,
+) {
+    for primitive in primitives {
+        let egui::epaint::Primitive::Mesh(mesh) = &primitive.primitive else {
+            // `Callback` is for a renderer that draws its own thing inside the
+            // interface. Nothing here does, so it is skipped rather than
+            // asserted on.
+            continue;
+        };
+        // The texture is resolved to an *index* rather than a reference so that
+        // the frame, the vertex buffer and the texture can be borrowed at once.
+        let Some(at) = textures.iter().position(|(id, _)| *id == mesh.texture_id) else {
+            continue;
+        };
+
+        // `epaint::Vertex` is `{Pos2, Pos2, Color32}` and `MeshVertex` is the
+        // same three fields; this is that conversion, written out because a
+        // cast would need a trait the viewer library does not implement.
+        scratch.clear();
+        scratch.extend(mesh.vertices.iter().map(|vertex| MeshVertex {
+            position: [
+                vertex.pos.x * pixels_per_point,
+                vertex.pos.y * pixels_per_point,
+            ],
+            uv: [vertex.uv.x, vertex.uv.y],
+            colour: vertex.color.to_array(),
+        }));
+
+        let clip = primitive.clip_rect;
+        frame.draw_mesh(
+            scale_area(
+                (clip.min.x, clip.min.y, clip.max.x, clip.max.y),
+                pixels_per_point,
+            ),
+            scratch,
+            &mesh.indices,
+            &textures[at].1,
+        );
+    }
+}
+
+impl Software {
     /// Registers the overview picture as a user texture, replacing any
     /// previous one.
     ///
@@ -1324,46 +1407,6 @@ impl Software {
         } else {
             self.textures.push((id, texture));
         }
-    }
-
-    /// Rasterises one `egui` mesh into the frame.
-    ///
-    /// The texture is resolved to an *index* rather than a reference so that the
-    /// frame, the vertex buffer and the texture can be borrowed at once — the
-    /// three live in this struct and a returned `&Texture` would borrow all of
-    /// it.
-    fn mesh(&mut self, clip: egui::Rect, mesh: &egui::Mesh) {
-        let Some(at) = self
-            .textures
-            .iter()
-            .position(|(id, _)| *id == mesh.texture_id)
-        else {
-            return;
-        };
-
-        // `epaint::Vertex` is `{Pos2, Pos2, Color32}` and `MeshVertex` is the
-        // same three fields; this is that conversion, written out because a
-        // cast would need a trait the viewer library does not implement.
-        self.vertices.clear();
-        self.vertices
-            .extend(mesh.vertices.iter().map(|vertex| MeshVertex {
-                position: [vertex.pos.x, vertex.pos.y],
-                uv: [vertex.uv.x, vertex.uv.y],
-                colour: vertex.color.to_array(),
-            }));
-
-        let Self {
-            frame,
-            textures,
-            vertices,
-            ..
-        } = self;
-        frame.draw_mesh(
-            (clip.min.x, clip.min.y, clip.max.x, clip.max.y),
-            vertices,
-            &mesh.indices,
-            &textures[at].1,
-        );
     }
 
     /// Copies the frame into the window's buffer and presents it.
@@ -1663,6 +1706,113 @@ mod tests {
         assert!(
             !app.cursor_over_slide(),
             "unconverted, the centre reads as outside -- this is what regressed"
+        );
+    }
+
+    /// The interface is drawn in the framebuffer's **physical** pixels, and
+    /// `egui` tessellates it in logical points.
+    ///
+    /// The same bug as the test above, one layer further down, and the fix for
+    /// that one could not have caught it: converting the rectangle the
+    /// interface *reports* says nothing about the units the interface is
+    /// *drawn* in. Those were wrong in opposite directions — the hit-testing
+    /// rectangle scaled up, the drawing left in points — so at a scale factor
+    /// of 2.0 the toolbar covered half the window's width, the status bar ran
+    /// across the middle of the tissue, and `cursor_over_slide` answered for a
+    /// layout that was nowhere on screen.
+    ///
+    /// Asserted on the *rasterised frame* rather than on the arithmetic,
+    /// because the arithmetic was never in doubt: what was wrong is that
+    /// nothing applied it, and a test of a conversion function passes happily
+    /// while its caller ignores the argument. [`draw_interface`] is free so
+    /// that this can run the real path with no window.
+    #[test]
+    fn the_interface_is_drawn_across_the_whole_window_at_a_scale_factor_of_two() {
+        // A 1280x860 physical window at a scale factor of 2.0 is the 640x430
+        // points `egui_winit` lays out in.
+        const PHYSICAL: (u32, u32) = (1280, 860);
+        const POINTS: (f32, f32) = (640.0, 430.0);
+
+        let context = egui::Context::default();
+        chrome::style(&context);
+        let app = App::new(None);
+
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(POINTS.0, POINTS.1),
+            )),
+            ..Default::default()
+        };
+        let viewport = input.viewport_id;
+        input
+            .viewports
+            .get_mut(&viewport)
+            .expect("the root viewport")
+            .native_pixels_per_point = Some(2.0);
+
+        // Twice, for `examples/chrome.rs`'s reason: the font atlas arrives in
+        // the first frame's texture delta and only *changes* afterwards, so one
+        // frame alone has nothing to draw its text with.
+        let first = context.run(input.clone(), |context| {
+            let _ = chrome::draw(context, &app);
+        });
+        let output = context.run(input, |context| {
+            let _ = chrome::draw(context, &app);
+        });
+        assert!(
+            (output.pixels_per_point - 2.0).abs() < f32::EPSILON,
+            "the scale factor did not reach `egui`: {}",
+            output.pixels_per_point,
+        );
+
+        let mut textures = Vec::new();
+        apply_textures(&mut textures, &first.textures_delta);
+        apply_textures(&mut textures, &output.textures_delta);
+        let primitives = context.tessellate(output.shapes, output.pixels_per_point);
+
+        /// How much of the frame's last row is painted rather than left clear.
+        ///
+        /// The status bar is a panel across the bottom of the window, so that
+        /// row is its background — and it is painted only if the interface
+        /// reaches the bottom of the *window* rather than the bottom of the
+        /// points it was laid out in.
+        fn bottom_row(
+            primitives: &[egui::ClippedPrimitive],
+            textures: &[(egui::TextureId, Texture)],
+            pixels_per_point: f32,
+            size: (u32, u32),
+        ) -> usize {
+            let mut frame = Framebuffer::new(size.0, size.1);
+            frame.clear(compose::CLEAR);
+            draw_interface(
+                &mut frame,
+                textures,
+                &mut Vec::new(),
+                primitives,
+                pixels_per_point,
+            );
+            let width = size.0 as usize;
+            frame.pixels()[(size.1 as usize - 1) * width..]
+                .iter()
+                .filter(|pixel| **pixel != compose::CLEAR)
+                .count()
+        }
+
+        let painted = bottom_row(&primitives, &textures, output.pixels_per_point, PHYSICAL);
+        assert!(
+            painted >= PHYSICAL.0 as usize - 2,
+            "the status bar must reach the bottom row of the window: {painted} of {} pixels",
+            PHYSICAL.0,
+        );
+
+        // What it did before: laid out in points and drawn as pixels, the
+        // interface stops halfway down and the bottom half of the window is
+        // bare clear colour over a slide drawn at full size.
+        assert_eq!(
+            bottom_row(&primitives, &textures, 1.0, PHYSICAL),
+            0,
+            "unscaled, nothing reaches the bottom row -- this is what regressed",
         );
     }
 
