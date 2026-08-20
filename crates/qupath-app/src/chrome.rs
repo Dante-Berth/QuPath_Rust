@@ -463,19 +463,23 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
         egui::SidePanel::right("analysis")
             .default_width(260.0_f32.min(cap))
             .max_width(cap)
-            .show(context, |ui| analysis(ui, app, &mut command));
+            .show(context, |ui| {
+                scrolled("analysis", ui, |ui| analysis(ui, app, &mut command))
+            });
     }
     if app.show_metadata {
         egui::SidePanel::left("metadata")
             .default_width(240.0_f32.min(cap))
             .max_width(cap)
-            .show(context, |ui| metadata(ui, app, &mut command));
+            .show(context, |ui| {
+                scrolled("metadata", ui, |ui| metadata(ui, app, &mut command))
+            });
     }
     if app.show_help {
         egui::SidePanel::left("help")
             .default_width(280.0_f32.min(cap))
             .max_width(cap)
-            .show(context, help);
+            .show(context, |ui| scrolled("help", ui, help));
     }
 
     // After the panels have taken their strips and before the central one
@@ -512,6 +516,32 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
         });
 
     (command, slide_area)
+}
+
+/// Runs a panel's contents inside a vertical scroll area.
+///
+/// # Why every side panel needs one
+///
+/// The cap above bounds a panel's *width* so the slide keeps its share, and
+/// says in as many words that "the cap cannot bind a panel whose contents
+/// refuse to be narrower". Nothing bounded its **height** at all, and a panel
+/// is as tall as the window between the toolbar and the status bar — so on a
+/// short window the bottom of a panel was simply not drawn.
+///
+/// That is worse than it sounds for the analysis pane, whose `Detect cells` and
+/// `Reset` buttons live under six sliders: at 760x520 with three panels open
+/// they are past the bottom edge, and there is no gesture that reaches them.
+/// A control that is clipped is a control that does not exist, and unlike the
+/// clipped *labels* beside it, nothing about the picture says so.
+///
+/// `auto_shrink` is off on the vertical axis so the area claims the panel's
+/// full height rather than collapsing to its contents, which is what makes the
+/// scrollbar appear only when there is something below the fold.
+fn scrolled(id: &str, ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
+    egui::ScrollArea::vertical()
+        .id_salt(id)
+        .auto_shrink([false, false])
+        .show(ui, contents);
 }
 
 /// The analysis panel: QuPath's cell-detection parameters, in QuPath's units.
@@ -1590,17 +1620,22 @@ mod tests {
     /// Whether they *look* right is still not asserted — but "the slide is left
     /// with nothing" is a number, and it is the failure that matters.
     ///
-    /// The slack is a pixel, not a fudge factor: the panels take exactly
-    /// [`PANEL_SHARE`] and the separator lines between them round, so the
-    /// measured 639.875 of a 1280px window is the bound being *met*. Asserting
-    /// strictly more than half would fail on the correct layout.
+    /// The slack is a pixel per panel, not a fudge factor: the panels take
+    /// exactly [`PANEL_SHARE`] and every container between the cap and the
+    /// slide's rectangle rounds once — the separator lines, and the scroll area
+    /// each panel's contents sit in. The measured 638.9 of a 1280px window is
+    /// the bound being *met* at 49.9%; asserting strictly more than half would
+    /// fail on the correct layout.
     #[test]
     fn three_panels_leave_the_slide_its_share_of_a_normal_window() {
+        /// One pixel of rounding per panel, per the note above.
+        const SLACK: f32 = 3.0;
+
         let size = egui::vec2(1280.0, 800.0);
         let bare = width(draw_headless(size, false, false, false));
         let all = width(draw_headless(size, true, true, true));
         assert!(
-            all >= bare * super::PANEL_SHARE - 1.0,
+            all >= bare * super::PANEL_SHARE - SLACK,
             "three panels took more than their share of a 1280px window: \
              {all} left of {bare}"
         );

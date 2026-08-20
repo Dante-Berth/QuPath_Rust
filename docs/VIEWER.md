@@ -1469,6 +1469,37 @@ see. It is kept, because it pins the layout *ordering* the replica is good for.
 moved across the line is *how much window the slide gets*, which is a number.
 Colours and legibility are still unlooked-at.
 
+#### The cap bounded the width and nothing bounded the height
+
+§8.1c capped how wide the panels may be so the slide keeps its share, and said
+in as many words that "the cap cannot bind a panel whose contents refuse to be
+narrower" — which is why the help pane's cells wrap. Nothing bounded a panel's
+**height**. A side panel is as tall as the window between the toolbar and the
+status bar, and its contents were simply cut off at the bottom.
+
+For the metadata pane that costs a row of the level table. For the analysis
+pane it costs the `Detect cells` and `Reset` buttons, which live under six
+sliders: on a 760x520 window they are past the bottom edge and **no gesture
+reaches them**. A clipped label is visibly clipped; a clipped control is
+indistinguishable from a control that was never there.
+
+Each panel's contents now sit in a vertical `ScrollArea`. `auto_shrink` is off
+on both axes so the area claims the panel's full height rather than collapsing
+to its contents, which is what makes a scrollbar appear only when there is
+something below the fold.
+
+Two things it was worth checking in a real window rather than reasoning about.
+The buttons are reachable — eight wheel notches over the panel at 760x520
+brings them up. And scrolling over a panel does **not** zoom the slide
+underneath it, because that gesture is gated on `cursor_over_slide`, which is
+geometric; §8.1b's second half is what makes that predicate trustworthy at any
+scale factor.
+
+It cost the three-panel width test a pixel per panel of slack. That is not a
+loosened bound: every container between the cap and the slide's rectangle
+rounds once, and there is now one more of them per panel. 638.9 of 1280 is
+49.9%, which is the bound being met.
+
 #### The rectangle was recorded and then not used for the one control named after it
 
 §8.1c gave the slide a rectangle and §8.1b's second half converted it into the
