@@ -218,12 +218,18 @@ pub struct Detector {
     pub message: Option<String>,
     /// How far the run in flight has got, and the way to stop it.
     ///
-    /// One handle for the life of the detector rather than one per run: the
-    /// worker holds a clone of the `Arc` and writes to it, this side reads it
-    /// once a frame and can `cancel` it from the UI thread. Reset by
-    /// [`Detector::start`] *before* the worker is spawned, which is the order
-    /// `qupath_pipeline::Progress::reset` documents and the reason it is the
-    /// caller's job.
+    /// The worker holds a clone of the `Arc` and writes to it; this side reads
+    /// it once a frame and can `cancel` it from the UI thread.
+    ///
+    /// **One handle per run, replaced by [`Detector::start`].** It used to be
+    /// one for the life of the detector, reset before each run, and that made
+    /// a superseded run share its successor's handle: the old worker was never
+    /// told to stop, so it went on counting finished tiles into the same
+    /// counters the new run was reporting from, and pressing `d` twice ran two
+    /// whole-slide detections at once over one progress bar. A fresh handle
+    /// gives the two runs nothing in common, which is also why `reset` is no
+    /// longer called — a new `Progress` is already clear, so the ordering rule
+    /// `qupath_pipeline::Progress::reset` documents has nothing to catch here.
     progress: Arc<Progress>,
 }
 
@@ -341,10 +347,14 @@ impl Detector {
     /// nuclei in arbitrary places — the failure this whole module is careful
     /// about, because it looks like a result.
     pub fn clear(&mut self) {
-        // The thread is left to finish and its result is dropped on arrival,
-        // which `generation` already handles. Detaching the receiver would work
-        // too; keeping it means a superseded run's error still reaches the
-        // `TryRecvError::Disconnected` arm rather than vanishing.
+        // Stopped, not merely disowned. The result is dropped on arrival
+        // whatever happens — `generation` handles that — but a whole-slide run
+        // left going over a slide that has been closed holds every core for up
+        // to a minute and a half for an answer nothing will ever draw.
+        self.progress.cancel();
+        // The receiver is kept rather than detached: a superseded run's error
+        // then still reaches the `TryRecvError::Disconnected` arm instead of
+        // vanishing.
         self.generation += 1;
         self.started = None;
         self.overlay = None;
@@ -382,10 +392,17 @@ impl Detector {
 
         self.generation += 1;
         let generation = self.generation;
-        // Before the worker exists, so a `cancel` from this thread can never be
-        // wiped by the run it was meant to stop. `Progress::reset` documents the
-        // race this order avoids.
-        self.progress.reset();
+        // The run this replaces is told to stop before its handle is let go
+        // of. Replacing a run has to mean stopping it and not merely ignoring
+        // what it returns: the pipeline saturates the machine, so two runs in
+        // flight is two whole-slide detections competing for every core while
+        // one of them is already known to be unwanted.
+        self.progress.cancel();
+        // A handle of its own, rather than the previous one reset. The old
+        // worker still holds a clone and reads it a tile from now; resetting
+        // would clear the stop just requested and hand the new run a counter
+        // the old one is still writing into.
+        self.progress = Arc::new(Progress::new());
         let progress = Arc::clone(&self.progress);
         let (sender, receiver) = channel();
         self.incoming = Some(receiver);
@@ -1034,6 +1051,99 @@ mod tests {
         // Polling before anything has been started must be a cheap no-op rather
         // than a panic on an absent receiver.
         assert!(!detector.poll());
+    }
+
+    /// Starting a run stops the one it replaces, and shares nothing with it.
+    ///
+    /// `start` documented itself as "replacing any run already going", and what
+    /// it did was ignore the old run's *result*: the worker kept going. Two
+    /// things followed, and the second is the one that shows.
+    ///
+    /// The pipeline saturates the machine, so pressing `d` twice — an
+    /// ordinary thing to do after moving the view — ran two whole-slide
+    /// detections at once, each with every core it could get.
+    ///
+    /// And they shared one `Progress`. The old worker went on counting
+    /// finished tiles into the very counters the new run reported from, having
+    /// just had them zeroed underneath it by `reset`, so the progress bar was
+    /// two runs added together over one run's total and the `Stop` button
+    /// reached whichever of them read the flag first.
+    ///
+    /// A handle per run is what makes "replaces" true. The path does not exist
+    /// on purpose: `start` decides the level and the region on this thread and
+    /// only opens the slide on the worker, so the run fails immediately and
+    /// the handles are still exactly what the supersede did to them.
+    #[test]
+    fn starting_a_run_stops_the_one_it_replaces() {
+        let levels = cmu1();
+        let viewport = view((23_000.0, 16_457.0), 0.25, (1024, 768));
+        let mut detector = Detector::new();
+
+        let idle = Arc::clone(&detector.progress);
+        detector.start(
+            Path::new("/nonexistent/slide.svs"),
+            &levels,
+            &levels[0],
+            Some(CMU1_MPP),
+            viewport,
+            Micron::default(),
+        );
+        let first = Arc::clone(&detector.progress);
+        assert!(
+            !Arc::ptr_eq(&idle, &first),
+            "a run takes a handle of its own rather than the detector's"
+        );
+        assert!(!first.is_cancelled(), "the run that just started is wanted");
+
+        detector.start(
+            Path::new("/nonexistent/slide.svs"),
+            &levels,
+            &levels[0],
+            Some(CMU1_MPP),
+            viewport,
+            Micron::default(),
+        );
+        let second = Arc::clone(&detector.progress);
+
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "two runs sharing a handle is the counter the old worker keeps writing to"
+        );
+        assert!(
+            first.is_cancelled(),
+            "the superseded run must be told to stop, not merely ignored"
+        );
+        assert!(
+            !second.is_cancelled(),
+            "the run that replaced it must not inherit the stop"
+        );
+    }
+
+    /// Closing a slide stops the run over it.
+    ///
+    /// `clear` is what the slide-change path calls, and it dropped the result
+    /// without stopping the work: a whole-slide run left going over a closed
+    /// slide holds every core for up to a minute and a half to produce an
+    /// answer that `generation` then throws away.
+    #[test]
+    fn clearing_stops_the_run_it_discards() {
+        let levels = cmu1();
+        let mut detector = Detector::new();
+        detector.start(
+            Path::new("/nonexistent/slide.svs"),
+            &levels,
+            &levels[0],
+            Some(CMU1_MPP),
+            view((23_000.0, 16_457.0), 0.25, (1024, 768)),
+            Micron::default(),
+        );
+        let running = Arc::clone(&detector.progress);
+
+        detector.clear();
+        assert!(
+            running.is_cancelled(),
+            "a discarded run must be stopped as well as disowned"
+        );
     }
 
     #[test]

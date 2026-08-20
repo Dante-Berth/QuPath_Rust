@@ -1804,6 +1804,36 @@ still looking at do *not* cover. It never says "failed": stopping was the
 instruction, and `Outcome::Cancelled` is a separate variant from
 `Outcome::Failed` so a reworded error string cannot turn one into the other.
 
+**And "replacing a run" was not stopping one.** `Detector::start` said it
+replaced any run already going, and what it replaced was the *result*: the
+generation counter meant a superseded run's answer was dropped on arrival. The
+worker itself went on to the end.
+
+Two things followed. The pipeline saturates the machine, so pressing `d` twice
+— an ordinary thing to do after moving the view — ran two whole-slide
+detections at once, each taking every core it could get, with one of them
+already known to be unwanted. And the two shared one `Progress`: the detector
+held a single handle for its life and `reset` it before each run, so the old
+worker kept counting finished tiles into counters that had just been zeroed
+underneath it and were now being reported as the *new* run's progress. The bar
+was two runs added together over one run's total, and `Stop` reached whichever
+worker read the flag first.
+
+Each run now takes a fresh handle, and the old one is cancelled before it is
+let go of. That also removes the reason `Progress::reset` was being called at
+all: a new handle is already clear, so the ordering rule its documentation
+states — reset before you hand the handle over, never inside the run — has
+nothing to catch here. The rule is still right for a handle that *is* reused;
+the point is that the viewer no longer reuses one.
+
+`clear` had the same shape: it discarded the overlay and the result, and left
+the work running over a slide that had just been closed. It cancels now.
+
+The tests hand `start` a path that does not exist, which works because the
+level and the region are decided on the calling thread and only the *slide* is
+opened on the worker: the run fails immediately and the handles are still
+exactly what the supersede did to them.
+
 ### 8.8 What is still missing
 
 In the order it is worth having.
