@@ -1361,6 +1361,29 @@ Ten tests, none needing a window: the library function is pure, so `scalebar` is
 non-positive scale for §8.1b's reason — a NaN reaching a label is the same class
 of bug as a NaN reaching the viewport.
 
+**And it was measuring in the wrong unit, which the ten tests could not see.**
+`Viewport::scale` is physical screen pixels per level-0 pixel — the
+framebuffer's unit, and the one the tiles are drawn in. `egui` paints in
+logical points. The status bar handed the first straight to the second, so on a
+display at 2.0 the bar labelled `50 µm` was drawn **twice as long as 50 µm**,
+and anything sized against it read half its real size.
+
+This is the same fault as the two above it, and the third instance of it in one
+file. Worth stating plainly because of what it does to the argument for a
+scalebar at all: the library function is pure, ported exactly, and pinned by
+ten tests, *and all of that was true while the bar on screen lied*. Purity of
+the rule says nothing about the unit the answer is spent in — a label that is a
+round number is precisely what makes a wrong bar look trustworthy, and it is
+the one kind of wrong here that ends up quoted in a figure caption.
+
+The call site now converts the scale into points before asking, which also puts
+QuPath's preferred bar length of 100 back in the unit QuPath means it in:
+JavaFX lays out in logical units, so preferring 100 *physical* pixels would
+snap to a different round number than QuPath picks for the same view. The test
+is a round trip — what the drawn bar measures against what the label claims,
+across three scale factors — and its last assertion is the unconverted value,
+which overstates by exactly the scale factor.
+
 ### 8.2 The panes QuPath has and this does not
 
 Taken from the interface rather than from the code, in the order they are worth

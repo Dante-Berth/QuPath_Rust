@@ -306,9 +306,10 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
                 // floating over the image would sit inside the slide's rectangle,
                 // and §8.1c is what happens when something lands there. The bar
                 // is what gives the `px/px` beside it a physical meaning.
-                if let Some(bar) =
-                    qupath_viewer::scalebar(open.slide().microns_per_pixel(), open.view.scale)
-                {
+                if let Some(bar) = qupath_viewer::scalebar(
+                    open.slide().microns_per_pixel(),
+                    points_per_slide_pixel(open.view.scale, ui.ctx().pixels_per_point()),
+                ) {
                     scalebar(ui, &bar);
                     ui.separator();
                 }
@@ -1032,6 +1033,28 @@ fn metadata(ui: &mut egui::Ui, app: &App, command: &mut Command) {
         });
 }
 
+/// The viewport's scale in the unit `egui` draws in.
+///
+/// `Viewport::scale` is **physical** screen pixels per level-0 pixel — the
+/// framebuffer's own unit, and what the tiles are drawn in. `egui` lays out and
+/// paints in **logical points**. A length taken from the viewport and handed to
+/// a painter is therefore longer than it claims by exactly the scale factor.
+///
+/// In the scalebar that is not a cosmetic error but a wrong measurement: at a
+/// scale factor of 2.0 the bar labelled "50 µm" was drawn twice as long as
+/// 50 µm, so anything sized against it read half its real size — and the label
+/// being a round number is what makes a scalebar look trustworthy while it is
+/// wrong. Same family as `state::draw_interface` and `state::scale_area`, and
+/// the same fix: convert at the boundary, once.
+///
+/// Asking for the scale in points also puts QuPath's preferred bar length of
+/// 100 back in the unit QuPath means it in — JavaFX lays out in logical units,
+/// so a bar that prefers 100 *physical* pixels would snap to a different round
+/// number on a scaled display than QuPath picks for the same view.
+fn points_per_slide_pixel(scale: f64, pixels_per_point: f32) -> f64 {
+    scale / f64::from(pixels_per_point)
+}
+
 /// Draws a scalebar: a bar with end ticks, and its length written above it.
 ///
 /// The length comes from [`qupath_viewer::scalebar`], which is QuPath's rule; all
@@ -1320,6 +1343,67 @@ mod tests {
 
     fn contains((left, top, right, bottom): (f32, f32, f32, f32), point: egui::Pos2) -> bool {
         point.x >= left && point.x < right && point.y >= top && point.y < bottom
+    }
+
+    /// What a label like `50 µm` or `2 mm` claims, in microns.
+    fn claimed_microns(label: &str) -> f64 {
+        let (value, unit) = label.split_once(' ').expect("a value and a unit");
+        let value: f64 = value.parse().expect("a number");
+        if unit == "mm" { value * 1000.0 } else { value }
+    }
+
+    /// The scalebar measures what its label says, on a scaled display too.
+    ///
+    /// The bar's length arrives from the viewport in *physical* pixels and is
+    /// drawn by `egui` in *points*. Unconverted, the bar labelled "50 µm" was
+    /// drawn `pixels_per_point` times too long — so on a 2.0 display everything
+    /// measured against it read half its real size, and nothing about the
+    /// picture said so. A wrong scalebar is the one kind of wrong here that a
+    /// user would go on to quote in a figure caption.
+    ///
+    /// Asserted as a round trip rather than against a remembered length: what
+    /// matters is that the drawn bar and the printed label agree, whatever the
+    /// snapping picked.
+    #[test]
+    fn the_scalebar_measures_what_it_says_on_a_scaled_display() {
+        // CMU-1's pixel size, across the zooms a viewer actually sits at.
+        const MICRONS_PER_PIXEL: f64 = 0.499;
+
+        for scale in [0.02_f64, 0.05, 0.25, 1.0] {
+            for pixels_per_point in [1.0_f32, 1.5, 2.0] {
+                let bar = qupath_viewer::scalebar(
+                    Some(MICRONS_PER_PIXEL),
+                    super::points_per_slide_pixel(scale, pixels_per_point),
+                )
+                .expect("a slide with a pixel size");
+
+                // The bar is drawn `pixels` points long, which is that many
+                // physical pixels times the scale factor, which is that many
+                // level-0 pixels over the viewport's scale.
+                let measured = bar.pixels * f64::from(pixels_per_point) / scale * MICRONS_PER_PIXEL;
+                let claimed = claimed_microns(&bar.label);
+                assert!(
+                    (measured - claimed).abs() < claimed * 1e-9,
+                    "at {pixels_per_point}x and scale {scale}, a bar labelled {} \
+                     measures {measured} µm",
+                    bar.label,
+                );
+            }
+        }
+
+        // The value that would have made this fail is reachable: handing the
+        // viewport's physical scale straight to a painter that draws in points
+        // overstates the bar by exactly the scale factor.
+        let unconverted = qupath_viewer::scalebar(Some(MICRONS_PER_PIXEL), 0.25)
+            .expect("a slide with a pixel size");
+        let measured = unconverted.pixels * 2.0 / 0.25 * MICRONS_PER_PIXEL;
+        let claimed = claimed_microns(&unconverted.label);
+        assert!(
+            (measured - claimed * 2.0).abs() < claimed * 1e-9,
+            "unconverted, a bar labelled {} measures {measured} µm -- \
+             this is what regressed",
+            unconverted.label,
+        );
     }
 
     #[test]
