@@ -28,10 +28,14 @@ fn slide() -> Option<Slide> {
     path.exists().then(|| Slide::open(&path).expect("open"))
 }
 
-/// Waits for the pool to go idle, failing rather than hanging.
+/// Waits for the *workers* to finish, failing rather than hanging.
+///
+/// Not `is_idle`, which also waits for the caller to take delivery: every
+/// caller here drains after settling, so waiting for an empty channel first
+/// would be waiting for itself.
 fn settle(loader: &TileLoader) {
     let deadline = Instant::now() + Duration::from_secs(30);
-    while !loader.is_idle() {
+    while loader.pending() > 0 || loader.in_flight() > 0 {
         assert!(Instant::now() < deadline, "the loader never went idle");
         std::thread::sleep(Duration::from_millis(1));
     }

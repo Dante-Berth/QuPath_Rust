@@ -371,6 +371,41 @@ None was arithmetic, and the second two would have been invisible to a reader.
   a measurement may claim, applied to a comparison instead of a ratio: the
   confound was the measurement, not the thing measured.
 
+#### A fourth one, found later, and the example had a workaround for it
+
+The three above were found by looking. This one was found by reading
+`is_idle`, and it is the same shape: *a tile in the channel is not in any set
+`is_idle` looked at.*
+
+`delivered` exists precisely for the gap between a worker sending a tile and
+the caller draining it — the comment on the field says a tile in that window is
+"invisible to everything else". `is_idle` then answered `pending.is_empty() &&
+claimed.is_empty()`, so the instant the last worker released its claim it said
+there was nothing left. `about_to_wait` asks that question to decide whether to
+request another frame, so the loop went to sleep with the tile still in the
+channel and no frame coming to draw it. The underlay covers the hole, so what
+it looks like is a pan that stops one tile short of sharp until the next mouse
+movement — which reads as a slow decode, not as a bug.
+
+The part worth keeping is that **`examples/window.rs` already worked around
+it**. It read `is_idle` *before* draining as well as after, and the comment
+explaining why describes exactly this window. So the symptom had been seen,
+diagnosed correctly at the call site, and patched there — while the predicate
+it was patching stayed wrong for every other caller, and `state.rs` (the
+application, which asks only once and only after draining) had the bug in full.
+A workaround at one call site is a bug report the code is making about itself;
+this one went unread for as long as the example kept working.
+
+`is_idle` now counts `delivered`, `window.rs` is back to asking once, and
+`TileLoader::undrained` makes the set observable so the status bar's "N
+loading" does not drop to zero while a tile is still owed. The test puts a tile
+in the channel on purpose — wait for the workers to settle, do not drain,
+assert `!is_idle()` — which is the state the old predicate called idle.
+
+The rename it forces is worth noticing too: two tests and `tests/loading.rs`
+used `is_idle` to mean "the *workers* are done", which is a different question
+from "there is nothing more to draw". They ask the first one explicitly now.
+
 #### What is honestly not shown
 
 `cancelled` comes out **0** in that report, and the report says so rather than

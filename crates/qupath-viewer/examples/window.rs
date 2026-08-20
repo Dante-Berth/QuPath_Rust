@@ -397,12 +397,6 @@ impl App {
             .as_ref()
             .map_or_else(Vec::new, |level| self.view.visible_tiles(level));
 
-        // Asked *before* draining. A worker releases its claim after handing
-        // the tile over, so "busy now" means "there is more coming"; asking
-        // afterwards would miss a tile that landed in between and let the
-        // window go back to sleep holding an incomplete frame.
-        let was_busy = !self.loader.is_idle();
-
         let view = self.view;
         let Some(backend) = self.backend.as_mut() else {
             return;
@@ -447,7 +441,14 @@ impl App {
             self.requested.clone_from(&missing);
             self.loader.request(missing);
         }
-        self.incomplete = was_busy || !self.loader.is_idle();
+        // One question, asked after draining. This used to be `busy before ||
+        // busy after`, to cover a tile that landed between the two: a worker
+        // released its claim after handing the tile over, so between the drain
+        // and this line a finished tile was in no set `is_idle` looked at and
+        // the window went back to sleep holding an incomplete frame.
+        // `is_idle` now counts what has been sent and not drained, so the
+        // window either has the tile or is told to come back for it.
+        self.incomplete = !self.loader.is_idle();
 
         backend.present(&draws);
 

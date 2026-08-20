@@ -236,8 +236,13 @@ impl Open {
     }
 
     /// Tiles the loader still owes.
+    ///
+    /// Including the ones already in the channel: a tile that has been decoded
+    /// and not yet drained has no frame showing it, so it is still owed to the
+    /// person watching the status bar, and this counts what
+    /// [`TileLoader::is_idle`] answers about.
     pub fn outstanding(&self) -> usize {
-        self.loader.pending() + self.loader.in_flight()
+        self.loader.pending() + self.loader.in_flight() + self.loader.undrained()
     }
 }
 

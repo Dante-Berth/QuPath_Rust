@@ -252,6 +252,17 @@ impl TileLoader {
         self.shared.lock().claimed.len()
     }
 
+    /// Tiles decoded and sent, and not yet taken delivery of by the caller.
+    ///
+    /// The state between a worker finishing and [`TileLoader::drain`] being
+    /// called. It is work still owed to the caller — the tile exists but no
+    /// frame has drawn it — which is why [`TileLoader::is_idle`] counts it and
+    /// why a status line counting what is outstanding should too.
+    #[must_use]
+    pub fn undrained(&self) -> usize {
+        self.shared.lock().delivered.len()
+    }
+
     /// Tiles that failed to decode and will not be attempted again.
     ///
     /// A hole in the frame that stays a hole. Zero on a slide `qupath-slide`
@@ -263,14 +274,23 @@ impl TileLoader {
         self.shared.lock().failed.len()
     }
 
-    /// Whether every requested tile has been decoded and delivered.
+    /// Whether every requested tile has been decoded *and taken delivery of*.
     ///
     /// The render loop uses this to decide whether it still needs to be woken:
     /// while this is false the frame is incomplete and another redraw is owed.
+    ///
+    /// `delivered` is counted, and leaving it out was a bug. A tile that has
+    /// been sent and not yet drained is in none of the other sets — that is
+    /// what `delivered` is for — so the instant the last worker released its
+    /// claim this said "nothing left", the loop slept, and the tile stayed in
+    /// the channel with no frame coming to draw it. `drain` is what empties the
+    /// set, and the render loop drains at the top of every frame, so this still
+    /// settles to true after one more redraw rather than asking for frames
+    /// forever.
     #[must_use]
     pub fn is_idle(&self) -> bool {
         let queue = self.shared.lock();
-        queue.pending.is_empty() && queue.claimed.is_empty()
+        queue.pending.is_empty() && queue.claimed.is_empty() && queue.delivered.is_empty()
     }
 
     /// Tiles decoded since the pool started, successfully or not.
@@ -564,6 +584,15 @@ mod tests {
         panic!("timed out waiting for {what}");
     }
 
+    /// Whether the *workers* have nothing left, drained or not.
+    ///
+    /// Distinct from [`TileLoader::is_idle`], which also waits for the caller
+    /// to take delivery: a test that wants a tile sitting undrained in the
+    /// channel is asking this question and not that one.
+    fn settled(loader: &TileLoader) -> bool {
+        loader.pending() == 0 && loader.in_flight() == 0
+    }
+
     fn tiles(count: u32) -> Vec<TileIndex> {
         (0..count)
             .map(|column| TileIndex::new(column, 0, 0))
@@ -609,7 +638,7 @@ mod tests {
         let loader = TileLoader::new(&source, 1);
 
         loader.request(tiles(1));
-        until("the tile to be delivered", || loader.is_idle());
+        until("the tile to be delivered", || settled(&loader));
         assert_eq!(source.decodes(), 1);
 
         // Requested again, undrained. `request` decides synchronously under the
@@ -624,8 +653,47 @@ mod tests {
         assert_eq!(loader.drain().len(), 1);
         loader.request(tiles(1));
         until("the second decode", || {
-            loader.is_idle() && source.decodes() == 2
+            settled(&loader) && source.decodes() == 2
         });
+    }
+
+    /// A tile in the channel and not yet drained is still work owed.
+    ///
+    /// [`TileLoader::is_idle`] is what the render loop asks to decide whether
+    /// it needs another frame, and `delivered` is the set that exists precisely
+    /// because a tile between "a worker sent it" and "the caller drained it" is
+    /// invisible to the other two. `is_idle` did not consult it — so the moment
+    /// the last worker released its claim the loop was told there was nothing
+    /// left, went to sleep, and the tile sat in the channel undrawn.
+    ///
+    /// What that looks like is a pan that stops one tile short of finished:
+    /// the underlay covers the hole, so the frame is soft in one square until
+    /// the next mouse movement wakes the loop and the tile appears. It reads as
+    /// a slow decode rather than as a bug, which is why it is asserted here
+    /// rather than looked for on screen — this is the fourth of §3.4's bugs
+    /// "about *when* state becomes visible", and they are all invisible in
+    /// exactly this way.
+    #[test]
+    fn a_tile_in_the_channel_is_not_idle() {
+        let source = Fake::open();
+        let loader = TileLoader::new(&source, 1);
+        loader.request(tiles(1));
+
+        // Decoded, sent, and deliberately not drained. `decoded` is bumped
+        // under the same lock that moves the tile out of `claimed`, so once
+        // the claim is released the tile is in `delivered` and nowhere else —
+        // which is the state the render loop was reading as "nothing to do".
+        until("the workers to finish", || settled(&loader));
+        assert_eq!(source.decodes(), 1);
+        assert_eq!(loader.undrained(), 1, "the tile is in the channel");
+        assert!(
+            !loader.is_idle(),
+            "a tile the caller has not seen yet is still owed to it",
+        );
+
+        // And once the caller has taken delivery, there is nothing left.
+        assert_eq!(loader.drain().len(), 1);
+        assert!(loader.is_idle(), "nothing is left once the caller drains");
     }
 
     #[test]
@@ -733,7 +801,7 @@ mod tests {
         assert_eq!(loader.pending(), 0, "the claimed tile was queued again");
 
         source.unlatch();
-        until("the tile", || loader.is_idle());
+        until("the tile", || settled(&loader));
         assert_eq!(source.decodes(), 1);
     }
 
