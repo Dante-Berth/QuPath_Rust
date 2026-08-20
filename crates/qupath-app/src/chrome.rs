@@ -475,11 +475,17 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
 ///
 /// QuPath's dialog is in microns and so is this, so a number a user knows
 /// transfers. But the pipeline computes in **pixels**, and the conversion needs
-/// the slide's pixel size — so the panel shows both: the micron value that is
-/// being edited, and the pixel value that will actually run. A parameter whose
+/// a pixel size — so the panel shows both: the micron value that is being
+/// edited, and what the slide's pixel size makes of it. A parameter whose
 /// effect depends on a number the interface does not show is one the user cannot
 /// reason about, and the pixel column is what makes "8 µm" mean something
 /// specific on this slide rather than in general.
+///
+/// The column is in **level-0** pixels, which is the frame everything else here
+/// is quoted in. A run that reads a coarser level converts again with that
+/// level's pixel size — `detect::params_for` — so the micron value is what
+/// holds across levels and the pixel value is what it means at full
+/// resolution.
 ///
 /// **Only the six parameters this pipeline implements appear.** QuPath's median
 /// filter radius, cell expansion and boundary smoothing are not implemented, and
@@ -701,7 +707,11 @@ fn slider(
                 .weak()
                 .small(),
         )
-        .on_hover_text("What this slide's pixel size makes of the value above.");
+        .on_hover_text(
+            "What this slide's pixel size makes of the value above, in level-0 \
+             pixels. A run that reads a coarser level converts again for that \
+             level, so the micron value is the one that holds.",
+        );
     }
     changed
 }

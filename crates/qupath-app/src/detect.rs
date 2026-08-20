@@ -498,6 +498,44 @@ impl Detector {
     }
 }
 
+/// `tuning` in the pixels of the level the run will read.
+///
+/// # The pixel size is the level's, not the slide's
+///
+/// The parameters are in microns and the pipeline works in the pixels of
+/// whatever level it reads, so the conversion needs the pixel size *of that
+/// level* — the slide's `MPP` times the level's downsample. This used to divide
+/// by the slide's own `MPP` whatever level was being read, which is right at
+/// level 0 and wrong everywhere else: at a downsample of 4 every radius came
+/// out four times too large and every area **sixteen** times, so `min_area`'s
+/// 10 µm² asked for a nucleus of 160 level-1 pixels where a real one is 10, and
+/// the area filter rejected essentially everything.
+///
+/// It survived because it is unreachable on CMU-1. [`level_for_detection`]
+/// takes the coarsest level at or under [`MAX_MICRONS_PER_PIXEL`], and CMU-1's
+/// levels are 0.499, 2.0 and 8.0 µm/px — only level 0 clears 1.0, so every run
+/// on the slide this project measures everything against reads level 0, where
+/// the two pixel sizes are the same number. A slide scanned at 40x has 0.25
+/// µm/px and a level 1 at exactly 1.0, which does clear it. The comment on
+/// [`MAX_MICRONS_PER_PIXEL`] already asserted this function's behaviour —
+/// "the pipeline converts them with the level's own pixel size, so a run at any
+/// level is *arithmetically* consistent" — which was the intent and not what
+/// the code did.
+///
+/// A slide that records no `MPP` keeps [`Params::default`]'s assumed values
+/// rather than refusing to run, and the analysis panel says which of the two is
+/// happening.
+fn params_for(tuning: Micron, mpp: Option<f64>, levels: &[Level], level: usize) -> Params {
+    // Read off the level table rather than assumed, for the reason the overlay's
+    // downsample is: a level index with no level behind it would be a silent
+    // factor of one.
+    let downsample = levels.get(level).map_or(1.0, |level| level.downsample);
+    Params {
+        level,
+        ..mpp.map_or_else(Params::default, |mpp| tuning.at(mpp * downsample))
+    }
+}
+
 /// A finished run as a sentence.
 ///
 /// The level is in it because the outlines' resolution follows it, and a run at
@@ -539,17 +577,7 @@ fn detect(
     progress: &Progress,
 ) -> Result<(Overlay, usize), pipeline::PipelineError> {
     let slide = Slide::open(path)?;
-    // The slide's own pixel size, not an assumed one. `Params::default`
-    // hardcodes CMU-1's 0.4990 µm/px, so a slide scanned at any other size got
-    // every micron-derived filter at the wrong scale -- see `VIEWER.md` §8.0.
-    // A slide that records no `MPP` keeps the old behaviour rather than
-    // refusing to run, and the panel says which of the two is happening.
-    let params = Params {
-        level,
-        ..slide
-            .microns_per_pixel()
-            .map_or_else(Params::default, |mpp| tuning.at(mpp))
-    };
+    let params = params_for(tuning, slide.microns_per_pixel(), slide.levels(), level);
     let (outcome, detections) = pipeline::run_collecting_watched(&slide, region, params, progress)?;
 
     // Read off the level table rather than assumed. A run at any level but 0
@@ -1051,6 +1079,69 @@ mod tests {
         // Polling before anything has been started must be a cheap no-op rather
         // than a panic on an absent receiver.
         assert!(!detector.poll());
+    }
+
+    /// A parameter means the same physical size whichever level is read.
+    ///
+    /// The parameters are in microns, the pipeline works in the pixels of the
+    /// level it reads, and the conversion needs *that* level's pixel size. It
+    /// used the slide's own, which is right at level 0 and wrong by the
+    /// downsample everywhere else — and by its **square** for the two areas, so
+    /// at a downsample of 4 the area filter was asking for a nucleus sixteen
+    /// times too large and rejecting everything.
+    ///
+    /// Asserted as the physical round trip rather than against the arithmetic:
+    /// whatever level a run reads, the pixel value times that level's pixel
+    /// size has to be the micron value that was asked for.
+    ///
+    /// The pixel size is 0.25 µm/px — a 40x scan — and not CMU-1's 0.499,
+    /// because at 0.499 nothing but level 0 clears
+    /// [`MAX_MICRONS_PER_PIXEL`] and the bug is unreachable. That is why it
+    /// survived: every run on the slide this project measures against is at
+    /// level 0, where the two pixel sizes are the same number.
+    #[test]
+    fn a_parameter_means_the_same_size_at_whatever_level_a_run_reads() {
+        const MPP: f64 = 0.25;
+        let levels = cmu1();
+        let tuning = Micron::default();
+
+        for level in 0..levels.len() {
+            let params = params_for(tuning, Some(MPP), &levels, level);
+            let pixel = MPP * levels[level].downsample;
+            assert_eq!(params.level, level);
+            assert!(
+                (params.sigma * pixel - tuning.sigma).abs() < 1e-9,
+                "sigma at level {level} is {} px, which is {} µm and not {}",
+                params.sigma,
+                params.sigma * pixel,
+                tuning.sigma,
+            );
+            assert!(
+                (params.min_area * pixel * pixel - tuning.min_area).abs() < 1e-9,
+                "min_area at level {level} is {} px², which is {} µm² and not {}",
+                params.min_area,
+                params.min_area * pixel * pixel,
+                tuning.min_area,
+            );
+        }
+
+        // The value that would have made this fail is reachable: converted at
+        // the slide's own pixel size, a run at level 1 asks for an area
+        // sixteen times the one the panel shows.
+        let wrong = tuning.at(MPP);
+        let level_1 = MPP * levels[1].downsample;
+        assert!(
+            (wrong.min_area * level_1 * level_1 - tuning.min_area * 16.0).abs() < 1e-6,
+            "unconverted, level 1 asks for {} µm² rather than {}",
+            wrong.min_area * level_1 * level_1,
+            tuning.min_area,
+        );
+
+        // A slide with no pixel size keeps the built-in parameters rather than
+        // refusing to run, at whatever level.
+        let assumed = params_for(tuning, None, &levels, 1);
+        assert_eq!(assumed.level, 1);
+        assert!((assumed.sigma - Params::default().sigma).abs() < f64::EPSILON);
     }
 
     /// Starting a run stops the one it replaces, and shares nothing with it.

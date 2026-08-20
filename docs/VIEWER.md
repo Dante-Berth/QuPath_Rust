@@ -1166,6 +1166,41 @@ Six tests, four of them on the parser as a pure function: it trims around `=`
 because Aperio writes the spaces, and matches the whole key so `MPP` is not
 found inside `StripeWidth`.
 
+#### The same mistake one level down: which pixel size
+
+§8.0 fixed the parameters being converted with an *assumed* pixel size. What it
+did not ask is *whose* pixel size — and once §8.9 started moving runs to a level
+the viewer is not drawing, the answer stopped being "the slide's".
+
+The pipeline works in the pixels of the level it reads. `detect` converted the
+micron parameters with the slide's own `MPP` whatever level that was, which is
+right at level 0 and wrong by the downsample everywhere else — and by its
+**square** for the two areas. At a downsample of 4, `min_area`'s 10 µm² asked
+for a nucleus of 160 level-1 pixels where a real one is 10, so the area filter
+would have rejected essentially everything and the run would have reported
+almost no objects on a slide full of them.
+
+**Why it survived, and why that is the interesting part.** It is unreachable on
+CMU-1. `level_for_detection` takes the coarsest level at or under
+`MAX_MICRONS_PER_PIXEL`, and CMU-1's levels are 0.499, 2.0 and 8.0 µm/px — only
+level 0 clears 1.0. Every run on the slide this project measures everything
+against reads level 0, where the slide's pixel size and the level's are the same
+number. A slide scanned at 40x has 0.25 µm/px and a level 1 at exactly 1.0,
+which does clear it; that slide is not in `data/`.
+
+That is the same shape as the two unit bugs above — a factor that is 1 on the
+only configuration anything is ever run at. It is worth stating as a rule: **a
+conversion whose factor is 1 in the development setup is untested, not correct.**
+Scale factor 1.0, downsample 1.0, level 0. All three hid a bug here.
+
+The comment on `MAX_MICRONS_PER_PIXEL` had already *asserted* the right
+behaviour — "the pipeline converts them with the level's own pixel size, so a
+run at any level is arithmetically consistent" — which is what the code was
+meant to do and not what it did. The conversion now lives in `params_for`, and
+the test asserts the physical round trip across every level of a 0.25 µm/px
+pyramid: the pixel value times that level's pixel size is the micron value that
+was asked for.
+
 ### 8.1b Trackpad zoom — **done**, and one half of it cannot be fixed here
 
 Reported from use: *pinch-to-zoom on a trackpad does nothing.* Two causes, and
