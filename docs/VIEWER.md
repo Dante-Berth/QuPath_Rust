@@ -1700,6 +1700,26 @@ following it exactly is interoperability rather than a second application. The
 browser pane is **not** written and is the part that would be, and there is
 still no `data.qpdata` — see §8.8.
 
+**The URI trap has a second half, on the other side of the same line.** §8.3's
+header says a project whose `uri` fields are bare paths opens with every image
+missing, and `file_uri` was written to prevent it. What it did not handle is a
+path that is *relative*: `file://data/CMU-1.svs` is not a bare path, it is a
+well-formed URI naming the **host** `data` and the path `/CMU-1.svs`, so QuPath
+looks for the slide on another machine and the entry fails to open — the same
+failure, reached from the other side, and by a URI that looks right.
+
+It is the common case rather than an odd one: this file documents starting the
+application as `cargo run -p qupath-app -- data/CMU-1.svs`, so the path an
+entry would be written from is relative in the commonest invocation there is.
+The module has no caller yet, so this was latent — and it would have surfaced
+as "the project browser writes projects QuPath cannot open", which is a much
+harder thing to trace back to one missing slash.
+
+`file_uri` resolves against the working directory now, which is exactly what
+`File.toURI()` does in the Java this module follows. `std::path::absolute` is
+the lexical form of that — it joins the working directory without resolving
+symlinks or touching the file.
+
 ### 8.4 The overview — the invariant is that the two mappings agree
 
 `overview.rs` is `ImageOverview.java`'s arithmetic: slide to overview, which

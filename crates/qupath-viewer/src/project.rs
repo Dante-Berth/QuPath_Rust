@@ -272,8 +272,31 @@ fn placeholder_name(index: usize) -> String {
 /// Only the characters that must be encoded are: a URI with every byte escaped
 /// is legal and unreadable, and the fields are read by people when a project
 /// goes wrong.
+///
+/// # A relative path is resolved first, because `File.toURI()` resolves one
+///
+/// `file://` followed by a relative path is not a lenient spelling of the same
+/// thing: `file://data/CMU-1.svs` names the **host** `data` and the path
+/// `/CMU-1.svs`, so QuPath looks for the slide on a machine called `data` and
+/// the entry fails to open — the exact failure this module's header warns
+/// about, arrived at from the other side.
+///
+/// It is not a hypothetical path either. `docs/VIEWER.md` documents starting
+/// the application as `cargo run -p qupath-app -- data/CMU-1.svs`, so the path
+/// an entry would be written from is relative in the commonest invocation
+/// there is.
+///
+/// Java's `File.toURI()` resolves against the working directory, and following
+/// it exactly is this module's whole thesis, so that is what happens here.
+/// [`std::path::absolute`] is the lexical form of it — it reads the working
+/// directory and joins, without resolving symlinks or touching the file — which
+/// is what `File.toURI()` does too. A path that cannot be made absolute is
+/// written as it stands, since a wrong URI beats no project at all and the
+/// caller has no better information than this does.
 #[must_use]
 pub fn file_uri(path: &Path) -> String {
+    let absolute = std::path::absolute(path);
+    let path = absolute.as_deref().unwrap_or(path);
     let mut out = String::from("file://");
     let text = path.to_string_lossy();
     for byte in text.bytes() {
@@ -355,6 +378,31 @@ mod tests {
 
     /// A directory with a space in its name is not an edge case, and an
     /// unencoded space is what breaks the URI.
+    /// A relative path becomes an absolute URI, because `file://` plus a
+    /// relative path names a *host*.
+    ///
+    /// `file://data/CMU-1.svs` is host `data`, path `/CMU-1.svs`: QuPath looks
+    /// for the slide on another machine and the entry fails to open, which is
+    /// the failure this module's header is about. It is the commonest case
+    /// rather than an odd one — `docs/VIEWER.md` starts the application as
+    /// `cargo run -p qupath-app -- data/CMU-1.svs`.
+    #[test]
+    fn a_relative_path_is_resolved_rather_than_naming_a_host() {
+        let uri = file_uri(Path::new("data/CMU-1.svs"));
+        assert!(
+            uri.starts_with("file:///"),
+            "a relative path must not leave a host in the URI: {uri}"
+        );
+        assert!(uri.ends_with("/data/CMU-1.svs"), "{uri}");
+
+        // An absolute path is untouched, which is the case the rest of these
+        // tests are written against.
+        assert_eq!(
+            file_uri(Path::new("/data/CMU-1.svs")),
+            "file:///data/CMU-1.svs"
+        );
+    }
+
     #[test]
     fn a_space_in_a_path_is_percent_encoded() {
         assert_eq!(
