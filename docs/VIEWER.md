@@ -657,6 +657,55 @@ The loader half is pinned — `a_failed_tile_is_not_held_as_delivered` and
 §6's "checked by looking", which is the honest description of a string in a
 status bar.
 
+#### The File menu took the window down, for forty-five commits
+
+`rfd` was added as
+
+```toml
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+```
+
+and every file dialog in the application **panicked the process** the instant
+it was opened:
+
+```text
+thread 'main' panicked at zbus-5.19.0/src/abstractions/executor.rs:217:9:
+there is no reactor running, must be called from the context of a Tokio 1.x runtime
+```
+
+`pick_file` and `save_file` are `rfd`'s *blocking* API — which is what a modal
+dialog on the event-loop thread wants — and it runs the portal call through
+`pollster::block_on`. The `tokio` feature builds `ashpd` and `zbus` against
+tokio, whose primitives require an ambient runtime, and nothing here is inside
+one. `async-std` is `rfd`'s own default for exactly this reason; the
+`default-features = false` line turned the default off and picked the
+combination that cannot work.
+
+So **File → Open slide… and `o` crashed the viewer**, from the commit that
+introduced the application until now. Opening a slide by any means other than
+the command line was impossible.
+
+**Why nobody noticed, which is the whole lesson.** Every way this project
+exercises the application avoids the dialog. `examples/chrome` renders the
+panels with no event loop. The unit tests build an `App` and never press
+anything. The window was launched — when it was launched at all — with a path
+on the command line, because that is how a developer with a slide in `data/`
+starts it. The one path that reaches `rfd` is a person clicking a menu item,
+and §8.8's "the running application is still unlooked-at" is exactly that gap,
+still being paid for.
+
+It also cannot be caught by a test in the ordinary way: the call blocks on a
+real portal and puts a window on a real desktop. What found it was running the
+binary and reading `stderr` — and the fix is verified the same way, with a
+probe that calls `pick_file` and is killed after thirty seconds instead of
+panicking in under one.
+
+The lesson generalises past this crate: **a dependency's feature flags are
+code, and `default-features = false` is a decision to re-derive them.** Turning
+the defaults off and naming two features looks conservative and is the opposite
+— it is opting out of the combination the crate's author tested, which here was
+the only one that works.
+
 #### The idle claim, which was wrong twice
 
 This section first recorded **0% of one core** at rest, and that was measured
