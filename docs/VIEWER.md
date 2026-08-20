@@ -28,7 +28,8 @@ Two things it deliberately will not do: edit annotations, and write
 cargo run -p qupath-app --release -- data/CMU-1.svs
 ```
 
-Drag to pan, scroll to zoom, `f` to fit the slide, `d` to detect, `o` to open.
+Drag to pan, scroll to zoom, `f` to fit the slide, `d` to detect, `s` to save
+what was found, `o` to open.
 The **View** menu opens the side panels — the slide panel holds the overview
 map and the brightness and contrast controls.
 
@@ -166,10 +167,11 @@ take a slide path defaulting to `data/CMU-1.svs`.
 #
 # Drag to pan -- the view is held on the slide, §3.8 -- scroll or +/- to zoom
 # about the cursor, right-drag a box to zoom to that region, f to fit. `d`
-# detects cells in what is on screen and `h` hides the outlines again; the run
-# happens on another thread, so the view keeps moving while it works. The View
-# menu opens the analysis pane, the slide panel — which carries the overview
-# map and the brightness controls (§8.4, §8.7) — and the mouse/keyboard help.
+# detects cells in what is on screen, `h` hides the outlines again and `s`
+# saves them as GeoJSON; the run happens on another thread, so the view keeps
+# moving while it works. The View menu opens the analysis pane, the slide panel
+# — which carries the overview map and the brightness controls (§8.4, §8.7) —
+# and the mouse/keyboard help.
 cargo run -p qupath-app --release
 cargo run -p qupath-app --release -- data/CMU-1.svs
 
@@ -1518,9 +1520,14 @@ having.
   no equivalent pane; this one is ours. It is also where the trackpad and
   ctrl-scroll gestures of §8.1b are stated, which is the only place a user would
   find them.
-- **Saving detections — done, §8.6.** `geojson.rs`, in the dialect QuPath
-  reads. §0's "nothing found is saved" is revised there rather than quietly:
-  the *parameters* are still not saved, and no detection is editable.
+- **Saving detections — done, §8.6, and for several sessions only half.**
+  `geojson.rs` writes the dialect QuPath reads, and §0's "nothing found is
+  saved" is revised there rather than quietly. What "done" did not mean, until
+  it was checked, is that anyone could *reach* it: the writer was a library
+  function with no caller, while the top of this file said "what you find can
+  be saved as GeoJSON that QuPath opens". It is File → **Save detections…**,
+  and `s`. The *parameters* are still not saved, and no detection is
+  editable.
 
 ### 8.3 Projects — the format is portable, the browser is not
 
@@ -1649,6 +1656,28 @@ arrays and a flat map of numbers is not enough reason to acquire one. Verified
 by round-tripping real output through a JSON parser rather than only by the
 brace-balance test, because balanced braces are exactly what a hand-rolled
 writer gets right while getting the field names wrong.
+
+**Nothing called it.** The format was written, tested against a JSON parser,
+pinned for level-0 coordinates — and no menu item, key or button anywhere in the
+application invoked it, for as long as this section has said "done". The top of
+this file has said "what you find can be saved as GeoJSON that QuPath opens"
+throughout.
+
+That is worth recording next to the unit bugs above, because it is the same
+failure in a different medium: **a claim asserted in prose that the code does
+not deliver**, and the reason it survived is that everything the claim names
+does exist and is correct. The writer works. The tests pass. The only missing
+piece was the one nobody writes a test for, which is that a person can get to
+it. Checking took one `grep` for callers, which is now worth doing for every
+item in a list of things that are "done".
+
+It is File → **Save detections…**, or `s`. The menu item and the action read
+one predicate — `App::found` — because two would drift into a live menu item
+that does nothing when pressed, which reads as a broken save rather than as an
+empty one. No measurements are written: `detect` turns a run's `Detections`
+into an `Overlay` of outlines and drops the rest, so there is nothing to
+attach, and that is a property of what the viewer keeps rather than a gap in
+the writer.
 
 ### 8.7 The brightness/contrast panel — the controls, and where the range lives
 

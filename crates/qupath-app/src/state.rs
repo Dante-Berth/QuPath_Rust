@@ -24,7 +24,7 @@ use qupath_slide::Slide;
 use qupath_viewer::compose::{self, Framebuffer, MeshVertex, Texture};
 use qupath_viewer::overview::Overview;
 use qupath_viewer::{
-    Display, ScreenPoint, SlidePoint, SlideTiles, Stain, TileCache, TileLoader, Viewport,
+    Display, Overlay, ScreenPoint, SlidePoint, SlideTiles, Stain, TileCache, TileLoader, Viewport,
 };
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{Key, NamedKey};
@@ -882,6 +882,10 @@ impl App {
                 self.show_overlay = !self.show_overlay;
                 true
             }
+            Key::Character("s") => {
+                self.run(Command::Export, window);
+                true
+            }
             Key::Named(NamedKey::Escape) => {
                 // Not an exit. In an application escape closes a dialog, and
                 // taking the window down on a stray keypress is what makes an
@@ -926,6 +930,75 @@ impl App {
             };
             open.look(fitted);
         }
+    }
+
+    /// Writes the last run's outlines as GeoJSON, through a save dialog.
+    ///
+    /// `docs/VIEWER.md` §8.6 wrote the format and §8.2 recorded saving as done,
+    /// and for several sessions **nothing called it**: `geojson::write` was a
+    /// library function with no caller while the file's own opening paragraph
+    /// said "what you find can be saved as GeoJSON that QuPath opens". This is
+    /// that sentence being made true.
+    ///
+    /// No measurements are written, and that is a property of what the viewer
+    /// keeps rather than a gap in the writer: [`crate::detect`] turns a run's
+    /// [`Detections`](qupath_pipeline::Detections) into an [`Overlay`] of
+    /// outlines and drops the rest, so there is nothing to attach. QuPath opens
+    /// the file and shows the objects; a measurements column would need the
+    /// detector to hold on to more, which is `docs/VIEWER.md` §8.8's business
+    /// and not this function's.
+    ///
+    /// Every failure ends in [`App::message`] rather than a panic, for
+    /// [`Open::new`]'s reason: a full disk is an ordinary thing to happen to an
+    /// application and an unwritable path is the user's own choice of one.
+    fn export(&mut self, window: &Window) {
+        let Some(overlay) = self.found() else {
+            self.message = String::from("Nothing to save: detect cells first (d).");
+            return;
+        };
+
+        // Named after the slide, so a directory of exports says which slide
+        // each came from without being opened.
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Save detections as GeoJSON")
+            .set_file_name(export_name(
+                self.open.as_ref().map(|open| open.path.as_path()),
+            ))
+            .add_filter("GeoJSON", &["geojson", "json"]);
+        if let Some(directory) = self.recent.first().and_then(|path| path.parent()) {
+            dialog = dialog.set_directory(directory);
+        }
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+
+        // No measurements: see this function's documentation.
+        let (text, written) = qupath_viewer::geojson::write(overlay, &[]);
+        self.message = match std::fs::write(&path, text) {
+            Ok(()) => format!("Saved {written} objects to {}", display_name(&path)),
+            Err(error) => format!("Could not save {}: {error}", display_name(&path)),
+        };
+        window.request_redraw();
+    }
+
+    /// What there is to save, or `None` when no run has found anything.
+    ///
+    /// One predicate, read by both the menu item that offers the save and the
+    /// function that performs it. Two would eventually disagree, and the way
+    /// they disagree is a live menu item that does nothing when pressed —
+    /// which reads as the save being broken rather than as there being nothing
+    /// to save.
+    ///
+    /// It asks the detector rather than the open slide because that is where
+    /// the lifetime is: [`Detector::clear`] is what drops an overlay when the
+    /// slide changes, so a run against a slide that is no longer open has
+    /// already been discarded by the time this is asked.
+    #[must_use]
+    pub fn found(&self) -> Option<&Overlay> {
+        self.detector
+            .overlay
+            .as_ref()
+            .filter(|overlay| !overlay.is_empty())
     }
 
     /// The middle of what is on screen, for the controls that zoom about a
@@ -1045,6 +1118,7 @@ impl App {
                     );
                 }
             }
+            Command::Export => self.export(window),
             Command::ToggleOverlay => self.show_overlay = !self.show_overlay,
             Command::ToggleAnalysis => self.show_analysis = !self.show_analysis,
             Command::ToggleMetadata => self.show_metadata = !self.show_metadata,
@@ -1524,6 +1598,21 @@ fn thumbnail(slide: &Slide) -> Option<Thumbnail> {
     Some(Thumbnail { pixels, overview })
 }
 
+/// The file name a save dialog opens with.
+///
+/// The slide's **stem** and not [`display_name`], which keeps the extension:
+/// "CMU-1.svs-detections.geojson" is a name nobody meant. Named after the slide
+/// at all so a directory of exports says which slide each came from without
+/// being opened.
+#[must_use]
+pub fn export_name(slide: Option<&Path>) -> String {
+    let stem = slide.and_then(Path::file_stem).map_or_else(
+        || String::from("detections"),
+        |stem| format!("{}-detections", stem.to_string_lossy()),
+    );
+    format!("{stem}.geojson")
+}
+
 /// The file name of a path, for a title bar.
 pub fn display_name(path: &Path) -> String {
     path.file_name().map_or_else(
@@ -1868,6 +1957,62 @@ mod tests {
             bottom_row(&primitives, &textures, 1.0, PHYSICAL),
             0,
             "unscaled, nothing reaches the bottom row -- this is what regressed",
+        );
+    }
+
+    /// A saved file is named after the slide, not after its file name.
+    ///
+    /// `display_name` keeps the extension because a status bar wants it, and
+    /// reusing it here produced "CMU-1.svs-detections.geojson".
+    #[test]
+    fn a_saved_file_is_named_after_the_slide() {
+        assert_eq!(
+            export_name(Some(Path::new("/slides/CMU-1.svs"))),
+            "CMU-1-detections.geojson"
+        );
+        // A slide with dots in its name keeps all but the last segment, which
+        // is what `file_stem` means and what a person would write by hand.
+        assert_eq!(
+            export_name(Some(Path::new("/slides/CMU-1-JP2K-33005.svs"))),
+            "CMU-1-JP2K-33005-detections.geojson"
+        );
+        // No slide open is still a usable name rather than an empty one: the
+        // overlay outlives the slide, so this is reachable.
+        assert_eq!(export_name(None), "detections.geojson");
+    }
+
+    /// The save is offered exactly when it would do something.
+    ///
+    /// The menu item's enabled state and the action's own guard read one
+    /// predicate. Two would drift, and the way they drift is a live menu item
+    /// that does nothing when pressed — which reads as a broken save rather
+    /// than as an empty one.
+    #[test]
+    fn there_is_nothing_to_save_until_a_run_finds_something() {
+        let mut app = App::new(None);
+        assert!(app.found().is_none(), "a fresh viewer has found nothing");
+
+        // A run that finished having found nothing is still nothing to save,
+        // which is the case an `is_some()` on the overlay alone would offer.
+        app.detector.overlay = Some(Overlay::new());
+        assert!(
+            app.found().is_none(),
+            "an empty overlay must not offer a file with no objects in it"
+        );
+
+        // And one with an object in it is.
+        let mut overlay = Overlay::new();
+        overlay.push_level_ring(&[[0, 0], [4, 0], [4, 4], [0, 4]], 1.0);
+        app.detector.overlay = Some(overlay);
+        assert!(app.found().is_some());
+
+        // Closing the slide takes it away again, because the outlines are in
+        // that slide's coordinates -- `Detector::clear` is what enforces it and
+        // this is the reachable consequence.
+        app.detector.clear();
+        assert!(
+            app.found().is_none(),
+            "outlines from a closed slide must not be offered for saving"
         );
     }
 

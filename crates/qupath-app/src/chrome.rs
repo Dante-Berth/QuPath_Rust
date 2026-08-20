@@ -42,6 +42,12 @@ pub enum Command {
     /// it, this one just stops. A whole-slide run started by mistake wants the
     /// core back.
     StopDetecting,
+    /// Write what the last run found as GeoJSON, through a save dialog.
+    ///
+    /// The outlines only. QuPath reads the file and shows the objects; what it
+    /// will not show is measurements, because the viewer keeps the geometry and
+    /// discards the rest — see [`crate::detect`].
+    Export,
     /// Show or hide the outlines of what was detected, without re-running.
     ToggleOverlay,
     /// Show or hide the analysis panel.
@@ -165,6 +171,24 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
                         }
                     });
                 });
+                ui.separator();
+                // Enabled on there being something to write, not on a slide
+                // being open: an overlay outlives the run that made it, and a
+                // menu item that is live with nothing behind it produces an
+                // empty file rather than a refusal.
+                let found = app.found().is_some();
+                if ui
+                    .add_enabled(found, egui::Button::new("Save detections…"))
+                    .on_hover_text(
+                        "Write the outlines as GeoJSON, which QuPath opens \
+                         directly (s).",
+                    )
+                    .on_disabled_hover_text("Detect cells first (d).")
+                    .clicked()
+                {
+                    command = Command::Export;
+                    ui.close();
+                }
                 ui.separator();
                 if ui
                     .add_enabled(app.open.is_some(), egui::Button::new("Close"))
@@ -1141,6 +1165,7 @@ fn help(ui: &mut egui::Ui) {
                 ("f", "Fit the whole slide."),
                 ("d", "Detect cells in what is on screen."),
                 ("h", "Show or hide the outlines."),
+                ("s", "Save what was found as GeoJSON."),
                 ("o", "Open a slide."),
             ] {
                 ui.label(egui::RichText::new(gesture).strong());
@@ -1167,8 +1192,8 @@ fn help(ui: &mut egui::Ui) {
     ui.add_space(8.0);
     ui.label(
         egui::RichText::new(
-            "Zoom buttons in the toolbar work about the centre of the view; \
-             the wheel and the +/− keys work about the cursor.",
+            "Zoom buttons in the toolbar work about the middle of the slide \
+             area; the wheel and the +/− keys work about the cursor.",
         )
         .weak()
         .small(),
