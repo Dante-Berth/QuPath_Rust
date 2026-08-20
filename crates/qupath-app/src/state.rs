@@ -940,13 +940,11 @@ impl App {
     /// said "what you find can be saved as GeoJSON that QuPath opens". This is
     /// that sentence being made true.
     ///
-    /// No measurements are written, and that is a property of what the viewer
-    /// keeps rather than a gap in the writer: [`crate::detect`] turns a run's
-    /// [`Detections`](qupath_pipeline::Detections) into an [`Overlay`] of
-    /// outlines and drops the rest, so there is nothing to attach. QuPath opens
-    /// the file and shows the objects; a measurements column would need the
-    /// detector to hold on to more, which is `docs/VIEWER.md` §8.8's business
-    /// and not this function's.
+    /// Two measurement columns go with the outlines — the nucleus area and its
+    /// mean haematoxylin optical density, under `qupath_pipeline`'s own names —
+    /// because a file of outlines with no numbers on them is a picture, and
+    /// these are the two QuPath's own export carries. Both are in the same
+    /// frame as the coordinates; see [`detect::columns_of`](crate::detect).
     ///
     /// Every failure ends in [`App::message`] rather than a panic, for
     /// [`Open::new`]'s reason: a full disk is an ordinary thing to happen to an
@@ -972,8 +970,16 @@ impl App {
             return;
         };
 
-        // No measurements: see this function's documentation.
-        let (text, written) = qupath_viewer::geojson::write(overlay, &[]);
+        // Borrowed as `Measurement`s rather than copied: `geojson::write` reads
+        // the columns and skips any whose length does not match the overlay,
+        // which is the safety net under `Detector`'s row alignment.
+        let columns: Vec<qupath_viewer::Measurement<'_>> = self
+            .detector
+            .measurements
+            .iter()
+            .map(|(name, values)| qupath_viewer::Measurement { name, values })
+            .collect();
+        let (text, written) = qupath_viewer::geojson::write(overlay, &columns);
         self.message = match std::fs::write(&path, text) {
             Ok(()) => format!("Saved {written} objects to {}", display_name(&path)),
             Err(error) => format!("Could not save {}: {error}", display_name(&path)),

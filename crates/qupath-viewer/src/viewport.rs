@@ -538,7 +538,8 @@ mod tests {
         // toolbar, the status bar and one side panel open.
         const SLIDE: (u32, u32) = (2220, 2967);
         let area = (480.0_f32, 56.0, 1885.0, 995.0);
-        let fitted = viewport((0.0, 0.0), 1.0, (1885, 1043)).fit_extent_into(SLIDE.0, SLIDE.1, area);
+        let fitted =
+            viewport((0.0, 0.0), 1.0, (1885, 1043)).fit_extent_into(SLIDE.0, SLIDE.1, area);
 
         let corners = [
             (0.0, 0.0),

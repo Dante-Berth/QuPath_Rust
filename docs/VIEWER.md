@@ -1674,10 +1674,31 @@ item in a list of things that are "done".
 It is File → **Save detections…**, or `s`. The menu item and the action read
 one predicate — `App::found` — because two would drift into a live menu item
 that does nothing when pressed, which reads as a broken save rather than as an
-empty one. No measurements are written: `detect` turns a run's `Detections`
-into an `Overlay` of outlines and drops the rest, so there is nothing to
-attach, and that is a property of what the viewer keeps rather than a gap in
-the writer.
+empty one.
+
+**Two measurement columns go with the outlines**, under `qupath_pipeline`'s own
+`AREA` and `MEAN` constants rather than strings written at the export: a column
+header typed beside a column of numbers stays plausible while naming the wrong
+measurement, which is §8.5's stain-vector mistake in a different place. The
+detector used to keep the geometry and drop the table, which would have made
+the export a picture — QuPath's own export carries exactly these two.
+
+The **frame** is the part worth stating, because it is this section's own
+warning applied one level in. `AREA` comes out of the pipeline in the pixels of
+the level the run read, and the outlines beside it are pushed to level 0. Left
+unscaled, a run at level 1 writes an area sixteen times too small next to a
+polygon of the right size — a number of the right kind, in the wrong units,
+against geometry that agrees with nothing. So `columns_of` scales the area by
+the square of the downsample and leaves the mean, which is an optical density,
+alone: one frame per file, and "px" in an exported file means level-0 pixels
+throughout. µm² is deliberately not written — QuPath's calibrated column has a
+name of its own, and guessing it is how a file looks right and reads wrong.
+
+The end-to-end test runs a real 384x384 square of `CMU-1-Small-Region.svs`
+through the pipeline and asserts the two column names reach the file and that
+the outlines are in slide coordinates rather than the region's. The unit tests
+either side of it cover the halves; what nothing else covers is that the halves
+are joined, which is exactly what was missing for several sessions.
 
 ### 8.7 The brightness/contrast panel — the controls, and where the range lives
 

@@ -203,6 +203,14 @@ fn level_for_detection<'a>(levels: &'a [Level], view: &'a Level, mpp: Option<f64
     }
 }
 
+/// One measurement column, aligned with [`Overlay`]'s rows.
+///
+/// The name is `qupath_pipeline`'s own constant rather than a string written
+/// here, for [`Channel::stain`](crate::state::Channel)'s reason: a column
+/// header typed out beside a column of numbers is the kind of thing that stays
+/// plausible while it names the wrong measurement.
+pub type Column = (&'static str, Vec<f32>);
+
 /// A detection run in progress, or the one that last finished.
 pub struct Detector {
     /// Results from the thread. `None` when nothing has ever been started.
@@ -214,6 +222,14 @@ pub struct Detector {
     started: Option<Instant>,
     /// What the last finished run found, in slide coordinates.
     pub overlay: Option<Overlay>,
+    /// [`Overlay`]'s measurements, one value per object in the same row order.
+    ///
+    /// Kept because the GeoJSON export writes them: a file of outlines with no
+    /// numbers on them is a picture, and QuPath's own export carries these two
+    /// columns. Empty until a run finishes, and emptied with the overlay —
+    /// measurements that outlived their geometry would attach the wrong number
+    /// to every object, which is the failure this module is careful about.
+    pub measurements: Vec<Column>,
     /// A sentence about the last run, for the status bar.
     pub message: Option<String>,
     /// How far the run in flight has got, and the way to stop it.
@@ -246,8 +262,8 @@ struct Message {
 /// typed here rather than matching on an error string is the difference between
 /// a distinction the compiler holds and one a message format could break.
 enum Outcome {
-    /// The run finished and found these.
-    Found(Overlay, Summary),
+    /// The run finished and found these, with their measurement columns.
+    Found(Overlay, Vec<Column>, Summary),
     /// The run was stopped, having done this many of this many tiles.
     Cancelled { done: u64, total: u64 },
     /// The run failed.
@@ -290,6 +306,7 @@ impl Detector {
             generation: 0,
             started: None,
             overlay: None,
+            measurements: Vec::new(),
             message: None,
             progress: Arc::new(Progress::new()),
         }
@@ -358,6 +375,7 @@ impl Detector {
         self.generation += 1;
         self.started = None;
         self.overlay = None;
+        self.measurements.clear();
         self.message = None;
     }
 
@@ -418,8 +436,9 @@ impl Detector {
         std::thread::spawn(move || {
             let started = Instant::now();
             let result = match detect(&path, index, region, tuning, &progress) {
-                Ok((overlay, objects)) => Outcome::Found(
+                Ok((overlay, measurements, objects)) => Outcome::Found(
                     overlay,
+                    measurements,
                     Summary {
                         objects,
                         pixels: u64::from(region.width) * u64::from(region.height),
@@ -474,9 +493,10 @@ impl Detector {
         self.started = None;
 
         match message.result {
-            Outcome::Found(overlay, summary) => {
+            Outcome::Found(overlay, measurements, summary) => {
                 self.message = Some(describe(&summary));
                 self.overlay = Some(overlay);
+                self.measurements = measurements;
             }
             Outcome::Cancelled { done, total } => {
                 // Said plainly and without the word "failed": stopping was the
@@ -575,7 +595,7 @@ fn detect(
     region: Region,
     tuning: Micron,
     progress: &Progress,
-) -> Result<(Overlay, usize), pipeline::PipelineError> {
+) -> Result<(Overlay, Vec<Column>, usize), pipeline::PipelineError> {
     let slide = Slide::open(path)?;
     let params = params_for(tuning, slide.microns_per_pixel(), slide.levels(), level);
     let (outcome, detections) = pipeline::run_collecting_watched(&slide, region, params, progress)?;
@@ -591,13 +611,54 @@ fn detect(
     }
     overlay.shrink_to_fit();
 
+    let measurements = columns_of(&detections, downsample);
+
     debug_assert_eq!(
         overlay.len() as u64,
         outcome.objects,
         "every detected object should have an outline"
     );
     let objects = overlay.len();
-    Ok((overlay, objects))
+    Ok((overlay, measurements, objects))
+}
+
+/// A run's measurement columns, in the frame the outlines are in.
+///
+/// # The area is scaled and the mean is not
+///
+/// `pipeline::AREA` is "in pixels of the level the run read", and its own
+/// documentation says converting it is the caller's job. The outlines beside it
+/// are in **level-0** pixels — `Overlay::push_level_ring` multiplies by the
+/// downsample, and `geojson`'s coordinates are level-0 by design — so an area
+/// left in level pixels would sit next to a polygon in another frame and be
+/// wrong by the square of the downsample. That is `docs/VIEWER.md` §8.6's
+/// "wrong in a way that looks right" exactly: a number of the right kind, in
+/// the wrong units, next to geometry that agrees with nothing.
+///
+/// So one frame per file: level-0 pixels for both, and "px" in an exported file
+/// means level-0 pixels throughout.
+///
+/// `pipeline::MEAN` is an optical density and dimensionless, so it converts by
+/// nothing. µm² is deliberately *not* written: QuPath's calibrated column has a
+/// name of its own and guessing it is how a file looks right and reads wrong.
+fn columns_of(detections: &pipeline::Detections, downsample: f64) -> Vec<Column> {
+    let table = detections.measurements();
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a level downsample, small and exact in f32"
+    )]
+    let area_scale = (downsample * downsample) as f32;
+    vec![
+        (
+            pipeline::AREA,
+            table
+                .column(detections.area())
+                .iter()
+                .map(|area| area * area_scale)
+                .collect(),
+        ),
+        (pipeline::MEAN, table.column(detections.mean()).to_vec()),
+    ]
 }
 
 /// The region a run should read for `view`, in `level`'s pixels, and whether it
@@ -1142,6 +1203,121 @@ mod tests {
         let assumed = params_for(tuning, None, &levels, 1);
         assert_eq!(assumed.level, 1);
         assert!((assumed.sigma - Params::default().sigma).abs() < f64::EPSILON);
+    }
+
+    /// A real run's outlines and measurements survive the trip to GeoJSON.
+    ///
+    /// The unit tests either side of this one check the two halves — the
+    /// columns come out in the right frame, and `geojson::write` writes what
+    /// QuPath reads. What neither covers is that the halves are *joined*: the
+    /// export is what the file's own front page promises and it had no caller
+    /// at all until it was looked for, so the composition is worth one run of
+    /// the real thing.
+    ///
+    /// Skipped when the committed sample is absent, like the loader's own
+    /// slide tests.
+    #[test]
+    fn a_real_run_writes_a_file_with_its_measurements_in_it() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../data/CMU-1-Small-Region.svs");
+        if !path.exists() {
+            return;
+        }
+
+        // A small square of the sample, so this costs a fraction of a second.
+        let region = Region {
+            x: 900,
+            y: 900,
+            width: 384,
+            height: 384,
+        };
+        let progress = Progress::new();
+        let (overlay, measurements, objects) =
+            detect(&path, 0, region, Micron::default(), &progress).expect("a run over real tissue");
+        assert!(objects > 0, "this square of the sample holds nuclei");
+        assert_eq!(overlay.len(), objects);
+        for (name, values) in &measurements {
+            assert_eq!(values.len(), objects, "{name} is out of step with the rows");
+        }
+
+        let columns: Vec<qupath_viewer::Measurement<'_>> = measurements
+            .iter()
+            .map(|(name, values)| qupath_viewer::Measurement { name, values })
+            .collect();
+        let (text, written) = qupath_viewer::geojson::write(&overlay, &columns);
+
+        assert!(written > 0, "every object with three vertices is written");
+        assert!(written <= objects);
+        // The two columns reached the file under the pipeline's own names —
+        // which is what a column of numbers with no header would not.
+        assert!(text.contains(pipeline::AREA), "the area column is missing");
+        assert!(text.contains(pipeline::MEAN), "the mean column is missing");
+        assert!(text.starts_with("{\"type\":\"FeatureCollection\""));
+        assert_eq!(
+            text.matches("\"objectType\"").count(),
+            written,
+            "one object type per feature written"
+        );
+
+        // Level-0 coordinates, which is what QuPath expects and what puts the
+        // objects on the tissue rather than in the corner: the run was over a
+        // region starting at 900,900, so nothing in the file may be near zero.
+        let first = overlay.outline(0);
+        assert!(
+            first[0][0] >= 900.0 && first[0][1] >= 900.0,
+            "outlines are in slide coordinates, not the region's: {:?}",
+            first[0],
+        );
+    }
+
+    /// The measurements are in the frame the outlines are in.
+    ///
+    /// `pipeline::AREA` comes out of the pipeline in the pixels of the level
+    /// the run read, and the outlines beside it are pushed to level 0. Written
+    /// unscaled, a run at level 1 would put an area sixteen times too small
+    /// next to a polygon of the right size — a number of the right kind in the
+    /// wrong units, which is `docs/VIEWER.md` §8.6's own description of the
+    /// failure GeoJSON invites.
+    ///
+    /// The mean is an optical density and converts by nothing, which is the
+    /// half that would be wrong if the scaling were applied to the whole table.
+    #[test]
+    fn the_measurements_are_in_the_same_frame_as_the_outlines() {
+        let mut detections = pipeline::Detections::new(1);
+        for (area, mean) in [(40_u32, 0.35_f64), (12, 0.80)] {
+            detections.push(
+                Region {
+                    x: 0,
+                    y: 0,
+                    width: 4,
+                    height: 4,
+                },
+                &[[0, 0], [4, 0], [4, 4], [0, 4]],
+                area,
+                mean,
+            );
+        }
+
+        let columns = columns_of(&detections, 4.0);
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[0].0, pipeline::AREA);
+        assert_eq!(columns[1].0, pipeline::MEAN);
+
+        // One row per object, which is what `geojson::write` requires of a
+        // column before it will write it at all.
+        for (name, values) in &columns {
+            assert_eq!(values.len(), detections.len(), "{name} has the wrong rows");
+        }
+
+        // Area by the square of the downsample, mean by nothing.
+        assert_eq!(columns[0].1, vec![40.0 * 16.0, 12.0 * 16.0]);
+        assert!((columns[1].1[0] - 0.35).abs() < 1e-6);
+        assert!((columns[1].1[1] - 0.80).abs() < 1e-6);
+
+        // At level 0 the scaling is the identity, which is the only case CMU-1
+        // ever reaches -- and so the only case that would have been noticed.
+        let level_0 = columns_of(&detections, 1.0);
+        assert_eq!(level_0[0].1, vec![40.0, 12.0]);
     }
 
     /// Starting a run stops the one it replaces, and shares nothing with it.
