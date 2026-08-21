@@ -127,7 +127,7 @@ pub fn write(overlay: &Overlay, measurements: &[Measurement<'_>]) -> (String, us
                 out.push('"');
                 escape(&mut out, column.name);
                 out.push_str("\":");
-                write_number(&mut out, f64::from(column.values[object]));
+                write_measurement(&mut out, column.values[object]);
             }
             out.push('}');
         }
@@ -141,13 +141,13 @@ pub fn write(overlay: &Overlay, measurements: &[Measurement<'_>]) -> (String, us
 /// Writes one `[x, y]` position.
 fn write_position(out: &mut String, x: f32, y: f32) {
     out.push('[');
-    write_number(out, f64::from(x));
+    write_coordinate(out, f64::from(x));
     out.push(',');
-    write_number(out, f64::from(y));
+    write_coordinate(out, f64::from(y));
     out.push(']');
 }
 
-/// Writes a number as JSON, with no exponent and no `NaN`.
+/// Writes a **coordinate** as JSON, with no exponent and no `NaN`.
 ///
 /// JSON has no literal for a non-finite number, and a bare `NaN` is what a
 /// hand-rolled writer emits by default — `serde_json` refuses it outright and
@@ -157,13 +157,20 @@ fn write_position(out: &mut String, x: f32, y: f32) {
 /// of [`Overlay`], whose vertices are a product of integers and a downsample;
 /// it is guarded because the alternative failure is a truncated file.
 ///
-/// Two decimal places, matching the precision QuPath's own exports carry — its
-/// `polygon.geojson` fixture is written to exactly that.
+/// **Two decimal places, and that is QuPath's number rather than a tidy one.**
+/// `GeometryTools.DEFAULT_FACTORY` is built on `new PrecisionModel(-0.01)`,
+/// which in JTS is a grid size of 0.01 — every geometry QuPath holds is snapped
+/// to hundredths of a pixel, so writing more digits than that stores precision
+/// its reader will discard on the way in.
+///
+/// It is the *coordinate* rule, not a house style for numbers. Measurements go
+/// through [`write_measurement`], which keeps all of them; see there for what
+/// happened when one function served both.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "guarded to integral values below 1e15, which i64 holds exactly"
 )]
-fn write_number(out: &mut String, value: f64) {
+fn write_coordinate(out: &mut String, value: f64) {
     if !value.is_finite() {
         out.push('0');
         return;
@@ -176,6 +183,40 @@ fn write_number(out: &mut String, value: f64) {
     } else {
         let text = format!("{rounded:.2}");
         out.push_str(text.trim_end_matches('0').trim_end_matches('.'));
+    }
+}
+
+/// Writes a **measurement** as JSON, keeping every digit the value has.
+///
+/// Split from [`write_coordinate`] because one function served both and the
+/// coordinate rule won. Two decimal places is right for a coordinate — QuPath's
+/// own geometries are snapped to hundredths — and wrong for a measurement:
+/// `Nucleus: Haematoxylin OD mean` runs from about 0 to 2, so rounding it there
+/// leaves roughly two significant figures and about two hundred distinct values
+/// for a number the pipeline's own [`ObjectFilter`](qupath_pipeline) thresholds
+/// on. An exported file could not reproduce the run's own filtering decisions.
+///
+/// QuPath does not round: `QuPathTypeAdapters.MeasurementListTypeAdapter.write`
+/// passes the value to `JsonWriter.value(Number)`, which writes the double out
+/// in full.
+///
+/// **This was invisible at the one configuration everything is run at.** The
+/// other column, `Nucleus: Area (px)`, is a count of labelled pixels, so at
+/// level 0 it is an integer and two decimal places lose nothing at all. It only
+/// becomes fractional at a level, where it is scaled by the square of the
+/// downsample — and the mean beside it was quietly two digits the whole time.
+///
+/// Values are `f32` — [`Measurement::values`] — and `{}` on an `f32` is the
+/// shortest decimal that reads back as the same float, so this writes what the
+/// value actually holds rather than the wider `f64` its widening would print.
+/// Non-finite goes to `0` for [`write_coordinate`]'s reason: a truncated file
+/// is worse than a substituted number, and QuPath's own `"NaN"` string is not
+/// something its reader requires here.
+fn write_measurement(out: &mut String, value: f32) {
+    if value.is_finite() {
+        let _ = write!(out, "{value}");
+    } else {
+        out.push('0');
     }
 }
 
@@ -358,9 +399,44 @@ mod tests {
     #[test]
     fn non_finite_numbers_do_not_produce_invalid_json() {
         let mut out = String::new();
-        write_number(&mut out, f64::NAN);
-        write_number(&mut out, f64::INFINITY);
-        assert_eq!(out, "00", "JSON has no literal for either");
+        write_coordinate(&mut out, f64::NAN);
+        write_coordinate(&mut out, f64::INFINITY);
+        write_measurement(&mut out, f32::NAN);
+        write_measurement(&mut out, f32::NEG_INFINITY);
+        assert_eq!(out, "0000", "JSON has no literal for any of them");
+    }
+
+    /// A measurement keeps its digits; a coordinate is snapped to QuPath's grid.
+    ///
+    /// One function wrote both, at the coordinate's two decimal places, and the
+    /// column that would have shown it is the one that cannot: `Nucleus: Area
+    /// (px)` is a pixel count, so at level 0 — the only configuration anything
+    /// is ever run at — it is an integer and rounding it changes nothing. The
+    /// mean optical density beside it runs from about 0 to 2 and was being
+    /// exported with two significant figures.
+    #[test]
+    fn a_measurement_is_not_rounded_to_the_coordinate_grid() {
+        let mut overlay = Overlay::new();
+        square(&mut overlay, 10, 20, 6, 1.0);
+        let od = [0.812_345_f32];
+        let (json, _) = write(
+            &overlay,
+            &[Measurement {
+                name: "Nucleus: Haematoxylin OD mean",
+                values: &od,
+            }],
+        );
+        assert!(
+            json.contains("\"Nucleus: Haematoxylin OD mean\":0.812345"),
+            "the measurement was rounded away: {json}"
+        );
+
+        // The coordinates in the same file still are snapped, which is the half
+        // that has to keep matching `PrecisionModel(-0.01)`.
+        let mut fractional = Overlay::new();
+        fractional.push_level_ring(&[[1, 1], [3, 1], [3, 3]], 1.0 / 3.0);
+        let (json, _) = write(&fractional, &[]);
+        assert!(json.contains("[0.33,0.33]"), "coordinates moved off the grid: {json}");
     }
 
     /// The brace and bracket counts balancing is the cheap structural check

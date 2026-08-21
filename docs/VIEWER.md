@@ -1849,6 +1849,33 @@ the outlines are in slide coordinates rather than the region's. The unit tests
 either side of it cover the halves; what nothing else covers is that the halves
 are joined, which is exactly what was missing for several sessions.
 
+**One number formatter served two kinds of number, and the coordinate rule
+won.** Measurements went through `write_number` — two decimal places, which is
+correct for a coordinate and is QuPath's own figure rather than a tidy one:
+`GeometryTools.DEFAULT_FACTORY` is built on `new PrecisionModel(-0.01)`, a grid
+size of a hundredth of a pixel, so a file carrying more digits than that stores
+precision QuPath discards on the way in.
+
+Applied to a measurement it is simply wrong. `Nucleus: Haematoxylin OD mean`
+runs from about 0 to 2, so two decimals leave it roughly two significant figures
+and about two hundred distinct values — for the number
+`qupath_pipeline::ObjectFilter` thresholds on, which means an exported file
+could not reproduce its own run's filtering decisions. QuPath does not round:
+`MeasurementListTypeAdapter.write` hands the value to `JsonWriter.value(Number)`.
+
+It is the §8.1d family again, and it hid the same way. The *other* column,
+`Nucleus: Area (px)`, is a count of labelled pixels: at level 0 — the one
+configuration anything is ever run at — it is an integer, and rounding an
+integer to two decimals changes nothing. The column that could show the bug is
+the one whose values only become fractional at a level nobody runs.
+
+`write_measurement` is the split, and what it writes is exactly right rather
+than merely more: a detection's measurements are stored by QuPath as **`float`**
+(`PathDetectionObject` asks `MeasurementListFactory` for
+`MeasurementListType.FLOAT`), `Measurement::values` is `f32`, and `{}` on an
+`f32` is the shortest decimal that reads back as the same float. So the 32 bits
+that go in are the 32 bits QuPath ends up holding.
+
 ### 8.7 The brightness/contrast panel — the controls, and where the range lives
 
 **What it is, plainly.** Open the slide panel and there are three buttons —
