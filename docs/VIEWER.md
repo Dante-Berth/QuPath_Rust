@@ -1824,6 +1824,40 @@ block, and the first `uri` in an entry's text is not the entry's. Both are
 strings, both look like paths, and taking the wrong one opens the wrong slide in
 silence.
 
+#### And then QuPath was asked to write one
+
+The reader above was checked against the writer beside it, which is the test
+this repository keeps finding is not a test. `parity/java/ProjectExport.java`
+loads the sample project, adds an entry carrying the metadata block an opened
+image would have, and writes the whole thing back with `syncChanges()`;
+`ProjectExport.json` is that file, and `parity_project_export.rs` reads it.
+
+**Both URI spellings are in the same project.** The two entries QuPath loaded
+from this project's file kept `file:///SLIDES/...`; the entry QuPath built
+itself from `File.toURI()` is `file:/SLIDES/...`. So the paragraph above is not
+a distinction between projects, it is a distinction *within* one — a reader
+taking either spelling alone reads two thirds of a project and drops the rest
+with nothing in the picture to say so.
+
+**An unnamed entry is `"Image null"`**, not `"Image 3"`.
+`DefaultProjectImageEntry`'s constructor builds the fallback from the `Long`
+parameter — null on the path that creates an entry from a builder — rather than
+from the field it assigned from the counter one line above, so the name is
+written three lines from the `"entryID": 3` it was meant to contain. Its
+*reader* applies no fallback at all, so an entry whose JSON has no `imageName`
+is a blank row in QuPath's own browser. `Image::name` copies neither: a blank
+row cannot be pointed at and `Image null` names the bug rather than the entry.
+
+**The metadata block is now written down, which closes half of §8.8's entry on
+it.** The fixture holds QuPath's own: a `levels` array of downsample, width and
+height; `preferredTileWidth` and `preferredTileHeight`; `isRGB`; `channels` as
+objects with a name and a packed colour; and a `pixelCalibration` of
+`{value, unit}` quantities whose unit is U+00B5. §8.3 removed that block for not
+knowing the pyramid and §8.8 lists carrying one from an open `Slide` as what it
+would take. What was missing was never only the pyramid — it was also what the
+block has to look like, and that part is no longer a matter of reading
+`ImageServerMetadata` and hoping.
+
 ### 8.4 The overview — the invariant is that the two mappings agree
 
 `overview.rs` is `ImageOverview.java`'s arithmetic: slide to overview, which

@@ -459,10 +459,20 @@ pub struct Image {
     pub id: u64,
     /// The name the browser shows.
     ///
-    /// QuPath substitutes `Image <entryID>` when an entry has no `imageName`,
-    /// in `DefaultProjectImageEntry`'s constructor, and so does this: a browser
-    /// that showed a blank row where QuPath shows a name is showing a different
-    /// project.
+    /// `Image <id>` when the entry has no `imageName`, and **that is this
+    /// module's choice rather than QuPath's behaviour** — the distinction took
+    /// a recording to see. `DefaultProjectImageEntry`'s constructor reads
+    /// `this.imageName = "Image " + entryID`, but `entryID` there is the `Long`
+    /// parameter, null on the path that creates an entry from a builder, not
+    /// the field assigned from the counter one line above. QuPath writes
+    /// `"Image null"`, which `ProjectExport.json` pins. And its *reader*
+    /// applies no fallback at all — `getImageName()` returns the stored field —
+    /// so an entry whose JSON has no `imageName` is a blank row in QuPath's own
+    /// browser.
+    ///
+    /// Neither is worth copying. A blank row is a row nobody can point at, and
+    /// `Image null` names the bug rather than the entry, so this uses the name
+    /// that constructor was written to produce.
     pub name: String,
     /// The `builderType` discriminator, which says what kind of image this is.
     ///

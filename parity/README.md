@@ -103,6 +103,7 @@ input **cannot** be committed:
 ```bash
 ./parity/record-project.sh                          # needs the slides in data/
 cargo test -p qupath-viewer --test parity_project_import
+cargo test -p qupath-viewer --test parity_project_export
 ```
 
 Every path QuPath stores in a project is an absolute `file:` URI, so a
@@ -114,6 +115,34 @@ and the test both read the entries from.
 Both recorders answer a question the other fixtures cannot: whether QuPath can
 read what this project writes. The project one came back with four reasons it
 could not.
+
+## And one that records QuPath's writing
+
+`ProjectExport.json` is the third direction, and the one a browser actually
+meets: a `project.qpproj` **QuPath wrote**, for this project's reader to be
+checked against. Recorded by the same script, because it needs the same input —
+it loads the sample project, adds an entry carrying the metadata block an opened
+image would have, and writes the whole thing back with `syncChanges()`.
+
+The fixture **is that file**, which is what makes it worth having and also the
+one fixture here that is edited after recording. Three substitutions, all made
+by `record-project.sh` and all checked by it afterwards: the project directory
+becomes `/PROJECT`, the slides' directory becomes `/SLIDES`, and the
+`randomizedName` UUIDs become a fixed string. The first two are the same reason
+`ProjectImport`'s input cannot be committed. The third is because QuPath's copy
+constructor for an entry does not carry `randomizedName` over, so
+`UUID.randomUUID()` runs again on every load — a fixture that changes on every
+recording for a reason unrelated to the format is one nobody reads the diff of.
+The script fails rather than commits if any of the three did not take.
+
+What it caught on the first recording: both URI spellings appear in one project
+QuPath wrote — `file:///` for the entries it read from this project's file and
+`file:/` for the one it created itself — so a reader that took only the spelling
+this project writes would silently drop rows. It also recorded that QuPath names
+an entry with no name `"Image null"`, because the constructor builds the string
+from a null parameter rather than the field beside it, and that a project's own
+`uri` precedes every entry's, so the first `"uri"` in a project never names a
+slide.
 
 ## Tolerances
 

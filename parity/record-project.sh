@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# Record what QuPath makes of a project directory this project wrote.
+# Record a project going through QuPath, in both directions.
+#
+# ProjectImport records what QuPath's reader makes of a project directory this
+# project wrote. ProjectExport records a project.qpproj QuPath *wrote*, for this
+# project's reader to be checked against — a format checked only against the
+# code that writes it is untested, and that direction is the one a browser
+# actually meets.
 #
 # Separate from record.sh because the input is not committed. Every path QuPath
 # stores in a project is an absolute `file:` URI, so a committed project would
@@ -60,4 +66,64 @@ if [[ ! -s "$recorded" ]]; then
 fi
 mv "$recorded" "$fixtures/ProjectImport.json"
 
+# ---------------------------------------------------------------------------
+# The other direction: a project QuPath wrote.
+#
+# On a copy, and not on $study, because ProjectExport adds an entry and rewrites
+# the file. Running it in place would leave ProjectImport recording whichever
+# project happened to be there, which is an ordering that breaks silently the
+# first time these two are reordered.
+export_dir="$(dirname "$study")/exported"
+cp -r "$study" "$export_dir"
+
+echo "==> recording ProjectExport" >&2
+exported="$(mktemp)"
+trap 'rm -rf "$(dirname "$study")" "$recorded" "$exported"' EXIT
+"$java_bin" -cp "$cp." "$root/parity/java/ProjectExport.java" \
+    "$export_dir/project.qpproj" "$second" | sed -n '/^{$/,$p' >"$exported"
+
+if [[ ! -s "$exported" ]]; then
+    echo "error: ProjectExport produced no JSON" >&2
+    exit 1
+fi
+
+# The fixture is the file QuPath wrote, with the two absolute paths in it
+# replaced by placeholders — that is the whole edit, and it is checked below.
+#
+# `randomizedName` goes too, and it is worth saying why rather than lumping it
+# in with the paths: QuPath's copy constructor for an entry does *not* carry it
+# over, so `UUID.randomUUID()` runs again on every load and the field is a fresh
+# value every recording. A fixture that changes on every run for a reason that
+# has nothing to do with the format is one nobody reads the diff of.
+slides_dir="$(dirname "$second")"
+sed -e "s|$export_dir|/PROJECT|g" \
+    -e "s|$slides_dir|/SLIDES|g" \
+    -e 's|"randomizedName": "[0-9a-fA-F-]\{36\}"|"randomizedName": "randomized-name"|g' \
+    "$exported" >"$exported.clean"
+
+# Whatever the placeholders did not catch would be the recording machine, in a
+# committed file, disagreeing with every other machine. A path with a character
+# that percent-encodes in a URI is the way that happens, so this refuses rather
+# than commits it.
+for leaked in "$export_dir" "$slides_dir" "$HOME"; do
+    if grep -qF "$leaked" "$exported.clean"; then
+        echo "error: $leaked survived into the fixture" >&2
+        echo "       a path that percent-encodes in a URI will not match the" >&2
+        echo "       literal substitution; record from a path without spaces" >&2
+        echo "       or other characters a file: URI escapes." >&2
+        exit 1
+    fi
+done
+if ! grep -q '"uri": "file:/PROJECT/project.qpproj"' "$exported.clean"; then
+    echo "error: the project's own uri is not where it was expected" >&2
+    exit 1
+fi
+if grep -qE '"randomizedName": "[0-9a-fA-F-]{36}"' "$exported.clean"; then
+    echo "error: a randomized name survived, and would change every recording" >&2
+    exit 1
+fi
+
+mv "$exported.clean" "$fixtures/ProjectExport.json"
+
 echo "==> done; $(wc -c <"$fixtures/ProjectImport.json") bytes in fixtures/ProjectImport.json" >&2
+echo "           $(wc -c <"$fixtures/ProjectExport.json") bytes in fixtures/ProjectExport.json" >&2
