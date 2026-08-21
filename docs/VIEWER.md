@@ -1933,6 +1933,54 @@ the id the next entry takes and writing it back claims that entry exists. The
 next append would then skip a number and leave a `data/` directory nothing
 points at. No test that added something could have seen it.
 
+#### Creating one, and adding a slide to it
+
+`File > New project…` picks a directory and writes an **empty** project into it;
+`Add slide to project`, in the menu and as a button at the top of the pane, puts
+the slide showing into the project that is open. QuPath separates *Create
+project* from *Add images* and so does this — one click that both made a project
+and decided what went into it would be two decisions taken by one.
+
+A directory that already holds a `project.qpproj` is **not** overwritten. Someone
+pointing a create dialog at a study directory is far likelier to have meant to
+open it, and the two mistakes do not cost the same.
+
+The index is written **last**, after the entry directories. A run interrupted
+between the two then leaves a directory with no project in it, which reads as
+nothing having happened — rather than a project naming entry directories that
+are not there, which reads as a corrupt study.
+
+`App::addable` is one predicate, read by the menu item, by the button and by the
+command, for the reason `App::found` is one: two would eventually disagree, and
+the way they disagree is a live control that does nothing when pressed. Its
+error *is* the disabled hover text, so the answer to "why is this greyed out" is
+where the greyed-out thing is.
+
+`examples/project_sample.rs` now builds its project the way the application does
+— an empty one, then `added` — so `ProjectImport` records QuPath reading the
+bytes the application actually produces rather than a second writer's. Both
+fixtures came back identical, which says the Gson-shaped index and the
+hand-rolled one are the same project to QuPath.
+
+#### The bug the running window found
+
+The photograph showed the pane listing two images with **neither marked**, while
+one of them was the slide on screen.
+
+The application had been started as `-- data/CMU-1-Small-Region.svs`, and every
+path a project stores is absolute — `File.toURI()` resolves one, and so does
+`file_uri`. So `App::open` kept `data/CMU-1-Small-Region.svs` and the entry said
+`/home/…/data/CMU-1-Small-Region.svs`, and the comparison between them was
+always false. This is §8.3's relative-path trap met from the other side, and the
+mark was the harmless half: `App::addable` compares the same two paths, so it
+would have offered to add a slide the project already held — two entries and two
+`data/` directories for one image.
+
+`App::open` now resolves with `std::path::absolute` before anything keeps the
+path, which is the same lexical resolution `file_uri` does, so the two agree by
+construction rather than by coincidence. It is the fourth time in this file that
+looking at the running application found something no test was going to.
+
 ### 8.4 The overview — the invariant is that the two mappings agree
 
 `overview.rs` is `ImageOverview.java`'s arithmetic: slide to overview, which
@@ -2377,15 +2425,17 @@ exactly what the supersede did to them.
 
 In the order it is worth having.
 
-- **Creating a project, and adding a slide to one — the half of the browser
-  that writes.** The pane is written (§8.3) and it only reads. Creating a
-  project from scratch is safe, because every entry in it is one this wrote.
-  *Adding* to a project QuPath wrote is not: rewriting the index means writing
-  back entries the reader summarises rather than preserves — a `description`, a
-  metadata map, tags, a server metadata block — and dropping those is silent
-  data loss. What would make it safe is a reader that keeps what it does not
-  interpret, and the test for that is a project file re-serialised byte for
-  byte.
+- **Stored image metadata, which now has a specification.** `ProjectExport.json`
+  holds QuPath's own metadata block, so the half of this that was "nobody knows
+  what to write" is answered — `levels`, `preferredTileWidth` and
+  `preferredTileHeight`, `isRGB`, `channels` as objects, `pixelCalibration` in
+  microns. What is left is the half that was always the real one: the level
+  table comes from `openslide` reading the file, so writing a block means
+  carrying it from an open `Slide` at the moment an entry is added. `added` is
+  where it would go, and `Entry` is what would carry it.
+- **A thumbnail.** `thumbnail.jpg` is why the browser is a list of names rather
+  than QuPath's grid of pictures, and it is the same missing JPEG encoder as
+  ever.
 - **`data.qpdata`, which should stay missing.** Java serialisation tied to
   Java's object graph. A guessed version is how a project becomes corrupt in a
   way someone discovers much later, having trusted it. The detections belong
@@ -2394,10 +2444,12 @@ In the order it is worth having.
   and leaves the thumbnail to the caller, because nothing in this workspace
   encodes JPEG. QuPath tolerates its absence.
 - **Driving the real window.** The application has been launched on a project
-  and photographed — `WINIT_X11_SCALE_FACTOR=2`, the list drawn, no stderr —
-  but nothing has *clicked* a row, and the click is where `OpenPath` meets
-  `Open::new`. The same hole as the overview's click-to-jump and escape during
-  a run: reachable only with a hand on the machine.
+  and a slide together and photographed — `WINIT_X11_SCALE_FACTOR=2`, the list
+  drawn, the add button live, no stderr — and that photograph is what found the
+  relative-path bug above. But nothing has *clicked* a row, and nothing has
+  pressed the add button; both are checked through `App` instead. The same hole
+  as the overview's click-to-jump and escape during a run: reachable only with a
+  hand on the machine.
 - **A look at the interface in a real window — started, and it paid at once.**
   The application has now been run and photographed on X11 at
   `WINIT_X11_SCALE_FACTOR=2`, which is what an offscreen render cannot be: a

@@ -642,9 +642,20 @@ impl App {
     }
 
     #[must_use]
-    pub fn new(path: Option<String>) -> Self {
+    /// The application, with whatever the command line asked to be opened.
+    ///
+    /// Takes any number of paths and sorts them by [`App::is_project`], so a
+    /// project and a slide can be given in either order and both are honoured.
+    /// `Option<String>` is an `IntoIterator` of one, which is how the callers
+    /// that have exactly one path — the headless examples and the tests — still
+    /// read as they did.
+    ///
+    /// Nothing is opened here. Both are applied at the top of the first frame,
+    /// when the window size `Viewport::fit` needs exists.
+    pub fn new(paths: impl IntoIterator<Item = String>) -> Self {
         let context = egui::Context::default();
         chrome::style(&context);
+        let (project, slide) = requested(paths);
         Self {
             window: None,
             egui: None,
@@ -653,8 +664,8 @@ impl App {
             open: None,
             message: String::from("Open a slide to begin."),
             recent: Vec::new(),
-            pending: path.clone().map(PathBuf::from).filter(|path| !Self::is_project(path)),
-            pending_project: path.map(PathBuf::from).filter(|path| Self::is_project(path)),
+            pending: slide,
+            pending_project: project,
             dragging: false,
             band: None,
             slide_area: None,
@@ -709,6 +720,25 @@ impl App {
 
     /// Opens `path`, replacing whatever was open.
     pub fn open(&mut self, path: PathBuf) {
+        // Resolved against the working directory before anything keeps it, and
+        // that is not tidiness — it is the same trap `project::file_uri` was
+        // written for, met from the other side.
+        //
+        // A project stores absolute paths, always: `File.toURI()` resolves one
+        // and so does `file_uri`. A slide opened from the command line is
+        // relative in the commonest invocation there is — this file documents
+        // starting the application as `-- data/CMU-1.svs` — so comparing the
+        // two compares `data/CMU-1.svs` against `/home/…/data/CMU-1.svs` and
+        // finds them different. Two things went wrong on that: the project
+        // browser did not mark the row for the slide on screen, and
+        // [`App::addable`] offered to add a slide the project already had,
+        // which is two entries and two directories under `data/` for one image.
+        //
+        // `std::path::absolute` is the lexical form, the same one `file_uri`
+        // uses, so the two agree by construction rather than by coincidence. A
+        // path that cannot be resolved is kept as it stands: the working
+        // directory being unreadable is not a reason to refuse to open a slide.
+        let path = std::path::absolute(&path).unwrap_or(path);
         let (width, height) = self.size();
         match Open::new(path.clone(), width, height) {
             Ok(open) => {
@@ -731,6 +761,116 @@ impl App {
                 self.message = format!("{}: {error}", display_name(&path));
             }
         }
+    }
+
+    /// The name of a project's index, which QuPath looks for by name inside
+    /// the project directory.
+    pub const PROJECT_FILE: &'static str = "project.qpproj";
+
+    /// Whether the slide showing can be added to the project that is open, and
+    /// the sentence to show when it cannot.
+    ///
+    /// One predicate, read by the menu item that offers the action and by the
+    /// function that performs it, for [`App::found`]'s reason: two would
+    /// eventually disagree, and the way they disagree is a live menu item that
+    /// does nothing when pressed.
+    ///
+    /// The message is the *disabled* hover text rather than a log line, so the
+    /// answer to "why is this greyed out" is where the greyed-out thing is.
+    ///
+    /// # Errors
+    ///
+    /// The reason there is nothing to add, or nowhere to add it to.
+    pub fn addable(&self) -> Result<(), String> {
+        let Some(project) = &self.project else {
+            return Err("Open or create a project first.".to_owned());
+        };
+        let Some(open) = &self.open else {
+            return Err("Open a slide first (o); it is the one that gets added.".to_owned());
+        };
+        // A project that lists the same slide twice is two entries with two
+        // directories under `data/` for one image, and QuPath will show both.
+        // Compared by path rather than by name, because the name is a label and
+        // the path is the image.
+        if project
+            .stored
+            .images
+            .iter()
+            .any(|image| image.slide.as_deref() == Ok(open.path.as_path()))
+        {
+            return Err(format!(
+                "{} is already in this project.",
+                display_name(&open.path)
+            ));
+        }
+        Ok(())
+    }
+
+    /// Creates an empty project in `directory` and opens it.
+    ///
+    /// Empty, and not seeded with the slide showing: QuPath separates *Create
+    /// project* from *Add images*, and one click that both made a project and
+    /// decided what went into it would be two decisions taken by one.
+    ///
+    /// **An existing project is not overwritten.** A directory someone points
+    /// this at is far more likely to be a study they meant to open than one
+    /// they meant to erase, and the cost of the two mistakes is not
+    /// symmetrical.
+    pub fn new_project(&mut self, directory: &Path) {
+        let path = directory.join(Self::PROJECT_FILE);
+        if path.exists() {
+            self.message = format!(
+                "{} already has a project in it. Open it instead.",
+                display_name(directory)
+            );
+            return;
+        }
+        let files = project::files(&path, &[], project::Timestamps::now());
+        if let Err(error) = write_project(directory, &files) {
+            self.message = error;
+            return;
+        }
+        self.open_project(path);
+    }
+
+    /// Adds the slide showing to the project that is open, and re-reads it.
+    ///
+    /// Re-read rather than updated in place, so what the pane lists is what is
+    /// on disk. An in-memory update that diverged from the file would be a
+    /// browser showing a project nobody else can see.
+    pub fn add_to_project(&mut self) {
+        if let Err(reason) = self.addable() {
+            self.message = reason;
+            return;
+        }
+        // Both are `Some`, which is what `addable` has just established.
+        let (Some(project), Some(open)) = (&self.project, &self.open) else {
+            return;
+        };
+        // Level 0 is the size QuPath records, and it is the only size a
+        // `summary.json` has a field for.
+        let (width, height) = open
+            .slide()
+            .levels()
+            .first()
+            .map_or((0, 0), |level| (level.width, level.height));
+        let name = display_name(&open.path);
+        let entry = project::Entry {
+            path: &open.path,
+            name: &name,
+            width,
+            height,
+        };
+
+        let files = project::added(&project.stored, &[entry], project::Timestamps::now());
+        let path = project.path.clone();
+        let directory = path.parent().unwrap_or(&path).to_path_buf();
+        if let Err(error) = write_project(&directory, &files) {
+            self.message = error;
+            return;
+        }
+        self.open_project(path);
+        self.message = format!("Added {name} to the project.");
     }
 
     /// Opens a project, replacing whatever project was open.
@@ -1313,6 +1453,30 @@ impl App {
                     window.request_redraw();
                 }
             }
+            Command::NewProject => {
+                let mut dialog = rfd::FileDialog::new()
+                    .set_title("Choose a directory for the new project");
+                if let Some(directory) = self
+                    .project
+                    .as_ref()
+                    .map(|project| project.path.as_path())
+                    .or_else(|| self.recent.first().map(PathBuf::as_path))
+                    .and_then(Path::parent)
+                {
+                    dialog = dialog.set_directory(directory);
+                }
+                // A directory rather than a save dialog: QuPath's project *is*
+                // a directory, and asking for a file name would put the user in
+                // charge of a name the format fixes.
+                if let Some(directory) = dialog.pick_folder() {
+                    self.new_project(&directory);
+                    window.request_redraw();
+                }
+            }
+            Command::AddToProject => {
+                self.add_to_project();
+                window.request_redraw();
+            }
             Command::CloseProject => {
                 // The slide stays open. Closing the list is not closing what is
                 // being looked at, and a viewer that shut the image because a
@@ -1863,6 +2027,64 @@ pub fn export_name(slide: Option<&Path>) -> String {
 }
 
 /// The file name of a path, for a title bar.
+/// The project and the slide a list of command-line paths asks for.
+///
+/// Told apart by [`App::is_project`], so the two can be given in either order.
+/// They are not alternatives — a project is the list and a slide is what is
+/// being looked at, and starting work usually means both — so a single slot for
+/// them would silently drop one.
+///
+/// The **last** of each wins. Saying "open this" twice means the second one,
+/// which is what a shell history full of appended arguments produces.
+///
+/// Pure, and separate from [`App::new`], for `docs/VIEWER.md` §6's reason: it
+/// is the whole of what the command line decides, and a test of it needs no
+/// window.
+#[must_use]
+pub fn requested(paths: impl IntoIterator<Item = String>) -> (Option<PathBuf>, Option<PathBuf>) {
+    let (projects, slides): (Vec<PathBuf>, Vec<PathBuf>) = paths
+        .into_iter()
+        .map(PathBuf::from)
+        .partition(|path| App::is_project(path));
+    (
+        projects.into_iter().next_back(),
+        slides.into_iter().next_back(),
+    )
+}
+
+/// Writes the files of a project into `directory`, creating what it needs.
+///
+/// Every path is relative to the project directory and comes from
+/// `qupath_viewer::project`, which is the module that knows the layout; this
+/// only creates directories and writes bytes.
+///
+/// **The index goes last.** It is the file QuPath opens first, and a run
+/// interrupted between the two leaves either a directory with no project in it
+/// — which reads as nothing having happened — or a project naming entry
+/// directories that are not there, which reads as a corrupt study. The first is
+/// the failure worth having.
+///
+/// # Errors
+///
+/// A sentence naming the file that could not be written, for the status bar. A
+/// full disk and an unwritable directory are ordinary things to happen to an
+/// application, and the user chose the directory.
+fn write_project(directory: &Path, files: &[qupath_viewer::project::Output]) -> Result<(), String> {
+    let (index, rest): (Vec<_>, Vec<_>) = files
+        .iter()
+        .partition(|file| file.path == App::PROJECT_FILE);
+    for file in rest.into_iter().chain(index) {
+        let path = directory.join(&file.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+        }
+        std::fs::write(&path, &file.contents)
+            .map_err(|error| format!("Could not write {}: {error}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// What to call a project, following `DefaultProject.getName()`.
 ///
 /// The study directory and the file, `study/project.qpproj`, because the file

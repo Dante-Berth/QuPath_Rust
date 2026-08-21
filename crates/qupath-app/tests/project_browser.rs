@@ -191,6 +191,207 @@ fn a_project_that_moved_knows_it_moved() {
     );
 }
 
+/// Creating a project makes a directory QuPath's own reader would open, and
+/// leaves it open here.
+#[test]
+fn a_new_project_is_created_empty_and_opened() {
+    let directory = std::env::temp_dir().join("qupath-rust-test-new");
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("a directory");
+
+    let mut app = App::new(None);
+    app.new_project(&directory);
+
+    let project = app.project.as_ref().expect("the project was created and opened");
+    assert_eq!(project.path, directory.join(App::PROJECT_FILE));
+    assert!(project.stored.images.is_empty(), "a new project starts empty");
+    assert!(project.path.is_file(), "the index was not written");
+
+    // Empty on purpose: QuPath separates *Create project* from *Add images*,
+    // and one click that did both would be two decisions taken by one.
+    assert!(app.show_project);
+}
+
+/// A directory that already holds a project is **not** overwritten.
+///
+/// Someone pointing a create dialog at a study directory is far more likely to
+/// have meant to open it, and the cost of the two mistakes is not symmetrical.
+#[test]
+fn creating_a_project_does_not_overwrite_one() {
+    let path = project_in("not-overwritten", &[("first", true)]);
+    let directory = path.parent().expect("a directory").to_path_buf();
+    let before = std::fs::read_to_string(&path).expect("the project");
+
+    let mut app = App::new(None);
+    app.new_project(&directory);
+
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the project"),
+        before,
+        "an existing project was overwritten",
+    );
+    assert!(app.project.is_none(), "the refusal opened something anyway");
+    assert!(
+        app.message.contains("already has a project"),
+        "the refusal does not say why: {}",
+        app.message
+    );
+}
+
+/// Adding is refused, with a reason, when there is nothing to add or nowhere to
+/// add it.
+///
+/// The reason is the button's own hover text, so this is asserting the sentence
+/// the user reads rather than a boolean beside it.
+#[test]
+fn adding_says_why_it_cannot() {
+    let mut app = App::new(None);
+    let reason = app.addable().expect_err("no project and no slide");
+    assert!(reason.contains("project"), "{reason}");
+
+    let path = project_in("nothing-to-add", &[("first", true)]);
+    app.open_project(path);
+    let reason = app.addable().expect_err("a project but no slide");
+    assert!(reason.contains("slide"), "{reason}");
+
+    // And the command itself refuses rather than writing an entry for a slide
+    // that is not open — the button and the action ask the same predicate.
+    let before = std::fs::read_to_string(app.project.as_ref().expect("open").path.clone())
+        .expect("the project");
+    app.add_to_project();
+    assert_eq!(
+        std::fs::read_to_string(app.project.as_ref().expect("open").path.clone())
+            .expect("the project"),
+        before,
+        "the project was rewritten with nothing to add",
+    );
+}
+
+/// The slide the round-trip test opens, or `None` when it is not fetched.
+///
+/// Adding a slide to a project is the one thing here that needs a *real* one:
+/// `summary.json` records the level-0 size, and the only place that comes from
+/// is a slide that has been opened. Skipped rather than faked, because a
+/// fabricated size is exactly the kind of plausible wrong number this format
+/// work keeps turning up.
+fn a_real_slide() -> Option<PathBuf> {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/CMU-1-Small-Region.svs");
+    path.is_file().then_some(path)
+}
+
+/// A slide, added to a project, read back out of the file.
+///
+/// The whole loop: open a project, open a slide, add it, and find it in the
+/// project on disk with the size the slide actually has. What makes it worth
+/// running against a real slide rather than a stub is the size — nothing but an
+/// opened slide knows it.
+#[test]
+fn a_slide_added_to_a_project_is_in_the_file_afterwards() {
+    let Some(slide) = a_real_slide() else {
+        eprintln!("skipping: data/CMU-1-Small-Region.svs not present");
+        return;
+    };
+
+    let directory = std::env::temp_dir().join("qupath-rust-test-added");
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("a directory");
+
+    let mut app = App::new(None);
+    app.new_project(&directory);
+    app.open(slide.clone());
+    assert!(app.open.is_some(), "the slide did not open: {}", app.message);
+
+    app.addable().expect("a project and a slide, and the slide not in it");
+    app.add_to_project();
+
+    // Read from disk rather than from the application, because what the pane
+    // lists has to be what another reader would find.
+    let text = std::fs::read_to_string(directory.join(App::PROJECT_FILE)).expect("the index");
+    let stored = qupath_viewer::project::read(&text).expect("a project");
+    assert_eq!(stored.images.len(), 1);
+    assert_eq!(stored.images[0].id, 1);
+    assert_eq!(stored.images[0].name, "CMU-1-Small-Region.svs");
+    assert_eq!(
+        stored.images[0].slide.as_deref(),
+        Ok(std::path::absolute(&slide).expect("an absolute path").as_path()),
+        "the entry does not point at the slide that was added",
+    );
+
+    // The entry's own files, in the directory its id names. `summary.json`
+    // carries the level-0 size, which is the one field that needed the slide.
+    let summary = std::fs::read_to_string(directory.join("data/1/summary.json"))
+        .expect("the entry summary");
+    assert!(summary.contains("\"width\": 2220"), "{summary}");
+    assert!(summary.contains("\"height\": 2967"), "{summary}");
+    assert!(directory.join("data/1/server.json").is_file());
+
+    // Adding it twice is refused, because two entries for one image is two
+    // directories under `data/` that QuPath will show as two rows.
+    let reason = app.addable().expect_err("the slide is already in the project");
+    assert!(reason.contains("already in this project"), "{reason}");
+}
+
+/// A slide opened by a **relative** path is the same slide as the project's
+/// absolute one.
+///
+/// Found by looking at the running application: the row for the slide on screen
+/// was not marked, because the application had been started as
+/// `-- data/CMU-1-Small-Region.svs` and every path a project stores is
+/// absolute. The mark was the visible half. The half that mattered is
+/// [`App::addable`], which offered to add a slide the project already
+/// contained — two entries and two directories under `data/` for one image.
+///
+/// The same trap `project::file_uri` was written for, met from the other side,
+/// and fixed the same way: resolve against the working directory, lexically,
+/// before anything keeps the path.
+#[test]
+fn a_slide_opened_relatively_is_the_slide_the_project_names() {
+    let Some(slide) = a_real_slide() else {
+        eprintln!("skipping: data/CMU-1-Small-Region.svs not present");
+        return;
+    };
+
+    let directory = std::env::temp_dir().join("qupath-rust-test-relative");
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("a directory");
+
+    let mut app = App::new(None);
+    app.new_project(&directory);
+    app.open(slide.clone());
+    app.add_to_project();
+    assert_eq!(
+        app.project.as_ref().expect("open").stored.images.len(),
+        1,
+        "the slide was not added: {}",
+        app.message
+    );
+
+    // The same file, named the way a command line names it. `a_real_slide`
+    // builds its path from `CARGO_MANIFEST_DIR`, so this is the same file
+    // through a relative spelling with `..` in it.
+    let relative = Path::new("../../data/CMU-1-Small-Region.svs");
+    assert!(relative.is_file(), "the test's own relative path is wrong");
+    app.open(relative.to_path_buf());
+    assert!(app.open.is_some(), "the slide did not open: {}", app.message);
+
+    let reason = app
+        .addable()
+        .expect_err("the project already holds this slide, spelled differently");
+    assert!(reason.contains("already in this project"), "{reason}");
+
+    // And the row for it is the one the browser marks, which is the same
+    // comparison the pane makes.
+    let showing = app.open.as_ref().expect("a slide").path.clone();
+    let project = app.project.as_ref().expect("open");
+    assert_eq!(
+        project.stored.images[0].slide.as_deref(),
+        Ok(showing.as_path()),
+        "the browser would not mark the row for the slide on screen",
+    );
+    assert_eq!(showing, std::path::absolute(&slide).expect("an absolute path"));
+}
+
 /// The command line tells a project from a slide by its extension, and the
 /// application has to agree with the file dialog's filter about which is which.
 #[test]
@@ -203,4 +404,46 @@ fn a_project_is_told_from_a_slide_by_its_extension() {
     // decides is the one above.
     let app = App::new(Some("data/CMU-1.svs".to_owned()));
     assert!(app.project.is_none());
+}
+
+/// A project and a slide on the same command line are both taken, in either
+/// order.
+///
+/// The project is a list and the slide is what is being looked at; they are not
+/// alternatives, and a single slot for both would silently drop one.
+#[test]
+fn a_project_and_a_slide_can_be_asked_for_together() {
+    let project = PathBuf::from("study/project.qpproj");
+    let slide = PathBuf::from("data/CMU-1.svs");
+    for order in [
+        ["study/project.qpproj", "data/CMU-1.svs"],
+        ["data/CMU-1.svs", "study/project.qpproj"],
+    ] {
+        let asked = qupath_app::state::requested(order.map(str::to_owned));
+        assert_eq!(
+            asked,
+            (Some(project.clone()), Some(slide.clone())),
+            "one of {order:?} was dropped",
+        );
+    }
+
+    // One of each kind, and neither.
+    assert_eq!(
+        qupath_app::state::requested(["data/CMU-1.svs".to_owned()]),
+        (None, Some(slide.clone())),
+    );
+    assert_eq!(
+        qupath_app::state::requested(["study/project.qpproj".to_owned()]),
+        (Some(project), None),
+    );
+    assert_eq!(qupath_app::state::requested([]), (None, None));
+
+    // Said twice, the second one is meant — a shell history full of appended
+    // arguments is how that happens.
+    assert_eq!(
+        qupath_app::state::requested(
+            ["a.svs", "b.svs"].map(str::to_owned)
+        ),
+        (None, Some(PathBuf::from("b.svs"))),
+    );
 }

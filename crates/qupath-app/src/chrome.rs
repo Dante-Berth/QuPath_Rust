@@ -37,6 +37,15 @@ pub enum Command {
     Close,
     /// Open a project, through a dialog.
     OpenProject,
+    /// Create an empty project in a directory chosen through a dialog.
+    ///
+    /// Empty, and the slide showing is not put in it. QuPath separates
+    /// *Create project* from *Add images* and so does this: one command that
+    /// both made a project and decided what went in it would be two decisions
+    /// taken by one click.
+    NewProject,
+    /// Add the slide showing to the project that is open.
+    AddToProject,
     /// Put the project list away. The slide showing stays open.
     CloseProject,
     /// Show or hide the project browser.
@@ -191,13 +200,39 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
                 });
                 ui.separator();
                 if ui
+                    .button("New project…")
+                    .on_hover_text(
+                        "Create an empty QuPath project in a directory. Slides \
+                         go into it one at a time, as they do in QuPath.",
+                    )
+                    .clicked()
+                {
+                    command = Command::NewProject;
+                    ui.close();
+                }
+                if ui
                     .button("Open project…")
                     .on_hover_text(
-                        "Open a QuPath project and list its images (p).                          Opening one of them is a second click.",
+                        "Open a QuPath project and list its images (p). \
+                         Opening one of them is a second click.",
                     )
                     .clicked()
                 {
                     command = Command::OpenProject;
+                    ui.close();
+                }
+                let addable = app.addable();
+                if ui
+                    .add_enabled(addable.is_ok(), egui::Button::new("Add slide to project"))
+                    .on_hover_text(
+                        "Put the slide showing into the project that is open. \
+                         Everything already in the project is written back \
+                         exactly as it was read.",
+                    )
+                    .on_disabled_hover_text(addable.err().unwrap_or_default())
+                    .clicked()
+                {
+                    command = Command::AddToProject;
                     ui.close();
                 }
                 if ui
@@ -1238,12 +1273,14 @@ fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
     }
 
     ui.add_space(8.0);
+    add_slide(ui, app, command);
+
     if project.stored.images.is_empty() {
         ui.add(
             egui::Label::new(
                 egui::RichText::new(
-                    "The project file has no images in it. Adding them is done \
-                     in QuPath.",
+                    "The project file has no images in it. Open a slide and \
+                     add it, or add images to the project in QuPath.",
                 )
                 .weak()
                 .small(),
@@ -1307,6 +1344,35 @@ fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
         }
         ui.add_space(2.0);
     }
+}
+
+/// The button that puts the slide showing into the project.
+///
+/// In the pane and not only in the `File` menu, because this is the one command
+/// whose subject is *both* of the things the pane and the viewer are showing:
+/// putting it where the list is means the list is what the user is looking at
+/// when they decide.
+///
+/// Disabled rather than hidden when there is nothing to add, with the reason as
+/// its hover text — a control that disappears takes its explanation with it, and
+/// "why can I not add this slide" is a question that needs an answer where the
+/// question is asked. The reason comes from [`App::addable`], which is the same
+/// predicate the command itself checks, so the button cannot offer something
+/// the action then refuses.
+fn add_slide(ui: &mut egui::Ui, app: &App, command: &mut Command) {
+    let addable = app.addable();
+    let button = egui::Button::new("Add the slide showing");
+    let response = ui
+        .add_enabled(addable.is_ok(), button)
+        .on_hover_text(
+            "Write the slide on screen into this project. Everything already \
+             in the project is written back exactly as it was read.",
+        )
+        .on_disabled_hover_text(addable.err().unwrap_or_default());
+    if response.clicked() {
+        *command = Command::AddToProject;
+    }
+    ui.add_space(6.0);
 }
 
 /// The viewport's scale in the unit `egui` draws in.

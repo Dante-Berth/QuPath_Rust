@@ -49,10 +49,21 @@ fn main() {
 
     let entries = sample::entries(&slide, &second);
     let project = directory.join("project.qpproj");
+
+    // Built the way the **application** builds one: an empty project, then the
+    // entries appended to it. That is `qupath-app`'s New project followed by
+    // Add slide, and it is a different writer from `files` with two entries in
+    // it — `added` re-serialises the whole index through `json`, so these are
+    // the bytes a project someone creates in the application actually has.
+    // Writing it the other way here would leave that path unopened by QuPath,
+    // which is the hole this sample exists to close.
+    //
     // A fixed pair rather than `Timestamps::now`, so re-recording a fixture
     // does not produce a project that differs from the last one in two fields
     // that mean nothing to this check.
-    for file in qupath_viewer::project::files(&project, &entries, sample::WRITTEN) {
+    let empty = qupath_viewer::project::project_file(&project, &[], sample::WRITTEN);
+    let stored = qupath_viewer::project::read(&empty).expect("an empty project reads back");
+    for file in qupath_viewer::project::added(&stored, &entries, sample::WRITTEN) {
         let path = directory.join(&file.path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("project directory");

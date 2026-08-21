@@ -35,22 +35,29 @@
 //! cargo run -p qupath-app --release
 //! cargo run -p qupath-app --release -- data/CMU-1.svs
 //! cargo run -p qupath-app --release -- study/project.qpproj
+//! cargo run -p qupath-app --release -- study/project.qpproj data/CMU-1.svs
 //! ```
 //!
-//! A path on the command line is opened at startup; without one the window
+//! Paths on the command line are opened at startup; without any, the window
 //! comes up empty and asks for a slide. A `.qpproj` opens as a project and
 //! lists its images without opening any of them, which is what a project is
-//! for. `--release` matters: a debug build decodes JPEG tiles slowly enough to
-//! be annoying.
+//! for — so a project *and* a slide is the ordinary way to start work, and
+//! both are taken. `--release` matters: a debug build decodes JPEG tiles slowly
+//! enough to be annoying.
 
 use winit::event_loop::{ControlFlow, EventLoop};
 
 use qupath_app::state::App;
 
 fn main() {
-    let path = std::env::args()
+    // Every non-flag argument, not the first one. `App::new` sorts a project
+    // from a slide by its extension, so the two can be given in either order —
+    // and a second slide simply wins, which is what "open this" means when it
+    // is said twice.
+    let paths: Vec<String> = std::env::args()
         .skip(1)
-        .find(|argument| !argument.starts_with("--"));
+        .filter(|argument| !argument.starts_with("--"))
+        .collect();
 
     let event_loop = EventLoop::new().expect("create the event loop");
     // `Wait`, not `Poll`. A viewer at rest has nothing to do, and a loop that
@@ -59,7 +66,7 @@ fn main() {
     // asks for one explicitly.
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new(path);
+    let mut app = App::new(paths);
     if let Err(error) = event_loop.run_app(&mut app) {
         eprintln!("{error}");
         std::process::exit(1);
