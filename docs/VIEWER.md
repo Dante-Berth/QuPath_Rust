@@ -1990,7 +1990,14 @@ picture was assumed to be `data/<id>/thumbnail.jpg`, which this workspace can
 neither write nor read — so the entry sat under the encoder, where it would have
 waited for one.
 
-`ProjectBrowser.ProjectTreeRowCell.updateItem` says otherwise. It asks
+**§8.3's own first paragraph had it right**, which is the part worth noticing:
+"a list, thumbnails from a `TileCache`, and `Viewport::fit` at a small size to
+generate them ... the thumbnail generator is already written". A later session
+looked at the four files an entry has on disk, found the one this cannot write,
+and talked the plan out of a picture it already knew how to make.
+
+`ProjectBrowser.ProjectTreeRowCell.updateItem` says the same thing from the
+other side. It asks
 `entry.getThumbnail()`, and **when the answer is null it opens the image**:
 `executor.submit(...)` builds the server from the entry's builder, calls
 `ProjectCommands.getThumbnailRGB(server)`, and stores the result back on the
@@ -2538,20 +2545,45 @@ exactly what the supersede did to them.
 
 In the order it is worth having.
 
-- **Stored image metadata, which now has a specification.** `ProjectExport.json`
-  holds QuPath's own metadata block, so the half of this that was "nobody knows
-  what to write" is answered — `levels`, `preferredTileWidth` and
-  `preferredTileHeight`, `isRGB`, `channels` as objects, `pixelCalibration` in
-  microns. What is left is the half that was always the real one: the level
-  table comes from `openslide` reading the file, so writing a block means
-  carrying it from an open `Slide` at the moment an entry is added. `added` is
-  where it would go, and `Entry` is what would carry it.
+- **Stored image metadata, and the blocker is not the one this entry named.**
+  `ProjectExport.json` holds QuPath's own block, so "nobody knows what to write"
+  is answered — `levels`, `preferredTileWidth` and `preferredTileHeight`,
+  `isRGB`, `channels` as objects, `pixelCalibration` in microns. And "carry it
+  from an open `Slide`" is no longer an obstacle either: `App::add_to_project`
+  holds one, `Slide::levels` is the table, and `Level` has the tile sizes.
+
+  **What stops it is that the block replaces what QuPath would otherwise have
+  read.** `AbstractServerBuilder.build` calls `setMetadata` with it when the
+  image is opened, so a level table that disagrees with OpenSlide's is not a
+  worse description of the slide — it is QuPath reading the wrong pixels,
+  silently, for as long as the project exists. `Slide::open` keeps the tiled
+  directories and drops the label, macro and thumbnail; OpenSlide's Aperio
+  driver makes its own choice, and **the two have never been compared**.
+  Nothing here can compare them: `parity/record-project.sh` stops before the
+  pixels because opening the image needs `qupath-extension-openslide` and a
+  native library, and there is none on this machine.
+
+  So the entry is not "write the block" but "record what OpenSlide reports".
+  What would close it is a recorder that opens the slide through the extension
+  and prints `getPreferredDownsamples()` and the preferred tile size, checked
+  against `Slide::levels` on the same file — the same shape as every other
+  fixture here, and blocked on the same native library as *An image opened from
+  a project* below. Until then §8.3's judgement stands: QuPath reading the slide
+  itself is better information than anything written here.
 - ~~**A thumbnail.**~~ **Done, and the entry was wrong about what it needed.**
   It read as blocked on a JPEG encoder because it assumed a row's picture is
   `data/<id>/thumbnail.jpg`. QuPath's own browser opens the image when that file
   is absent, so the picture comes from the pixels on both sides; §8.3 has the
   call site and what it cost to find out. The encoder is still owed — see below
   — but nothing about the *browser* was ever waiting on it.
+- **The rest of `ProjectBrowser`, which is now what the browser is missing
+  rather than a picture.** §8.3's opening listed what QuPath's pane has: the
+  thumbnails (done), the search (done), **sorting by name or by a metadata
+  key**, **right-click to edit an entry's metadata**, and **masking names for
+  blinded studies**. The last two need the entry's metadata map, which
+  `project::read` summarises away and `added` preserves without reading — so
+  both are the same change underneath, and it is a change to the reader rather
+  than to the pane. Sorting needs neither and is the cheapest of the three.
 - **`data.qpdata`, which should stay missing.** Java serialisation tied to
   Java's object graph. A guessed version is how a project becomes corrupt in a
   way someone discovers much later, having trusted it. The detections belong
@@ -2581,13 +2613,6 @@ In the order it is worth having.
   photograph is what showed `Fit` leaving slide behind the status bar.
   What is *still* unlooked-at is everything that needs a hand on the machine —
   the trackpad, hover states, resizing, and the window manager.
-- **Stored image metadata in a project, which needs the pyramid.** §8.3's
-  metadata block is not written, because a block QuPath can apply needs
-  `levels` and the preferred tile sizes and this crate knows neither — the
-  first is `openslide`'s level table and the second is a property of the file.
-  A project browser that wanted stored metadata would have to carry both from
-  an open `Slide`, and until it does, QuPath reading the slide itself is better
-  information than anything written here.
 - **An image opened from a project.** Both formats have now been through QuPath
   itself — §8.6 and §8.3 — but `ProjectImport` deliberately stops before the
   pixels: opening the image needs `qupath-extension-openslide` and a working

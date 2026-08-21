@@ -52,6 +52,13 @@ done underneath, here it had already been done next door.
 names for four sessions while the answer sat in `ProjectBrowser.java`, thirty
 lines from the class the format was ported from.
 
+**The sharper half:** §8.3's own first paragraph had planned it correctly —
+"thumbnails from a `TileCache` ... the thumbnail generator is already written".
+A later session read the four files an entry has on disk, found the one this
+cannot write, and talked the plan out of a picture it already knew how to make.
+A plan is worth re-reading before a blocker is believed, because the blocker is
+often newer than the plan.
+
 ## 2026-08 — A widget that will not be narrow is a panel that clips
 
 `86d74e7`, `a14dc59`
