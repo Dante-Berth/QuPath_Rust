@@ -447,3 +447,294 @@ fn a_project_and_a_slide_can_be_asked_for_together() {
         (None, Some(PathBuf::from("b.svs"))),
     );
 }
+
+/// Waits for the browser to finish making the pictures it is going to make.
+///
+/// The worker is a thread and the application takes delivery a frame at a time,
+/// so a test that asserted straight after opening would assert on how fast a
+/// slide opens. Bounded rather than a bare loop: a hang here should fail the
+/// test, not stop it.
+fn wait_for_pictures(app: &mut App) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        app.take_pictures();
+        let working = app
+            .project
+            .as_ref()
+            .is_some_and(|project| project.pictures.working());
+        if !working {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the thumbnails never arrived",
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// A row's picture comes from the slide, and a row whose slide is not there
+/// gets none.
+///
+/// The point of the first half is that no `thumbnail.jpg` is involved: this
+/// project was written by `project::files`, which does not write one, and the
+/// row has a picture anyway — from the pixels, exactly as QuPath's own browser
+/// does when an entry has no stored thumbnail.
+///
+/// The second half is what stops "there is a picture" being a fact about the
+/// row rather than about the slide: an entry naming a file that is not there
+/// stays a row, and stays a row without a picture.
+#[test]
+fn a_row_gets_its_picture_from_the_slide() {
+    let Some(slide) = a_real_slide() else {
+        eprintln!("skipping: data/CMU-1-Small-Region.svs not present");
+        return;
+    };
+
+    let directory = std::env::temp_dir().join("qupath-rust-test-pictures");
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("a directory");
+    let missing = directory.join("gone.svs");
+    let project = directory.join("project.qpproj");
+    let entries = [
+        Entry {
+            path: &slide,
+            name: "here",
+            width: 2220,
+            height: 2967,
+        },
+        Entry {
+            path: &missing,
+            name: "gone",
+            width: 2220,
+            height: 2967,
+        },
+    ];
+    for file in project::files(&project, &entries, Timestamps::now()) {
+        let path = directory.join(&file.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("an entry directory");
+        }
+        std::fs::write(&path, &file.contents).expect("write a project file");
+    }
+
+    let mut app = App::new(None);
+    app.open_project(project);
+    wait_for_pictures(&mut app);
+
+    let pictures = &app.project.as_ref().expect("the project opened").pictures;
+    let picture = pictures
+        .made(0)
+        .expect("the slide that is there has a picture");
+    let (width, height) = picture.overview.size();
+    assert_eq!(
+        picture.pixels.len(),
+        width as usize * height as usize * 4,
+        "the picture is not the size it says it is",
+    );
+    // The slide is 2220 x 2967, so the long edge is the one that gets
+    // `MAX_LENGTH` and the picture is taller than it is wide. A square picture
+    // would mean the aspect had been thrown away somewhere.
+    assert!(
+        height > width,
+        "{width} x {height} is not the slide's shape"
+    );
+    assert!(
+        pictures.made(1).is_none(),
+        "a slide that is not on disk cannot have been read",
+    );
+    assert!(
+        pictures.unread(1).is_some(),
+        "the row with no picture does not say why it has none",
+    );
+}
+
+/// A slide that will not read says so, rather than waiting for ever.
+///
+/// The state this is about is the one the running window showed: an entry whose
+/// file is **there** and yields no picture — a JPEG 2000 pyramid opens and
+/// decodes nothing, and `data/` has one. Its row held an empty frame, which is
+/// also what a row whose slide is still being read holds, so the browser said
+/// "wait" for something that was never coming.
+///
+/// The stand-in slides these projects are written with are the same case
+/// arriving one step earlier: a file that exists and is not a TIFF.
+#[test]
+fn a_slide_that_will_not_read_says_why() {
+    let path = project_in("unreadable", &[("stand-in", true)]);
+    let mut app = App::new(None);
+    app.open_project(path);
+    wait_for_pictures(&mut app);
+
+    let pictures = &app.project.as_ref().expect("the project opened").pictures;
+    assert!(pictures.made(0).is_none(), "an empty file is not a slide");
+    let reason = pictures
+        .unread(0)
+        .expect("a row with no picture and no reason is a row that looks like it is loading");
+    // Names the file it is about, which is `qupath-slide`'s own rule for every
+    // error it returns and the reason the browser can show one against a row
+    // without wrapping it in a second sentence.
+    assert!(
+        reason.contains("stand-in.svs"),
+        "the reason does not say which slide it is about: {reason}",
+    );
+}
+
+/// Pictures belong to the project that asked for them, and to no other.
+///
+/// The failure this exists for is not hypothetical arithmetic: the worker
+/// delivers by row index, and row 0 of one study is a different slide from row
+/// 0 of the next. A browser that kept one queue would paint a picture from the
+/// study that was closed onto the list of the study that replaced it, and both
+/// rows would look perfectly ordinary.
+///
+/// What makes it impossible here is ownership rather than a check — the worker
+/// belongs to the project, so opening another one drops the channel its
+/// pictures would have arrived on. This asserts on where a *sequence* of opens
+/// leaves the browser, because a single open is correct in every version of
+/// this that gets it wrong.
+#[test]
+fn the_pictures_of_a_closed_project_do_not_arrive_in_the_next_one() {
+    let Some(slide) = a_real_slide() else {
+        eprintln!("skipping: data/CMU-1-Small-Region.svs not present");
+        return;
+    };
+
+    let directory = std::env::temp_dir().join("qupath-rust-test-two-studies");
+    let _ = std::fs::remove_dir_all(&directory);
+    let first = directory.join("first");
+    let second = directory.join("second");
+    std::fs::create_dir_all(&first).expect("a directory");
+    std::fs::create_dir_all(&second).expect("a directory");
+
+    let write = |at: &Path, entries: &[Entry<'_>]| {
+        let index = at.join("project.qpproj");
+        for file in project::files(&index, entries, Timestamps::now()) {
+            let path = at.join(&file.path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("an entry directory");
+            }
+            std::fs::write(&path, &file.contents).expect("write a project file");
+        }
+        index
+    };
+    let one = write(
+        &first,
+        &[Entry {
+            path: &slide,
+            name: "the slide",
+            width: 2220,
+            height: 2967,
+        }],
+    );
+    let elsewhere = second.join("not-here.svs");
+    let two = write(
+        &second,
+        &[Entry {
+            path: &elsewhere,
+            name: "a slide that is not there",
+            width: 2220,
+            height: 2967,
+        }],
+    );
+
+    let mut app = App::new(None);
+    app.open_project(one);
+    // Waited for, so the first study's picture has certainly been made before
+    // the second study replaces it. Without the wait this passes on a machine
+    // where the worker had not got to it yet, which is the test agreeing with
+    // itself rather than with the property.
+    wait_for_pictures(&mut app);
+    assert!(
+        app.project
+            .as_ref()
+            .expect("the first project")
+            .pictures
+            .made(0)
+            .is_some(),
+        "the first study's own picture was never made, so this proves nothing",
+    );
+
+    app.open_project(two);
+    wait_for_pictures(&mut app);
+
+    let pictures = &app.project.as_ref().expect("the second project").pictures;
+    assert!(
+        pictures.made(0).is_none(),
+        "row 0 of the second study is showing a picture of the first study's slide",
+    );
+}
+
+/// Adding a slide does not blank the pictures the browser already has.
+///
+/// `add_to_project` writes the index and opens it again, which is a re-read of
+/// a project whose rows are the same rows. A browser that started its worker
+/// from nothing there would clear a fifty-slide study's pictures and read fifty
+/// slides again, for one added row — visibly, as a pane that empties and fills
+/// back in.
+///
+/// Asserted **without waiting**: the picture has to be there in the frame after
+/// the add, which is the difference between carrying it over and making it
+/// again quickly.
+#[test]
+fn adding_a_slide_keeps_the_pictures_already_made() {
+    let Some(slide) = a_real_slide() else {
+        eprintln!("skipping: data/CMU-1-Small-Region.svs not present");
+        return;
+    };
+
+    let directory = std::env::temp_dir().join("qupath-rust-test-kept-pictures");
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("a directory");
+
+    let mut app = App::new(None);
+    app.new_project(&directory);
+    app.open(slide.clone());
+    app.add_to_project();
+    wait_for_pictures(&mut app);
+    assert!(
+        app.project
+            .as_ref()
+            .expect("a project")
+            .pictures
+            .made(0)
+            .is_some(),
+        "the slide that was added has no picture: {}",
+        app.message,
+    );
+
+    // A second entry for the same file, written straight into the index so the
+    // application's own refusal to add a slide twice is not what is under test.
+    let text = std::fs::read_to_string(directory.join(App::PROJECT_FILE)).expect("the index");
+    let stored = project::read(&text).expect("a project");
+    let files = project::added(
+        &stored,
+        &[Entry {
+            path: &slide,
+            name: "the same slide again",
+            width: 2220,
+            height: 2967,
+        }],
+        Timestamps::now(),
+    );
+    for file in files {
+        let path = directory.join(&file.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("an entry directory");
+        }
+        std::fs::write(&path, &file.contents).expect("write a project file");
+    }
+
+    app.open_project(directory.join(App::PROJECT_FILE));
+    let pictures = &app
+        .project
+        .as_ref()
+        .expect("the project re-opened")
+        .pictures;
+    assert!(pictures.made(0).is_some(), "the first row lost its picture");
+    assert!(
+        pictures.made(1).is_some(),
+        "the second row names the same slide and should have been given the \
+         picture already made for it",
+    );
+}

@@ -20,3 +20,4 @@
 pub mod chrome;
 pub mod detect;
 pub mod state;
+pub mod thumbnails;

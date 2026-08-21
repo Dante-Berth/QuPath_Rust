@@ -18,6 +18,7 @@
 
 use std::fs::File;
 use std::io::BufWriter;
+use std::path::PathBuf;
 
 use qupath_app::chrome;
 use qupath_app::state::App;
@@ -61,7 +62,7 @@ fn main() {
         app.show_metadata = true;
         app.show_appearance = true;
         app.show_overview = true;
-        app.open(std::path::PathBuf::from(path));
+        app.open(PathBuf::from(path));
         render("chrome-slide.png", &mut app);
 
         app.appearance.channel = qupath_app::state::Channel::Haematoxylin;
@@ -94,8 +95,18 @@ fn sample_project() -> std::path::PathBuf {
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("a temporary project directory");
 
-    let here = directory.join("CMU-1-Small-Region.svs");
-    std::fs::write(&here, b"").expect("a stand-in slide");
+    // A real slide if the repository has one, because the row's picture is read
+    // from the slide itself and a stand-in of zero bytes is a row with an empty
+    // frame — which is the *third* row's state, not this one's. Falls back to
+    // the stand-in so the example still runs on a machine with no data.
+    let real = PathBuf::from("data/CMU-1-Small-Region.svs");
+    let here = if real.is_file() {
+        std::path::absolute(&real).unwrap_or(real)
+    } else {
+        let here = directory.join("CMU-1-Small-Region.svs");
+        std::fs::write(&here, b"").expect("a stand-in slide");
+        here
+    };
     let gone = directory.join("CMU-1, JP2K.svs");
     let rotated = directory.join("CMU-1 rotated.svs");
 
@@ -144,6 +155,20 @@ fn sample_project() -> std::path::PathBuf {
 
 /// Lays the interface out and rasterises it.
 fn render(path: &str, app: &mut App) {
+    // The browser's row pictures are made on a thread and arrive over a
+    // channel, so an offscreen render has to wait for them the way the window
+    // does — by asking again. The application asks once per frame and fills the
+    // list in as they land; a still picture has one frame, so it waits.
+    while app
+        .project
+        .as_ref()
+        .is_some_and(|project| project.pictures.working())
+    {
+        app.take_pictures();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    app.take_pictures();
+
     let context = egui::Context::default();
     chrome::style(&context);
 
@@ -213,6 +238,30 @@ fn render(path: &str, app: &mut App) {
                     .collect(),
             },
         ));
+    }
+
+    // The browser's rows, under the same ids `App::take_pictures` uploads them
+    // to. Same reason as the overview above: these are the application's own
+    // textures rather than ones `egui` manages, so no delta carries them.
+    if let Some(project) = &app.project {
+        for index in 0..project.stored.images.len() {
+            let Some(picture) = project.pictures.ready(index) else {
+                continue;
+            };
+            let (width, height) = picture.overview.size();
+            textures.push((
+                egui::TextureId::User(chrome::PROJECT_TEXTURE + index as u64),
+                Texture {
+                    width,
+                    height,
+                    pixels: picture
+                        .pixels
+                        .chunks_exact(4)
+                        .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]])
+                        .collect(),
+                },
+            ));
+        }
     }
 
     let mut vertices: Vec<MeshVertex> = Vec::new();

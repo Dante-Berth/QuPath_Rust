@@ -11,12 +11,13 @@
 //! person does one at a time, and a frame in which the user both opened a slide
 //! and zoomed it is not a frame that happens.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use qupath_pipeline::Micron;
 use qupath_viewer::{ScreenPoint, SlidePoint};
 
 use crate::state::{App, Appearance, Channel, cursor_slide_position, describe, display_name};
+use crate::thumbnails::Pictures;
 
 /// What the interface is asking the application to do.
 ///
@@ -134,6 +135,15 @@ pub fn style(context: &egui::Context) {
 /// it, because two literals that must match are one literal that eventually
 /// does not.
 pub const OVERVIEW_TEXTURE: u64 = 1;
+
+/// The first user texture id the project browser's row pictures take.
+///
+/// Row `index` is `PROJECT_TEXTURE + index`, so the ids are the project's own
+/// order and are **reused** when another project is opened. That bounds the
+/// renderer's texture table by the largest project ever opened rather than by
+/// every slide ever looked at, and it is why a row may only draw once
+/// `Pictures::ready` says this project's picture is the one at its id.
+pub const PROJECT_TEXTURE: u64 = 2;
 
 /// The fraction of the window the side panels may take between them.
 ///
@@ -1217,15 +1227,14 @@ fn metadata(ui: &mut egui::Ui, app: &App, command: &mut Command) {
 
 /// The project browser: the images in the project that is open.
 ///
-/// # Why a row is a name and not a thumbnail
+/// # A row is a picture and a name
 ///
-/// QuPath's `ProjectBrowser` is a grid of thumbnails, and this is a list.
-/// `thumbnail.jpg` is the one file of an entry's four that nothing in this
-/// workspace can produce — there is no JPEG encoder here — so a thumbnail grid
-/// would be a grid of placeholders for any project this application wrote, and
-/// a grid of QuPath's own thumbnails for any project it did not. A list is the
-/// same information for every project, which is the version worth having until
-/// a decoder makes the other one honest.
+/// QuPath's `ProjectBrowser` puts a thumbnail beside each name, and so does
+/// this. The picture is **made from the slide** rather than read from the
+/// entry's `thumbnail.jpg`, which is the same thing QuPath's browser does when
+/// an entry has no stored thumbnail — see [`crate::thumbnails`]. So the row
+/// looks the same whether the project was written here or there, which is what
+/// the file-based version could not have managed.
 ///
 /// # Every row is shown, including the ones that will not open
 ///
@@ -1292,58 +1301,252 @@ fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
 
     let showing = app.open.as_ref().map(|open| open.path.as_path());
     for (index, image) in project.stored.images.iter().enumerate() {
-        match &image.slide {
-            Ok(path) => {
-                let current = showing == Some(path.as_path());
-                let present = project.present(index);
-                let label = if current {
-                    // The row being looked at is marked, because a list of
-                    // fifty names says nothing about which of them is on
-                    // screen — and the title bar naming the file is not an
-                    // answer when two entries name the same slide.
-                    egui::RichText::new(&image.name).strong()
-                } else if present {
-                    egui::RichText::new(&image.name)
-                } else {
-                    egui::RichText::new(&image.name).color(ui.visuals().warn_fg_color)
-                };
-                let row = ui.add(egui::Label::new(label).wrap().sense(egui::Sense::click()));
-                let row = if present {
-                    row.on_hover_text(path.display().to_string())
-                } else {
-                    row.on_hover_text(format!(
-                        "{}\n\nThis file was not there when the project was \
-                         opened. Clicking still tries it.",
-                        path.display()
-                    ))
-                };
-                if row.clicked() {
-                    // The same command the recent menu and the welcome screen
-                    // send. A row that will not open reports through
-                    // `App::open`'s own message rather than being refused
-                    // here: the check above is from when the project was
-                    // opened, and a slide plugged in since is one this should
-                    // not be second-guessing.
-                    *command = Command::OpenPath(path.clone());
-                }
+        let current = is_showing(image, showing);
+        let present = project.present(index);
+        let openable = image.slide.is_ok();
+        // The whole row is the click target — the picture as much as the name.
+        // A 50 px picture beside a name is most of the row's area, and a row
+        // that only reacts to its text is one where the obvious place to press
+        // does nothing.
+        let sense = if openable {
+            egui::Sense::click()
+        } else {
+            egui::Sense::hover()
+        };
+        let laid = ui.scope_builder(egui::UiBuilder::new().sense(sense), |ui| {
+            // Reserved before the contents so the fill lands *under* them.
+            // `egui` paints in the order shapes are added, and a background
+            // added afterwards is a rectangle over the picture.
+            let background = ui.painter().add(egui::Shape::Noop);
+            ui.horizontal(|ui| {
+                row_picture(ui, &project.pictures, index, present && openable);
+                let text = row_text(ui, image, current, present);
+                // `wrap()` and not the default, which inside a horizontal
+                // layout is `Extend`: a label that refuses to wrap is a label
+                // whose desired width is its whole text, and a side panel sized
+                // from its contents then grows to the cap that binds it and
+                // clips there. §8.1c's shape exactly, met a second time.
+                ui.add(egui::Label::new(text).wrap().selectable(false));
+            });
+            // Nothing, of the width that is left and no height: it makes the
+            // row as wide as the pane without making it taller. The row is a
+            // list row, so the part of it to the right of a short name is part
+            // of the row — it takes the fill, and it takes the click. Without
+            // this the two disagree, and the half that reads as broken is the
+            // one where an obviously highlighted row ignores a press.
+            ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
+            background
+        });
+
+        // The slide on screen keeps a filled row for as long as it is on
+        // screen; hovering fills one while the pointer is over it. Both say the
+        // same thing in the same way, which is what makes the first read as a
+        // state rather than as a stuck highlight.
+        let fill = if current {
+            Some(ui.visuals().selection.bg_fill.gamma_multiply(0.35))
+        } else if laid.response.hovered() {
+            Some(ui.visuals().widgets.hovered.weak_bg_fill)
+        } else {
+            None
+        };
+        if let Some(fill) = fill {
+            ui.painter().set(
+                laid.inner,
+                // Taller than the row and no wider: the row already runs the
+                // width of the pane, and expanding that puts two pixels of fill
+                // outside the panel's own margin.
+                egui::Shape::rect_filled(
+                    laid.response.rect.expand2(egui::vec2(0.0, 2.0)),
+                    3.0,
+                    fill,
+                ),
+            );
+        }
+
+        // An entry that names no file has nothing to hover and nothing to open,
+        // and is greyed rather than absent for the reason `project::read` keeps
+        // it at all: a browser that dropped those rows would show a project with
+        // fewer images than it has.
+        if let Ok(path) = &image.slide {
+            let mut hover = path.display().to_string();
+            if !present {
+                hover.push_str(
+                    "\n\nThis file was not there when the project was opened. \
+                     Clicking still tries it.",
+                );
+            } else if let Some(reason) = project.pictures.unread(index) {
+                // Only when the file *is* there. A slide that is missing has
+                // already been told about above, and "the picture could not be
+                // read" as a second sentence about it is the same fact twice.
+                hover.push_str("\n\nNo picture: ");
+                hover.push_str(reason);
             }
-            Err(reason) => {
-                // Not clickable, and greyed rather than absent. The reason is
-                // shown because "cannot open" and "cannot open *because the
-                // image is a rotated view of another one*" are different
-                // amounts of help.
-                ui.add(
-                    egui::Label::new(egui::RichText::new(&image.name).weak())
-                        .wrap(),
-                );
-                ui.add(
-                    egui::Label::new(egui::RichText::new(reason).weak().small())
-                        .wrap(),
-                );
+            let row = laid.response.on_hover_text(hover);
+            if row.clicked() {
+                // The same command the recent menu and the welcome screen send.
+                // A row that will not open reports through `App::open`'s own
+                // message rather than being refused here: the check above is
+                // from when the project was opened, and a slide plugged in
+                // since is one this should not be second-guessing.
+                *command = Command::OpenPath(path.clone());
             }
         }
         ui.add_space(2.0);
     }
+}
+
+/// Whether this row's image is the slide on screen.
+///
+/// A function rather than the line it was, because the line it was is wrong in
+/// a way that reads correctly: `image.slide.as_deref().ok() == showing` puts
+/// `None` on the left for an entry that names no file — one of the sixteen
+/// builder types — and `None` on the right for an application with no slide
+/// open, so **every unopenable row is marked as the one being looked at the
+/// moment nothing is**. Found by looking at the pane, which is where a row
+/// wearing the current-image fill with no image on screen is obvious and where
+/// nothing else was ever going to see it.
+fn is_showing(image: &qupath_viewer::project::Image, showing: Option<&Path>) -> bool {
+    image
+        .slide
+        .as_deref()
+        .is_ok_and(|path| showing == Some(path))
+}
+
+/// A row's name, and the reason under it when there is one.
+///
+/// **One widget and not two**, which is a layout decision rather than a tidying
+/// one: `egui` places a child of unknown height at the top of the line it is on,
+/// so a name in a nested `vertical` beside a 40-point picture sits against the
+/// picture's top edge rather than beside its middle. A `LayoutJob` is a single
+/// piece of text whose size is known when it is placed, so the row's own
+/// `Align::Center` puts it where a row of a list belongs.
+///
+/// It also puts the two lines in one wrap: the reason wraps against the same
+/// width the name does, and neither can be laid out against a width the other
+/// has already spent. The width itself is the `Label`'s to decide — a job that
+/// set its own would be one the widget's wrap mode overrides.
+fn row_text(
+    ui: &egui::Ui,
+    image: &qupath_viewer::project::Image,
+    current: bool,
+    present: bool,
+) -> egui::text::LayoutJob {
+    let visuals = ui.visuals();
+    // The row being looked at is marked, because a list of fifty names says
+    // nothing about which of them is on screen — and the title bar naming the
+    // file is not an answer when two entries name the same slide.
+    let colour = match (&image.slide, current, present) {
+        (Ok(_), true, _) => visuals.strong_text_color(),
+        (Ok(_), false, true) => visuals.text_color(),
+        (Ok(_), false, false) => visuals.warn_fg_color,
+        (Err(_), ..) => visuals.weak_text_color(),
+    };
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        &image.name,
+        0.0,
+        egui::TextFormat {
+            font_id: egui::TextStyle::Body.resolve(ui.style()),
+            color: colour,
+            ..Default::default()
+        },
+    );
+    if let Err(reason) = &image.slide {
+        // The reason is shown because "cannot open" and "cannot open *because
+        // the image is a rotated view of another one*" are different amounts of
+        // help.
+        job.append(
+            &format!("\n{reason}"),
+            0.0,
+            egui::TextFormat {
+                font_id: egui::TextStyle::Small.resolve(ui.style()),
+                color: visuals.weak_text_color(),
+                ..Default::default()
+            },
+        );
+    }
+    job
+}
+
+/// How large a row's picture is, in points: QuPath's `ProjectThumbnailSize`.
+///
+/// `SMALL`, which is its default — 50 by 40, and the two are separate constants
+/// there rather than one aspect. A fixed box and not a fitted one, because rows
+/// of different-shaped slides have to line their names up: the picture is
+/// centred in the box and keeps its own aspect, so a long thin slide is a short
+/// wide picture in the same rectangle rather than a row of a different height.
+const ROW_PICTURE: egui::Vec2 = egui::vec2(50.0, 40.0);
+
+/// One row's picture, or the space where it will be.
+///
+/// The space is allocated whether or not there is anything to put in it, which
+/// is what stops the list jumping as pictures land: a browser that grew each
+/// row when its thumbnail arrived would move the row under the pointer between
+/// the press and the release.
+///
+/// `lit` is false for a slide that was not on disk when the project was opened.
+/// QuPath draws that thumbnail at `opacity 0.2` and puts a warning icon over
+/// it; this fades the picture the same way and leaves the warning to the name
+/// beside it, which is already in the warning colour and already says so on
+/// hover.
+fn row_picture(ui: &mut egui::Ui, pictures: &Pictures, index: usize, lit: bool) {
+    let (box_, _) = ui.allocate_exact_size(ROW_PICTURE, egui::Sense::hover());
+    let Some(picture) = pictures.ready(index) else {
+        // An empty frame, drawn rather than left blank: the box is allocated
+        // either way, so a blank one keeps the names lined up and looks like a
+        // ragged indent doing it. The outline is what says the space is a
+        // picture's.
+        ui.painter()
+            .rect_filled(box_, 0.0, ui.visuals().faint_bg_color);
+        ui.painter().rect_stroke(
+            box_,
+            0.0,
+            egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+            egui::StrokeKind::Inside,
+        );
+        // Crossed out once it is settled that no picture is coming. Without
+        // this a slide that opens and decodes nothing — every JPEG 2000
+        // pyramid, which is half of `data/` — holds the same empty frame as a
+        // slide still being read, for as long as the project stays open. The
+        // cross is two lines rather than a glyph because the last thing this
+        // interface reached into the font for came out as `□`.
+        if pictures.unread(index).is_some() {
+            let cross = box_.shrink(box_.height() * 0.3);
+            let stroke = egui::Stroke::new(1.0, ui.visuals().weak_text_color());
+            ui.painter()
+                .line_segment([cross.left_top(), cross.right_bottom()], stroke);
+            ui.painter()
+                .line_segment([cross.left_bottom(), cross.right_top()], stroke);
+        }
+        return;
+    };
+
+    let (width, height) = picture.overview.size();
+    #[expect(clippy::cast_precision_loss, reason = "a thumbnail, at most 150 px")]
+    let (width, height) = (width as f32, height as f32);
+    let scale = (box_.width() / width).min(box_.height() / height);
+    let size = egui::vec2(width * scale, height * scale);
+    let rect = egui::Rect::from_center_size(box_.center(), size);
+
+    let mut mesh = egui::Mesh::with_texture(egui::TextureId::User(PROJECT_TEXTURE + index as u64));
+    mesh.add_rect_with_uv(
+        rect,
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        // Premultiplied white, so the vertex colour multiplies the texel and
+        // leaves it alone — and at less than full alpha fades it instead.
+        if lit {
+            egui::Color32::WHITE
+        } else {
+            egui::Color32::from_white_alpha(64)
+        },
+    );
+    ui.painter().add(egui::Shape::mesh(mesh));
+    ui.painter().rect_stroke(
+        rect,
+        0.0,
+        egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+        egui::StrokeKind::Inside,
+    );
 }
 
 /// The button that puts the slide showing into the project.
@@ -1702,6 +1905,41 @@ mod tests {
         let (value, unit) = label.split_once(' ').expect("a value and a unit");
         let value: f64 = value.parse().expect("a number");
         if unit == "mm" { value * 1000.0 } else { value }
+    }
+
+    /// A row is marked only when its own slide is the one on screen.
+    ///
+    /// The case that fails without the `is_ok_and` is the last pair: an entry
+    /// that names no file, in an application with no slide open. Both sides are
+    /// then `None`, the row is marked as the current image, and the browser
+    /// shows a study whose "open" slide is the one row that cannot be opened.
+    #[test]
+    fn a_row_is_marked_only_for_the_slide_on_screen() {
+        use qupath_viewer::project::Image;
+
+        let entry = |slide: Result<&str, &str>| Image {
+            id: 1,
+            name: String::from("an image"),
+            builder: String::from("uri"),
+            slide: slide
+                .map(std::path::PathBuf::from)
+                .map_err(std::string::ToString::to_string),
+            uri: None,
+        };
+        let here = std::path::Path::new("/slides/one.svs");
+        let elsewhere = std::path::Path::new("/slides/two.svs");
+
+        assert!(super::is_showing(&entry(Ok("/slides/one.svs")), Some(here)));
+        assert!(!super::is_showing(
+            &entry(Ok("/slides/one.svs")),
+            Some(elsewhere)
+        ));
+        assert!(!super::is_showing(&entry(Ok("/slides/one.svs")), None));
+        assert!(!super::is_showing(
+            &entry(Err("a `rotated` image")),
+            Some(here)
+        ));
+        assert!(!super::is_showing(&entry(Err("a `rotated` image")), None));
     }
 
     /// The scalebar measures what its label says, on a scaled display too.

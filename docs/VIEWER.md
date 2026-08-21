@@ -1872,10 +1872,11 @@ recent menu and the welcome screen send — `OpenPath`, renamed from `OpenRecent
 for exactly that reason: three places mean the same act and only one of them is
 about recency.
 
-**A row is a name, not a thumbnail**, and that is `thumbnail.jpg` again. It is
-the one file of an entry's four this workspace cannot produce, so a grid would
-be placeholders for every project this application wrote and pictures for every
-project it did not. A list is the same information for both.
+**A row was a name and not a thumbnail**, and the reason given was
+`thumbnail.jpg` — the one file of an entry's four this workspace cannot produce,
+so a grid would be placeholders for every project this application wrote and
+pictures for every project it did not. **That reasoning was wrong, and the
+section below is what replaced it.**
 
 **Every row is shown, including the ones that will not open.** A slide that is
 not on disk is marked in the warning colour with the path on hover; an entry
@@ -1980,6 +1981,85 @@ would have offered to add a slide the project already held — two entries and t
 path, which is the same lexical resolution `file_uri` does, so the two agree by
 construction rather than by coincidence. It is the fourth time in this file that
 looking at the running application found something no test was going to.
+
+#### The pictures, and the blocker that was not one
+
+**§8.8 had the thumbnail filed under "the same missing JPEG encoder as ever",
+and that was a fact about a file rather than about a picture.** The row's
+picture was assumed to be `data/<id>/thumbnail.jpg`, which this workspace can
+neither write nor read — so the entry sat under the encoder, where it would have
+waited for one.
+
+`ProjectBrowser.ProjectTreeRowCell.updateItem` says otherwise. It asks
+`entry.getThumbnail()`, and **when the answer is null it opens the image**:
+`executor.submit(...)` builds the server from the entry's builder, calls
+`ProjectCommands.getThumbnailRGB(server)`, and stores the result back on the
+entry. The stored file is a *cache* of a picture QuPath is prepared to make from
+the pixels, not the source of it. Reading a project QuPath wrote and reading a
+project this wrote are the same problem, and neither of them needs a codec this
+workspace does not have — `qupath-slide` opens the file and
+`crate::thumbnails::make` is the picture the overview pane has been drawing
+since §8.4.
+
+So the browser is QuPath's: a picture beside each name, at
+`ProjectThumbnailSize.SMALL`'s 50 by 40 points, made from the slide. What is
+copied is the shape of it — one background thread (`newSingleThreadExecutor`
+with a `thumbnail-loader` factory) walking the entries in the order the list
+shows them, and a slide that failed never asked for again (`serversFailed`
+there; here the queue is a list walked once, so a retry has nowhere to come
+from). What is not copied is the four sizes and the hidden setting, which are a
+preference this has nowhere to keep, and the tooltip's larger picture.
+
+**The picture belongs to the project, not to the application**, and that is the
+whole of how a stale one is prevented. The worker delivers by row index, and row
+0 of one study is a different slide from row 0 of the next; a browser with one
+queue would paint a picture from the study that was closed onto the list of the
+study that replaced it, and both rows would look perfectly ordinary. `Pictures`
+is a field of `Project`, so opening another study drops the channel the first
+one's pictures would have arrived on. There is no generation counter because
+there is nowhere for the answer to arrive.
+
+What crosses that boundary deliberately is the pictures already made: a re-read
+carries them over **by path**, because `add_to_project` writes the index and
+opens it again, and a browser that started from nothing there would blank a
+fifty-slide study and read all fifty again for one added row.
+
+**Uploaded before the interface is laid out, and that ordering is load-bearing.**
+A row names a texture id derived from its index, and those ids are reused by the
+next project opened. A picture uploaded after the layout that names it is not
+merely late — the frame resolves the id to whatever the previous project left
+there. `Pictures::ready` is false until the renderer holds *this* project's copy,
+and `App::take_pictures` runs beside `request_tiles` rather than inside `draw`.
+
+#### Three more things the running window found
+
+**A row with no picture and no cross says "wait" for ever.** The study opened for
+the photograph has a JPEG 2000 slide in it — the file is there, `Slide::open`
+succeeds, and the coarsest level decodes nothing, which is `SlideError`'s
+`UndecodableCodec` and exactly what §3 says this reader does. Its row held the
+same empty frame as a row whose slide was still being read, permanently. The
+worker now sends the *reason* rather than skipping the entry, the frame is
+crossed out once it is settled that no picture is coming, and the hover carries
+what the reader said. QuPath draws an `INACTIVE_SERVER` icon in the same place
+for the same reason. An entry naming no file is crossed too — nothing was ever
+queued for it, so an uncrossed frame there would be the same lie.
+
+**`ok() == showing` marked every unopenable row as the image on screen.** An
+entry built by one of the sixteen transforms has `None` for its path, and an
+application with no slide open has `None` for what it is showing, so the two
+compared equal and the row wore the current-image fill. It was written while
+moving the row's body into one branch, it reads correctly, and it is only
+visible in a picture: `is_showing` is a named function with a test now, because
+the shape of it — two absences comparing equal — is not one a reader catches.
+
+**§8.1c's width trap, a third time.** A `Label` inside a horizontal layout
+defaults to `TextWrapMode::Extend`, so its desired width is its whole text; a
+side panel sized from its contents then grows to the cap that binds it and clips
+there. The pane's heading stopped wrapping and the reason under a row ran off
+the edge — and the *cause* was three widgets away, in a row that had been given
+a picture. Same family as the clipped slider labels and the same fix: the
+content has to be able to be narrower than the panel. This is the third
+occurrence, which is what `docs/EVOLUTION.md` asks for an entry at.
 
 ### 8.4 The overview — the invariant is that the two mappings agree
 
@@ -2433,23 +2513,33 @@ In the order it is worth having.
   table comes from `openslide` reading the file, so writing a block means
   carrying it from an open `Slide` at the moment an entry is added. `added` is
   where it would go, and `Entry` is what would carry it.
-- **A thumbnail.** `thumbnail.jpg` is why the browser is a list of names rather
-  than QuPath's grid of pictures, and it is the same missing JPEG encoder as
-  ever.
+- ~~**A thumbnail.**~~ **Done, and the entry was wrong about what it needed.**
+  It read as blocked on a JPEG encoder because it assumed a row's picture is
+  `data/<id>/thumbnail.jpg`. QuPath's own browser opens the image when that file
+  is absent, so the picture comes from the pixels on both sides; §8.3 has the
+  call site and what it cost to find out. The encoder is still owed — see below
+  — but nothing about the *browser* was ever waiting on it.
 - **`data.qpdata`, which should stay missing.** Java serialisation tied to
   Java's object graph. A guessed version is how a project becomes corrupt in a
   way someone discovers much later, having trusted it. The detections belong
   beside it as GeoJSON, which both sides can read.
-- **A JPEG encoder for `thumbnail.jpg`.** `project.rs` returns the JSON files
-  and leaves the thumbnail to the caller, because nothing in this workspace
-  encodes JPEG. QuPath tolerates its absence.
+- **A JPEG encoder for `thumbnail.jpg`, which is a debt to QuPath and not to
+  this browser.** `project.rs` returns the JSON files and leaves the thumbnail
+  to the caller, because nothing in this workspace encodes JPEG. QuPath
+  tolerates its absence — its browser makes the picture itself, which is what
+  this one now does — so what the file buys is QuPath not re-reading every slide
+  in a study the first time it opens it. Worth having, and no longer in front of
+  anything.
 - **Driving the real window.** The application has been launched on a project
   and a slide together and photographed — `WINIT_X11_SCALE_FACTOR=2`, the list
-  drawn, the add button live, no stderr — and that photograph is what found the
-  relative-path bug above. But nothing has *clicked* a row, and nothing has
-  pressed the add button; both are checked through `App` instead. The same hole
-  as the overview's click-to-jump and escape during a run: reachable only with a
-  hand on the machine.
+  drawn, the add button live, no stderr — and those photographs are what found
+  the relative-path bug above, the row that could not say its picture was never
+  coming, and the current-image fill on a row that names no image. But nothing
+  has *clicked* a row, and nothing has pressed the add button; both are checked
+  through `App` instead. The same hole as the overview's click-to-jump and
+  escape during a run: reachable only with a hand on the machine. The hover
+  states of the browser's rows are in that hole now too — the fill under a
+  hovered row has been reasoned about and drawn, and never seen.
 - **A look at the interface in a real window — started, and it paid at once.**
   The application has now been run and photographed on X11 at
   `WINIT_X11_SCALE_FACTOR=2`, which is what an offscreen render cannot be: a

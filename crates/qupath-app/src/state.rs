@@ -22,7 +22,6 @@ use std::time::{Duration, Instant};
 use qupath_pipeline::{Micron, Stains};
 use qupath_slide::Slide;
 use qupath_viewer::compose::{self, Framebuffer, MeshVertex, Texture};
-use qupath_viewer::overview::Overview;
 use qupath_viewer::project;
 use qupath_viewer::{
     Display, Overlay, ScreenPoint, SlidePoint, SlideTiles, Stain, TileCache, TileLoader, Viewport,
@@ -33,6 +32,7 @@ use winit::window::Window;
 
 use crate::chrome::{self, Command};
 use crate::detect::Detector;
+use crate::thumbnails::{Pictures, Thumbnail};
 
 /// Texture budget, in bytes. Roughly two thousand tiles.
 const BUDGET: usize = 512 << 20;
@@ -175,14 +175,6 @@ pub struct Open {
     pub overview: Option<Thumbnail>,
 }
 
-/// A whole-slide picture and the mapping onto it.
-pub struct Thumbnail {
-    /// The picture, RGBA, `width` by `height` as `Overview::size` gave them.
-    pub pixels: Vec<u8>,
-    /// Geometry: where the view is, and where a click lands.
-    pub overview: Overview,
-}
-
 impl Open {
     /// Opens `path` and fits the whole slide in a viewport of `width` by
     /// `height`.
@@ -197,7 +189,7 @@ impl Open {
     pub fn new(path: PathBuf, width: u32, height: u32) -> Result<Self, String> {
         let slide = Slide::open(&path).map_err(|error| error.to_string())?;
         let view = Viewport::fit(&slide, width.max(1), height.max(1));
-        let overview = thumbnail(&slide);
+        let overview = crate::thumbnails::make(&slide).ok();
         let source = Arc::new(SlideTiles::new(slide));
         let loader = TileLoader::new(&source, WORKERS);
         Ok(Self {
@@ -440,6 +432,12 @@ pub struct Project {
     /// [`App::open`] reports what actually happened. QuPath checks on open for
     /// the same reason.
     present: Vec<bool>,
+    /// A picture of each image, made in the background as the list is read.
+    ///
+    /// Owned by the project rather than by the application, which is what makes
+    /// a picture of the previous study impossible in this one's list — see
+    /// [`Pictures`]. Dropping this project stops its worker.
+    pub pictures: Pictures,
 }
 
 impl Project {
@@ -472,6 +470,23 @@ impl Project {
             .as_deref()
             .and_then(|uri| project::uri_path(uri).ok())
             .is_some_and(|was| was != self.path)
+    }
+
+    /// Every picture this project has already made, with the slide it is of.
+    ///
+    /// What a re-read carries over: [`App::add_to_project`] writes the index
+    /// and opens it again, and the fifty pictures it already had are pictures
+    /// of the same fifty slides.
+    fn known(&self) -> Vec<(PathBuf, Arc<Thumbnail>)> {
+        self.stored
+            .images
+            .iter()
+            .enumerate()
+            .filter_map(|(index, image)| {
+                let path = image.slide.as_ref().ok()?;
+                Some((path.clone(), Arc::clone(self.pictures.made(index)?)))
+            })
+            .collect()
     }
 }
 
@@ -899,11 +914,26 @@ impl App {
                     .iter()
                     .map(|image| image.slide.as_ref().is_ok_and(|path| path.is_file()))
                     .collect();
+                // Taken before the new project is built, so the pictures the
+                // browser already has survive a re-read and the worker for the
+                // project being replaced is stopped. Both matter in the same
+                // place: adding a slide re-reads the file it just wrote.
+                let known = self
+                    .project
+                    .take()
+                    .map(|previous| previous.known())
+                    .unwrap_or_default();
+                let slides: Vec<Option<PathBuf>> = stored
+                    .images
+                    .iter()
+                    .map(|image| image.slide.as_ref().ok().cloned())
+                    .collect();
                 self.project = Some(Project {
                     name: project_name(&path),
                     path,
                     stored,
                     present,
+                    pictures: Pictures::start(&slides, &known),
                 });
                 self.show_project = true;
                 // Said in the status bar as well as shown in the pane, because
@@ -964,6 +994,15 @@ impl App {
                 .open
                 .as_ref()
                 .is_some_and(|open| !open.loader.is_idle())
+            // The browser's pictures arrive on a channel nothing wakes the
+            // event loop for, so the frames while they are being made are what
+            // puts them on screen. Fifty slides is fifty pictures; the loop
+            // sleeps again when the last one has landed, which is what
+            // `Pictures::working` stops saying.
+            || self
+                .project
+                .as_ref()
+                .is_some_and(|project| project.pictures.working())
     }
 
     /// Handles one window event that the interface did not take, and says
@@ -1585,6 +1624,7 @@ impl App {
             return;
         }
         self.request_tiles();
+        self.take_pictures();
         // Before the interface is laid out, so a run that finished since the
         // last frame is reported by *this* frame's status bar rather than the
         // next one — the same reason the interface is laid out before the frame
@@ -1686,6 +1726,44 @@ impl App {
         }
     }
 
+    /// Takes delivery of the browser's thumbnails and makes them textures.
+    ///
+    /// **Before the interface is laid out, and that is not a preference.** A
+    /// row draws its picture by naming a texture id derived from its index, and
+    /// those ids are reused by whichever project is open. A picture uploaded
+    /// after the layout that names it is therefore not merely late — the frame
+    /// naming it resolves the id to whatever the *previous* project left there,
+    /// so a row of study B briefly shows a slide from study A. Uploading first
+    /// is what makes [`Pictures::ready`] a true statement rather than a hope.
+    pub fn take_pictures(&mut self) {
+        let Some(project) = &mut self.project else {
+            return;
+        };
+        project.pictures.take();
+        let pending = project.pictures.undelivered();
+        let Some(state) = &mut self.surface else {
+            // No surface, and the pictures are marked delivered anyway. The
+            // application always has one here — `App::start` builds the window
+            // and the surface together, and nothing calls this before that —
+            // so the only callers that land here are the ones that draw the
+            // interface themselves: `examples/chrome`, which registers these
+            // same ids by hand, and the tests, which draw nothing at all. A
+            // queue that grew forever waiting for a renderer that is never
+            // coming would be a leak in exactly the configuration that cannot
+            // see it.
+            return;
+        };
+        for (index, picture) in pending {
+            let (width, height) = picture.overview.size();
+            state.set_texture(
+                chrome::PROJECT_TEXTURE + index as u64,
+                &picture.pixels,
+                width,
+                height,
+            );
+        }
+    }
+
     /// Composes the slide and the interface, and presents.
     ///
     /// `pixels_per_point` is `egui`'s scale factor, and it is needed here
@@ -1748,7 +1826,7 @@ impl App {
             return;
         };
         if let Some((pixels, (width, height))) = overview {
-            state.set_overview(&pixels, width, height);
+            state.set_texture(chrome::OVERVIEW_TEXTURE, &pixels, width, height);
             self.uploaded_overview = true;
         }
         state.frame.clear(compose::CLEAR);
@@ -1922,16 +2000,21 @@ fn draw_interface(
 }
 
 impl Software {
-    /// Registers the overview picture as a user texture, replacing any
-    /// previous one.
+    /// Registers a picture of the application's own as a user texture,
+    /// replacing any previous one under the same id.
     ///
-    /// `egui` owns the *managed* ids in [`Software::textures`]; this claims one
-    /// user id alongside them, so `mesh` resolves it through the same lookup
-    /// and needs no special case. Uploaded per slide rather than per frame:
-    /// `chrome` names the texture every frame, but the pixels only change when
-    /// a different slide is opened, which is what `dirty` tracks.
-    fn set_overview(&mut self, pixels: &[u8], width: u32, height: u32) {
-        let id = egui::TextureId::User(chrome::OVERVIEW_TEXTURE);
+    /// `egui` owns the *managed* ids in [`Software::textures`]; this claims
+    /// user ids alongside them, so `mesh` resolves one through the same lookup
+    /// and needs no special case. Uploaded when the picture changes rather than
+    /// per frame: `chrome` names its textures every frame, and the pixels
+    /// behind them change when a slide is opened or a row's thumbnail lands.
+    ///
+    /// The ids are [`chrome::OVERVIEW_TEXTURE`] and one per browser row from
+    /// [`chrome::PROJECT_TEXTURE`], and the row ids are **reused** by the next
+    /// project opened — which is the whole reason a row may only draw its
+    /// picture once `Pictures` says the renderer has this project's copy.
+    fn set_texture(&mut self, id: u64, pixels: &[u8], width: u32, height: u32) {
+        let id = egui::TextureId::User(id);
         let texture = Texture {
             width,
             height,
@@ -1975,40 +2058,6 @@ impl Software {
         buffer.copy_from_slice(self.frame.pixels());
         buffer.present()
     }
-}
-
-/// Reads a slide's overview picture, or `None` if it has none to give.
-///
-/// From the **coarsest** level, which is the whole point: the top of CMU-1's
-/// pyramid is 1,024 px on its long edge, so the picture costs one small region
-/// read rather than a decimation of level 0. Downsampled from there by nearest
-/// sampling — the picture is 150 px wide and this runs once per slide, so a
-/// better filter would be invisible and unmeasurable.
-fn thumbnail(slide: &Slide) -> Option<Thumbnail> {
-    let base = slide.levels().first()?;
-    let overview = Overview::fit(base.width, base.height)?;
-    let (width, height) = overview.size();
-    let coarsest = slide.levels().last()?;
-    let source = slide
-        .read_region_rgb(coarsest.index, 0, 0, coarsest.width, coarsest.height)
-        .ok()?;
-
-    let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
-    for row in 0..height {
-        // The centre of this destination row in source pixels, which is the
-        // same "which pixel does this point fall in" rule `Framebuffer` uses.
-        let source_row =
-            ((f64::from(row) + 0.5) * f64::from(coarsest.height) / f64::from(height)) as usize;
-        let source_row = source_row.min(coarsest.height as usize - 1);
-        for column in 0..width {
-            let source_column =
-                ((f64::from(column) + 0.5) * f64::from(coarsest.width) / f64::from(width)) as usize;
-            let source_column = source_column.min(coarsest.width as usize - 1);
-            let at = (source_row * coarsest.width as usize + source_column) * 3;
-            pixels.extend_from_slice(&[source[at], source[at + 1], source[at + 2], 255]);
-        }
-    }
-    Some(Thumbnail { pixels, overview })
 }
 
 /// The file name a save dialog opens with.
@@ -2274,6 +2323,8 @@ impl ApplicationHandler for App {
 
 #[cfg(test)]
 mod tests {
+    use qupath_viewer::overview::Overview;
+
     use super::*;
 
     /// What one event of each kind is worth, in zoom steps.
