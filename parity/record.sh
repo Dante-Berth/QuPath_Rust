@@ -18,8 +18,13 @@ mkdir -p "$fixtures"
 # SlideRegion needs qupath-extension-bioformats and a slide, which is why it has
 # its own script; running it here truncated its committed fixture and then
 # aborted under `set -e`, taking the recorders after it with it.
+# ProjectImport is excluded for the same reason and did the same thing: its
+# input is a project directory written by `cargo run --example project_sample`,
+# which nothing here does, so it fell back to a relative default that does not
+# exist, emptied a committed fixture and took the run down. See
+# record-project.sh.
 for src in "$root"/parity/java/*.java; do
-    case "$(basename "$src")" in Bench* | SlideRegion.java) continue ;; esac
+    case "$(basename "$src")" in Bench* | SlideRegion.java | ProjectImport.java) continue ;; esac
     name="$(basename "$src" .java)"
     # GeoJsonImport reads a file this project wrote rather than computing one,
     # so it takes the sample's path. Passed absolutely, because the recorder is
@@ -36,8 +41,17 @@ for src in "$root"/parity/java/*.java; do
         args=("$sample")
     fi
     echo "==> recording $name" >&2
-    # Recorders write JSON to stdout; SLF4J and JVM warnings go to stderr.
-    "$java_bin" -cp "$cp." "$src" "${args[@]}" >"$fixtures/$name.json"
+    # Recorders write JSON to stdout, and so does some of QuPath's own logging:
+    # anything that touches GeometryTools prints two `Setting -Djts.*` lines
+    # there, not to stderr. A fixture with that preamble is not JSON and carries
+    # a clock, so it produces a diff on every recording. Everything before the
+    # first line that is exactly "{" is dropped, as record-slide.sh does.
+    "$java_bin" -cp "$cp." "$src" "${args[@]}" | sed -n '/^{$/,$p' >"$fixtures/$name.json"
+
+    if [[ ! -s "$fixtures/$name.json" ]]; then
+        echo "error: $name produced no JSON" >&2
+        exit 1
+    fi
 done
 
 echo "==> done; fixtures in parity/fixtures/" >&2

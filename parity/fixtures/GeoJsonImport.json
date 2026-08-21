@@ -1,5 +1,3 @@
-02:41:06.214 [main] DEBUG qupath.lib.roi.GeometryTools -- Setting -Djts.overlay=ng
-02:41:06.215 [main] DEBUG qupath.lib.roi.GeometryTools -- Setting -Djts.relate=ng
 {
   "source": "detections.geojson",
   "objects": [

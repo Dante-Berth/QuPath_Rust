@@ -164,10 +164,36 @@ public class ProjectImport {
         return text == null ? null : text.replace("\n", " | ").replace("\r", "").trim();
     }
 
+    /**
+     * A JSON string.
+     *
+     * <p>Control characters are escaped, and that is not hypothetical here:
+     * QuPath's own entry summary contains a <b>tab</b> — {@code "ID:\t1"} —
+     * and a raw one inside a string makes the fixture something a JSON parser
+     * refuses, however well the tests that read it by hand cope.
+     */
     private static String quote(String text) {
         if (text == null) {
             return "null";
         }
-        return "\"" + text.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+        var out = new StringBuilder("\"");
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            switch (c) {
+                case '"' -> out.append("\\\"");
+                case '\\' -> out.append("\\\\");
+                case '\n' -> out.append("\\n");
+                case '\r' -> out.append("\\r");
+                case '\t' -> out.append("\\t");
+                default -> {
+                    if (c < 0x20) {
+                        out.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        out.append(c);
+                    }
+                }
+            }
+        }
+        return out.append('"').toString();
     }
 }

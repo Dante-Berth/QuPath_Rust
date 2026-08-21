@@ -45,9 +45,14 @@ echo "==> recording ProjectImport" >&2
 # Recorders write JSON to stdout; SLF4J and JVM warnings go to stderr. Written
 # to a temporary file first: a recorder that fails must not leave the committed
 # fixture truncated, which is the failure record.sh's own header warns about.
+# QuPath's own logging goes to stdout too — `ProjectIO` prints a "Loading
+# project" line there — so everything before the first line that is exactly "{"
+# is dropped. A fixture with that preamble is not JSON and carries a clock,
+# which is a diff on every recording.
 recorded="$(mktemp)"
 trap 'rm -rf "$(dirname "$study")" "$recorded"' EXIT
-"$java_bin" -cp "$cp." "$root/parity/java/ProjectImport.java" "$study/project.qpproj" >"$recorded"
+"$java_bin" -cp "$cp." "$root/parity/java/ProjectImport.java" "$study/project.qpproj" \
+    | sed -n '/^{$/,$p' >"$recorded"
 
 if [[ ! -s "$recorded" ]]; then
     echo "error: recorder produced no JSON" >&2
