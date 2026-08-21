@@ -34,6 +34,7 @@ pub mod compose;
 pub mod coords;
 pub mod display;
 pub mod geojson;
+pub(crate) mod json;
 pub mod loader;
 pub mod overlay;
 pub mod overview;

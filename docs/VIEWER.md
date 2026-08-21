@@ -1786,6 +1786,44 @@ reading against the same entries the project was written from. The directory
 cannot be committed the way the GeoJSON sample is, because every path in it is
 an absolute URI naming the machine that wrote it.
 
+#### Reading one back, and the spelling QuPath writes
+
+A browser opens projects it did not write, so `project.rs` now reads as well as
+writes — `read`, into a `Stored` of `Image`s. Two things came out of it that
+writing could not have shown.
+
+**`File.toURI()` writes `file:/data/x.svs`, with one slash.** `file_uri` writes
+`file:///data/x.svs`. Java parses both to `authority == null`, so both open —
+which is why writing the second has always worked, and why `movedFromPreviousUri`
+is `false` in `ProjectImport.json` even though the project's own `uri` is
+written in the other spelling. But a *reader* that accepted only the spelling
+this module writes would fail on **every project QuPath wrote**, which is the
+entire population a browser exists for. `uri_path` takes both, and refuses a
+host — including `localhost`, which RFC 8089 calls equivalent to none and
+`new File(URI)` still throws `URI has an authority component` for. Refusing
+exactly what QuPath refuses is what keeps "this entry will not open" the same
+statement on both sides.
+
+**Reading is not the inverse of writing, and that is the useful part.** A
+`Stored` image has an id, a name, a `builderType` and a path; it has no width or
+height, because the only place a project keeps those is the metadata block §8.3
+removed. The browser gets the location from the project and the pixels from
+opening the slide, which is the division that block's removal already implied
+and this makes concrete.
+
+An entry the reader cannot open is **listed** rather than dropped:
+`Image::slide` is a `Result`, and the sixteen builder types QuPath registers
+besides `uri` — `rotated`, `cropped`, `sparse`, `affine`, `pyramidize` and the
+rest — wrap another builder instead of naming a file. A browser that omitted
+those rows would show a project with fewer images than it has, and nothing about
+the picture would say so.
+
+`json.rs` is the parser this needed, and it is a parser rather than a search for
+`"uri": ` for one reason: a `serverBuilder` QuPath wrote carries a metadata
+block, and the first `uri` in an entry's text is not the entry's. Both are
+strings, both look like paths, and taking the wrong one opens the wrong slide in
+silence.
+
 ### 8.4 The overview — the invariant is that the two mappings agree
 
 `overview.rs` is `ImageOverview.java`'s arithmetic: slide to overview, which

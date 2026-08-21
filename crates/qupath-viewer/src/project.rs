@@ -1,4 +1,5 @@
-//! Writing a QuPath project directory — the JSON parts of it.
+//! A QuPath project directory: writing the JSON parts of it, and reading one
+//! back.
 //!
 //! `docs/VIEWER.md` §8.3, and the **second and larger revision of §0's stated
 //! non-goals**: §0 says no project format, and §8.3 says the item is "not to be
@@ -37,6 +38,22 @@
 //! be written correctly and says plainly what it leaves out, rather than
 //! producing four files of which one is a plausible fake.
 //!
+//! # Reading, which is not the inverse of writing
+//!
+//! [`read`] parses `project.qpproj` back into [`Stored`], because a browser
+//! opens projects it did not write. It is **not** a round trip: a [`Stored`]
+//! image has a name and a path and no dimensions, since the only place a
+//! project keeps those is the metadata block this refuses to write. A browser
+//! learns where the slide is from the project and everything about the pixels
+//! from opening it, which is the division §8.3 settled on when the block went.
+//!
+//! Reading a real project is also what showed that **QuPath's spelling of a
+//! `file:` URI is not this one's**: `File.toURI()` writes `file:/data/x.svs`
+//! with no authority, and [`file_uri`] writes `file:///data/x.svs` with an
+//! empty one. Java parses both to the same URI, which is why writing the second
+//! has always opened — but a reader that took only the second would fail on
+//! every project QuPath wrote. [`uri_path`] takes both.
+//!
 //! # Paths are URIs, and that is the part that silently breaks
 //!
 //! Every path QuPath stores is a `file:` URI, and a project whose `uri` fields
@@ -46,7 +63,7 @@
 //! edge case.
 
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::geojson::escape;
 
@@ -422,6 +439,278 @@ pub fn file_uri(path: &Path) -> String {
     out
 }
 
+/// One image in a project, as the project stores it.
+///
+/// The counterpart of [`Entry`], and **not its inverse**: an [`Entry`] carries
+/// a width and a height, and this does not, because the only place a project
+/// keeps them is the server metadata block that [`server_builder`] deliberately
+/// does not write. A reader that reported dimensions here would be reporting
+/// something no project this module writes contains, and none QuPath writes
+/// contains either once the image has never been opened.
+///
+/// That asymmetry is the useful fact rather than a gap: a browser learns a
+/// name and a path from the project, and everything about the pixels from
+/// opening the slide — which is exactly the division `docs/VIEWER.md` §8.3
+/// settled on when the metadata block was removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Image {
+    /// `entryID`, which is also the name of the entry's directory under
+    /// `data/`.
+    pub id: u64,
+    /// The name the browser shows.
+    ///
+    /// QuPath substitutes `Image <entryID>` when an entry has no `imageName`,
+    /// in `DefaultProjectImageEntry`'s constructor, and so does this: a browser
+    /// that showed a blank row where QuPath shows a name is showing a different
+    /// project.
+    pub name: String,
+    /// The `builderType` discriminator, which says what kind of image this is.
+    ///
+    /// [`BUILDER_TYPE`] — `"uri"` — is a plain file. QuPath registers sixteen
+    /// others in `ImageServers`: `rotated`, `cropped`, `sparse`, `affine`,
+    /// `pyramidize` and the rest, each wrapping another builder rather than
+    /// naming a file. Kept as text because this is not a list to reimplement;
+    /// it is what lets a browser say *which* kind of entry it cannot open.
+    pub builder: String,
+    /// Where the slide is, or why this entry does not name one here.
+    ///
+    /// A `Result` and not an `Option` because every way of not having a path is
+    /// a thing the user needs told: an entry built by a transform QuPath
+    /// supports and this does not, a URI naming another machine, a URI that is
+    /// not a `file:` URI at all. A browser that silently omitted those rows
+    /// would be showing a project with fewer images than it has.
+    pub slide: Result<PathBuf, String>,
+    /// The URI exactly as the project stores it, for the builders that have
+    /// one.
+    ///
+    /// Kept verbatim rather than reconstructed from [`Image::slide`], because
+    /// the two spellings are not the same text. `File.toURI()` writes
+    /// `file:/data/x.svs` and [`file_uri`] writes `file:///data/x.svs`; Java
+    /// reads both as the same URI, so a project rewritten from the decoded
+    /// paths would change every line without changing anything.
+    pub uri: Option<String>,
+}
+
+/// A project, as read back from `project.qpproj`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stored {
+    /// The format version the file claims, if it says.
+    ///
+    /// `Option` because QuPath's own reader guards it — `element.has("version")`
+    /// — and treats its absence as an old project rather than an error.
+    pub version: Option<String>,
+    /// The two timestamps, which QuPath does *not* guard; see [`Timestamps`].
+    pub written: Timestamps,
+    /// The `uri` field: where the project says it lives.
+    ///
+    /// QuPath compares this against the file it actually opened to tell a
+    /// project that has been moved from one in place, and so can a browser.
+    pub uri: Option<String>,
+    /// The images, in file order.
+    pub images: Vec<Image>,
+}
+
+/// Reads a `project.qpproj`.
+///
+/// # Why this exists at all, given the rest of the module writes
+///
+/// A project browser opens projects it did not write. `DefaultProject
+/// .writeProject` puts the index through Gson with pretty-printing on, so what
+/// arrives is QuPath's spelling of the format rather than this module's, and
+/// the two differ in ways that only reading a real one shows — see
+/// [`Image::uri`] for the first of them.
+///
+/// # What is *not* an error here
+///
+/// An entry this cannot open is kept, with [`Image::slide`] saying why. QuPath
+/// lists an entry whose slide has been moved and fails when it is opened, and a
+/// browser that dropped the row instead would be showing a project with fewer
+/// images than it has — which is the worse failure, because nothing about the
+/// picture says a row is missing.
+///
+/// # Errors
+///
+/// The message names a line and a column when the file is not JSON, and says
+/// which field is wrong when it is JSON that is not a project. The two
+/// timestamps are required, because [`Timestamps`] is what QuPath demands
+/// before it looks at anything else — a file without them is one QuPath will
+/// not open, and reporting that here is more use than reading it anyway and
+/// discovering later.
+pub fn read(text: &str) -> Result<Stored, String> {
+    let value = crate::json::parse(text)?;
+    let created = value
+        .get("createTimestamp")
+        .and_then(crate::json::Value::as_u64)
+        .ok_or("no createTimestamp: QuPath reads this one unguarded and would not open the file")?;
+    let modified = value
+        .get("modifyTimestamp")
+        .and_then(crate::json::Value::as_u64)
+        .ok_or("no modifyTimestamp: QuPath reads this one unguarded and would not open the file")?;
+
+    // `images` absent is an empty project, which is what `loadProject` does
+    // with it — `element.has("images") ? ... : Collections.emptyList()`.
+    let images = match value.get("images") {
+        None => Vec::new(),
+        Some(listed) => {
+            let listed = listed
+                .as_array()
+                .ok_or("`images` is not a list, so this is not a project index")?;
+            listed.iter().enumerate().map(image).collect()
+        }
+    };
+
+    Ok(Stored {
+        version: value
+            .get("version")
+            .and_then(crate::json::Value::as_str)
+            .map(str::to_owned),
+        written: Timestamps { created, modified },
+        uri: value
+            .get("uri")
+            .and_then(crate::json::Value::as_str)
+            .map(str::to_owned),
+        images,
+    })
+}
+
+/// One entry of the `images` array.
+///
+/// `position` stands in for a missing `entryID`, counting from 1 the way
+/// QuPath's counter does. An entry without one is not something QuPath writes,
+/// and giving every such entry id 0 would put them all in `data/0`.
+fn image((position, value): (usize, &crate::json::Value)) -> Image {
+    let id = value
+        .get("entryID")
+        .and_then(crate::json::Value::as_u64)
+        .unwrap_or(position as u64 + 1);
+    let name = value
+        .get("imageName")
+        .and_then(crate::json::Value::as_str)
+        .map_or_else(|| format!("Image {id}"), str::to_owned);
+
+    let builder = value.get("serverBuilder");
+    let kind = builder
+        .and_then(|builder| builder.get("builderType"))
+        .and_then(crate::json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let uri = builder
+        .and_then(|builder| builder.get("uri"))
+        .and_then(crate::json::Value::as_str)
+        .map(str::to_owned);
+
+    let slide = if kind == BUILDER_TYPE {
+        match &uri {
+            Some(uri) => uri_path(uri),
+            None => Err("the entry has no uri".to_owned()),
+        }
+    } else if kind.is_empty() {
+        Err("the entry has no serverBuilder".to_owned())
+    } else {
+        Err(format!(
+            "the image is built by a `{kind}` transform, which this reads but cannot open"
+        ))
+    };
+
+    Image {
+        id,
+        name,
+        builder: kind,
+        slide,
+        uri,
+    }
+}
+
+/// The path a `file:` URI names — the inverse of [`file_uri`], and QuPath's
+/// `new File(uri)`.
+///
+/// # Both spellings, because QuPath writes the one this does not
+///
+/// `File.toURI()` produces `file:/data/x.svs`: a `file:` URI with **no**
+/// authority at all, which is what Java's `URI` constructor makes of a null
+/// authority. [`file_uri`] writes `file:///data/x.svs`, an *empty* authority,
+/// which is what RFC 8089 recommends and what `ProjectImport` confirms QuPath
+/// opens. Java parses both to `authority == null`, so they are the same URI to
+/// the reader on the other side — and a reader here that accepted only the
+/// spelling this module writes would fail on **every project QuPath wrote**,
+/// which is the entire population a browser exists to open.
+///
+/// # A host is refused, and that includes `localhost`
+///
+/// `file://data/x.svs` names the host `data`, and `new File(URI)` throws
+/// `IllegalArgumentException: URI has an authority component` for it — and for
+/// `file://localhost/data/x.svs` too, which RFC 8089 does treat as equivalent
+/// to no host. This refuses exactly what QuPath refuses, so an entry that would
+/// fail to open there fails to open here, with a message that says why rather
+/// than a path pointing at the wrong place.
+///
+/// # Errors
+///
+/// A message naming what is wrong with the URI, written to be shown next to
+/// the entry it belongs to.
+pub fn uri_path(uri: &str) -> Result<PathBuf, String> {
+    let rest = uri
+        .strip_prefix("file:")
+        .ok_or_else(|| format!("`{uri}` is not a file: URI"))?;
+    // A query or a fragment is not something `File.toURI()` writes, and
+    // `new File(URI)` refuses both. Checked before the authority so that a URI
+    // with several problems reports the first one a reader would meet.
+    if let Some(at) = rest.find(['?', '#']) {
+        let what = if rest.as_bytes()[at] == b'?' { "query" } else { "fragment" };
+        return Err(format!("`{uri}` has a {what} component, so it does not name a file"));
+    }
+    let path = match rest.strip_prefix("//") {
+        // `file://...`: an authority runs to the next `/`. Empty is the
+        // `file:///path` spelling and names no host.
+        Some(authority) => {
+            let end = authority.find('/').unwrap_or(authority.len());
+            let (host, path) = authority.split_at(end);
+            if !host.is_empty() {
+                return Err(format!(
+                    "`{uri}` names the host `{host}`, so the slide is on another machine"
+                ));
+            }
+            path
+        }
+        // `file:/path`, which is what `File.toURI()` writes.
+        None => rest,
+    };
+    if !path.starts_with('/') {
+        return Err(format!("`{uri}` is a relative URI and names no file"));
+    }
+    let decoded = percent_decode(path).ok_or_else(|| format!("`{uri}` is not valid UTF-8"))?;
+    if decoded.contains('\0') {
+        return Err(format!("`{uri}` decodes to a path with a NUL in it"));
+    }
+    Ok(PathBuf::from(decoded))
+}
+
+/// Resolves `%XX` escapes, or `None` if what they spell is not UTF-8.
+///
+/// The escapes are decoded to *bytes* and the whole run is validated at the
+/// end, which is the only order that works: a character outside ASCII is
+/// several escapes, and each byte of it is invalid UTF-8 on its own.
+fn percent_decode(text: &str) -> Option<String> {
+    if !text.contains('%') {
+        return Some(text.to_owned());
+    }
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' {
+            let digits = bytes.get(at + 1..at + 3)?;
+            let text = std::str::from_utf8(digits).ok()?;
+            out.push(u8::from_str_radix(text, 16).ok()?);
+            at += 3;
+        } else {
+            out.push(bytes[at]);
+            at += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,6 +936,197 @@ mod tests {
         let now = Timestamps::now();
         assert!(now.created > 1_600_000_000_000, "the epoch is in milliseconds");
         assert_eq!(now.created, now.modified, "a new project is written once");
+    }
+
+    /// What is written comes back — and what does not is the point.
+    ///
+    /// The dimensions are gone, because they were only ever in the metadata
+    /// block that is not written. A browser learns a name and a path from the
+    /// project and everything about the pixels from opening the slide, which is
+    /// the division `docs/VIEWER.md` §8.3 settled on.
+    #[test]
+    fn a_project_this_module_wrote_reads_back() {
+        let text = project_file(Path::new("/study/project.qpproj"), &[entry()], written());
+        let stored = read(&text).expect("a project this module wrote");
+
+        assert_eq!(stored.version.as_deref(), Some(FORMAT_VERSION));
+        assert_eq!(stored.written, written());
+        assert_eq!(stored.uri.as_deref(), Some("file:///study/project.qpproj"));
+
+        assert_eq!(stored.images.len(), 1);
+        let image = &stored.images[0];
+        assert_eq!(image.id, 1);
+        assert_eq!(image.name, "CMU-1.svs");
+        assert_eq!(image.builder, BUILDER_TYPE);
+        assert_eq!(image.slide.as_deref(), Ok(Path::new("/data/CMU-1.svs")));
+        assert_eq!(image.uri.as_deref(), Some("file:///data/CMU-1.svs"));
+    }
+
+    /// `entryID` names the directory, so two entries must not read as one.
+    #[test]
+    fn every_entry_keeps_its_own_id_and_path() {
+        let second = Entry {
+            path: Path::new("/data/other.svs"),
+            name: "Other",
+            width: 10,
+            height: 20,
+        };
+        let text = project_file(Path::new("/p.qpproj"), &[entry(), second], written());
+        let stored = read(&text).expect("two entries");
+        let ids: Vec<u64> = stored.images.iter().map(|image| image.id).collect();
+        assert_eq!(ids, vec![1, 2]);
+        assert_eq!(stored.images[1].name, "Other");
+        assert_eq!(stored.images[1].slide.as_deref(), Ok(Path::new("/data/other.svs")));
+    }
+
+    /// **The spelling QuPath writes is not the spelling this writes.**
+    ///
+    /// `File.toURI()` produces `file:/data/x.svs` — no authority at all — and
+    /// [`file_uri`] produces `file:///data/x.svs`, an empty one. Java reads
+    /// both as the same URI, which is why writing the second has always worked;
+    /// a reader that accepted only the second would fail on every project
+    /// QuPath itself wrote, which is the whole population a browser opens.
+    #[test]
+    fn both_spellings_of_a_file_uri_name_the_same_path() {
+        assert_eq!(uri_path("file:/data/x.svs"), Ok(PathBuf::from("/data/x.svs")));
+        assert_eq!(uri_path("file:///data/x.svs"), Ok(PathBuf::from("/data/x.svs")));
+        // And what this module writes survives its own round trip.
+        let uri = file_uri(Path::new("/data/CMU-1.svs"));
+        assert_eq!(uri_path(&uri), Ok(PathBuf::from("/data/CMU-1.svs")));
+    }
+
+    /// A host is a slide on another machine, and QuPath refuses it — including
+    /// `localhost`, which RFC 8089 says means no host.
+    ///
+    /// `new File(URI)` throws `IllegalArgumentException: URI has an authority
+    /// component` for both, so refusing exactly these is refusing what QuPath
+    /// refuses. Reading it as a local path instead would open the wrong file
+    /// with no complaint: `file://data/CMU-1.svs` would become `/CMU-1.svs`.
+    #[test]
+    fn a_uri_naming_a_host_is_refused_rather_than_read_as_local() {
+        let error = uri_path("file://data/CMU-1.svs").expect_err("a host");
+        assert!(error.contains("host `data`"), "{error}");
+        let error = uri_path("file://localhost/data/x.svs").expect_err("a host");
+        assert!(error.contains("host `localhost`"), "{error}");
+    }
+
+    #[test]
+    fn what_is_not_a_path_is_said_rather_than_guessed() {
+        for (uri, expected) in [
+            ("https://example.org/x.svs", "not a file: URI"),
+            ("/data/x.svs", "not a file: URI"),
+            ("file:data/x.svs", "relative URI"),
+            ("file:///data/x.svs?v=2", "query"),
+            ("file:///data/x.svs#page", "fragment"),
+            ("file:///data/%FF.svs", "not valid UTF-8"),
+            ("file:///data/%00.svs", "NUL"),
+        ] {
+            let error = uri_path(uri).expect_err(uri);
+            assert!(error.contains(expected), "{uri}: {error}");
+        }
+    }
+
+    /// Percent-escapes are decoded as bytes and validated as a whole, because
+    /// a character outside ASCII is several escapes and no one of them is
+    /// UTF-8 by itself.
+    #[test]
+    fn percent_escapes_come_back_as_the_path_that_was_encoded() {
+        assert_eq!(
+            uri_path("file:///My%20Slides/a%20b.svs"),
+            Ok(PathBuf::from("/My Slides/a b.svs"))
+        );
+        // Three bytes, three escapes, one character.
+        assert_eq!(
+            uri_path("file:///data/%E2%80%94.svs"),
+            Ok(PathBuf::from("/data/—.svs"))
+        );
+        let round = file_uri(Path::new("/études/CMU 1.svs"));
+        assert_eq!(uri_path(&round), Ok(PathBuf::from("/études/CMU 1.svs")));
+    }
+
+    /// The two fields QuPath reads before anything else. A file without them
+    /// is one QuPath will not open, so reading it here anyway would be
+    /// reporting a project that does not exist.
+    #[test]
+    fn a_project_without_the_timestamps_is_refused_here_too() {
+        let error = read(r#"{"version": "0.6.0", "images": []}"#).expect_err("no timestamps");
+        assert!(error.contains("createTimestamp"), "{error}");
+        let error = read(r#"{"createTimestamp": 1, "images": []}"#).expect_err("one timestamp");
+        assert!(error.contains("modifyTimestamp"), "{error}");
+    }
+
+    /// An entry QuPath can open and this cannot is **listed**, not dropped.
+    ///
+    /// QuPath registers sixteen builders that wrap another builder rather than
+    /// naming a file — `rotated`, `cropped`, `sparse` and the rest. A browser
+    /// that omitted those rows would show a project with fewer images than it
+    /// has, and nothing about the picture would say so.
+    #[test]
+    fn an_image_this_cannot_open_is_still_an_image() {
+        let stored = read(
+            r#"{"createTimestamp": 1, "modifyTimestamp": 2, "images": [
+                 {"entryID": 7, "imageName": "Rotated",
+                  "serverBuilder": {"builderType": "rotated", "rotation": "ROTATE_90"}}]}"#,
+        )
+        .expect("a project");
+        assert_eq!(stored.images.len(), 1);
+        let image = &stored.images[0];
+        assert_eq!(image.id, 7);
+        assert_eq!(image.name, "Rotated");
+        assert_eq!(image.builder, "rotated");
+        let error = image.slide.as_ref().expect_err("no path");
+        assert!(error.contains("`rotated`"), "{error}");
+        assert_eq!(image.uri, None);
+    }
+
+    /// QuPath names an entry `Image <entryID>` when it has none, in
+    /// `DefaultProjectImageEntry`'s constructor. A blank row here would be a
+    /// different project from the one QuPath shows.
+    #[test]
+    fn an_entry_with_no_name_gets_the_name_qupath_gives_it() {
+        let stored = read(
+            r#"{"createTimestamp": 1, "modifyTimestamp": 2,
+                "images": [{"entryID": 4, "serverBuilder": {"builderType": "uri",
+                            "uri": "file:/data/x.svs"}}]}"#,
+        )
+        .expect("a project");
+        assert_eq!(stored.images[0].name, "Image 4");
+        assert_eq!(stored.images[0].slide.as_deref(), Ok(Path::new("/data/x.svs")));
+    }
+
+    /// The reason [`crate::json`] is a parser: a `serverBuilder` QuPath wrote
+    /// carries a metadata block, and the first `"uri"` in the text is not the
+    /// entry's.
+    ///
+    /// Both are strings and both look like paths, so a reader that took the
+    /// first would open the wrong slide and say nothing.
+    #[test]
+    fn a_uri_inside_a_metadata_block_is_not_the_entrys_uri() {
+        let stored = read(
+            r#"{"createTimestamp": 1, "modifyTimestamp": 2, "images": [
+                 {"entryID": 1, "imageName": "A", "serverBuilder": {
+                    "builderType": "uri",
+                    "metadata": {"uri": "file:/data/wrong.svs", "width": 46000,
+                                 "levels": [{"downsample": 1.0}]},
+                    "uri": "file:/data/right.svs"}}]}"#,
+        )
+        .expect("a project");
+        assert_eq!(
+            stored.images[0].slide.as_deref(),
+            Ok(Path::new("/data/right.svs"))
+        );
+    }
+
+    /// An empty project reads as an empty project, and so does one whose
+    /// `images` key is missing — which is what `loadProject` does with it.
+    #[test]
+    fn an_empty_project_reads_as_empty_rather_than_failing() {
+        let text = project_file(Path::new("/study/project.qpproj"), &[], written());
+        assert!(read(&text).expect("a project").images.is_empty());
+        let bare = read(r#"{"createTimestamp": 1, "modifyTimestamp": 2}"#).expect("a project");
+        assert!(bare.images.is_empty());
+        assert_eq!(bare.version, None);
+        assert_eq!(bare.uri, None);
     }
 
     #[test]
