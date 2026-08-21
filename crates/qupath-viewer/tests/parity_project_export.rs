@@ -198,6 +198,113 @@ fn the_metadata_block_is_what_a_stored_pyramid_looks_like() {
     );
 }
 
+/// **A project QuPath wrote, read and written back, is byte for byte the same
+/// file.**
+///
+/// This is the check that says the reader loses nothing, and it is an equality
+/// rather than an argument. `Stored` is a *summary* — an id, a name, a path per
+/// image — and an index rebuilt from a summary would silently delete every
+/// entry's `description`, its `metadata` map, its `tags` and its stored server
+/// metadata block, in a file that still opened and still listed the same
+/// images. Keeping the document and re-serialising it is what makes adding a
+/// slide to someone else's project a safe thing to do.
+///
+/// It holds because `json`'s writer copies Gson's spelling exactly, which had
+/// to be measured: two-space indent, `": "` separators, empty containers
+/// inline, `<`, `>`, `&`, `=` and `'` as lowercase `\u00xx` escapes, U+2028 and
+/// U+2029 escaped, everything else above ASCII raw, and no trailing newline.
+/// Any one of those wrong and this fails — which is the point of asserting on
+/// the bytes rather than on a parse.
+#[test]
+fn a_project_qupath_wrote_is_written_back_unchanged() {
+    let stored = project::read(FIXTURE).expect("QuPath's own project file");
+    let rewritten = stored.rewritten();
+    if rewritten != FIXTURE {
+        let at = rewritten
+            .char_indices()
+            .zip(FIXTURE.chars())
+            .find(|((_, written), read)| written != read)
+            .map_or(rewritten.len().min(FIXTURE.len()), |((at, _), _)| at);
+        panic!(
+            "the rewrite differs from byte {at}:\n  written: {:?}\n     read: {:?}",
+            &rewritten[at.saturating_sub(40)..(at + 40).min(rewritten.len())],
+            &FIXTURE[at.saturating_sub(40)..(at + 40).min(FIXTURE.len())],
+        );
+    }
+}
+
+/// Adding an entry to a project QuPath wrote changes that entry and nothing
+/// else.
+///
+/// The entry that matters here is the third one, which carries the full
+/// metadata block — the pyramid, the tile sizes, the channels, the pixel
+/// calibration. That block is precisely what this crate cannot produce, so an
+/// append that dropped it would be taking information out of a project in
+/// exchange for adding a row to it.
+#[test]
+fn adding_to_a_project_leaves_every_other_entry_alone() {
+    let stored = project::read(FIXTURE).expect("QuPath's own project file");
+    let slide = Path::new("/SLIDES/CMU-1.svs");
+    let entries = [project::Entry {
+        path: slide,
+        name: "CMU-1",
+        width: 46_000,
+        height: 32_914,
+    }];
+    let written = project::Timestamps {
+        created: 1,
+        modified: 1_800_000_000_000,
+    };
+
+    let files = project::added(&stored, &entries, written);
+    let index = files
+        .iter()
+        .find(|file| file.path == "project.qpproj")
+        .expect("the index");
+
+    // Every entry that was there, byte for byte, still in QuPath's spelling.
+    // Asserted as one span rather than field by field: the three entries and
+    // everything nested inside them — the metadata block, its levels, its
+    // channels, its pixel calibration — are one contiguous piece of the file,
+    // and a rewrite that rebuilt any of it would not contain that piece.
+    let opens = FIXTURE.find("\"images\": [").expect("the images array");
+    let closes = FIXTURE.rfind("\n  ]").expect("the images array closes");
+    assert!(
+        index.contents.contains(&FIXTURE[opens..closes]),
+        "the rewrite changed an entry it was not asked to touch"
+    );
+
+    // The header, apart from the two fields an append is entitled to change.
+    for kept in [
+        "\"version\": \"",
+        "\"createTimestamp\": 1700000000000",
+        "\"uri\": \"file:/PROJECT/project.qpproj\"",
+    ] {
+        assert!(index.contents.contains(kept), "{kept} did not survive the rewrite");
+    }
+    assert!(index.contents.contains("\"lastID\": 4"), "lastID was not advanced");
+    assert!(
+        !index.contents.contains("\"modifyTimestamp\": 1700000060000"),
+        "modifyTimestamp was left saying the project had not been written"
+    );
+
+    // And the entry that was added is there, after the three that were.
+    let reread = project::read(&index.contents).expect("the rewritten project");
+    assert_eq!(reread.images.len(), 4);
+    assert_eq!(reread.images[3].name, "CMU-1");
+    assert_eq!(reread.images[3].slide.as_deref(), Ok(slide));
+
+    // `lastID` was 3, so the new entry is 4 and its files go in `data/4`.
+    assert_eq!(reread.images[3].id, 4);
+    let written_paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
+    assert!(written_paths.contains(&"data/4/server.json"), "{written_paths:?}");
+    assert!(written_paths.contains(&"data/4/summary.json"), "{written_paths:?}");
+
+    // The timestamps: created untouched, modified advanced to the write.
+    assert_eq!(reread.written.created, sample::WRITTEN.created);
+    assert_eq!(reread.written.modified, written.modified);
+}
+
 /// The project's own `uri` comes before every entry's, so the first `"uri"` in
 /// the file names the `.qpproj` rather than a slide.
 ///

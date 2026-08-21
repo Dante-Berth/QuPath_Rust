@@ -36,7 +36,7 @@ use std::fmt::Write as _;
 /// than a map: the objects here have a handful of fields, a linear scan beats
 /// hashing at that size, and the order is what makes a re-serialisation
 /// comparable against the file it came from.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
     /// `null`.
     Null,
@@ -368,6 +368,133 @@ fn object(bytes: &[u8], at: &mut usize) -> Result<Value, String> {
     }
 }
 
+/// Writes a value the way Gson does with pretty-printing on.
+///
+/// # Why the spelling is copied and not merely valid
+///
+/// This exists to rewrite a project **without losing what was not
+/// interpreted** — an entry's description, its metadata map, its tags, a stored
+/// server metadata block. Re-serialising is what preserves those, and the check
+/// that says the preservation is complete is that a file QuPath wrote comes
+/// back byte for byte. That check is only available if the spelling matches, so
+/// the spelling is copied: two-space indent, `": "` between a key and its
+/// value, empty containers inline, and Gson's escapes.
+///
+/// The escapes are the part that had to be measured rather than assumed.
+/// `GsonTools` never calls `disableHtmlEscaping`, so the five characters
+/// `<`, `>`, `&`, `=` and `'` are written as lowercase `\u00xx` escapes, while
+/// `/` is left alone and every character above the ASCII range is written as
+/// itself. U+2028 and U+2029 are escaped despite being far above the control
+/// range, because a raw one is a line terminator to a JavaScript parser and
+/// Gson special-cases them.
+///
+/// There is **no trailing newline**, which is also Gson's.
+///
+/// A `null` is written where one was read. Gson drops nulls rather than writing
+/// them — `serializeNulls` is off — so a file Gson wrote never has one, and the
+/// two agree on every file this is used to rewrite. Keeping it is the choice
+/// that loses nothing from a file Gson did not write.
+pub fn write(value: &Value) -> String {
+    let mut out = String::new();
+    put(value, 0, &mut out);
+    out
+}
+
+/// The two spaces Gson's `setPrettyPrinting` indents by.
+const INDENT: &str = "  ";
+
+fn put(value: &Value, depth: usize, out: &mut String) {
+    match value {
+        Value::Null => out.push_str("null"),
+        Value::Bool(true) => out.push_str("true"),
+        Value::Bool(false) => out.push_str("false"),
+        // The literal that was read, so a number never goes through a float and
+        // back. `1.0`, `1` and `1.0E30` are three different texts for values a
+        // reader could not tell apart afterwards.
+        Value::Number(text) => out.push_str(text),
+        Value::String(text) => quote(text, out),
+        Value::Array(items) => {
+            if items.is_empty() {
+                out.push_str("[]");
+                return;
+            }
+            out.push_str("[\n");
+            for (at, item) in items.iter().enumerate() {
+                if at > 0 {
+                    out.push_str(",\n");
+                }
+                indent(depth + 1, out);
+                put(item, depth + 1, out);
+            }
+            out.push('\n');
+            indent(depth, out);
+            out.push(']');
+        }
+        Value::Object(fields) => {
+            if fields.is_empty() {
+                out.push_str("{}");
+                return;
+            }
+            out.push_str("{\n");
+            for (at, (key, field)) in fields.iter().enumerate() {
+                if at > 0 {
+                    out.push_str(",\n");
+                }
+                indent(depth + 1, out);
+                quote(key, out);
+                out.push_str(": ");
+                put(field, depth + 1, out);
+            }
+            out.push('\n');
+            indent(depth, out);
+            out.push('}');
+        }
+    }
+}
+
+fn indent(depth: usize, out: &mut String) {
+    for _ in 0..depth {
+        out.push_str(INDENT);
+    }
+}
+
+/// One JSON string, escaped as Gson escapes it.
+fn quote(text: &str, out: &mut String) {
+    out.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            // Gson's HTML-safe set, which `GsonTools` leaves on. `/` is
+            // deliberately not in it — every path in a project is full of them,
+            // and Gson writes them as themselves.
+            '<' => out.push_str("\\u003c"),
+            '>' => out.push_str("\\u003e"),
+            '&' => out.push_str("\\u0026"),
+            '=' => out.push_str("\\u003d"),
+            '\'' => out.push_str("\\u0027"),
+            // Line and paragraph separator. Far above the control range and
+            // escaped anyway, because a raw one terminates a line for a
+            // JavaScript parser reading the same file.
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            control if control < ' ' => {
+                let _ = write!(out, "\\u{:04x}", control as u32);
+            }
+            // Everything else as itself, including every character above the
+            // ASCII range: the micron sign, an accent and an emoji are all
+            // written raw.
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,6 +672,107 @@ mod tests {
         assert_eq!(value.get("a").and_then(Value::as_str), None);
         // `get` on anything that is not an object is `None`, not a panic.
         assert_eq!(value.get("a").and_then(|array| array.get("0")), None);
+    }
+
+    /// The shape Gson writes, measured against a real one rather than assumed.
+    ///
+    /// Two-space indent, `": "` between a key and its value, empty containers
+    /// inline, no trailing newline.
+    #[test]
+    fn the_layout_is_gsons() {
+        let value =
+            parse(r#"{"a": 1, "empty": {}, "none": [], "list": [1, {"b": "c"}]}"#).expect("valid");
+        assert_eq!(
+            write(&value),
+            "{\n  \"a\": 1,\n  \"empty\": {},\n  \"none\": [],\n  \"list\": [\n    1,\n    \
+             {\n      \"b\": \"c\"\n    }\n  ]\n}"
+        );
+    }
+
+    /// `GsonTools` never calls `disableHtmlEscaping`, so five ordinary
+    /// characters come out as lowercase `\u00xx` escapes — and `/` does not.
+    ///
+    /// Recorded from a real `GsonTools.getInstance(true)` rather than read off
+    /// Gson's defaults: it is the difference between a rewritten project that
+    /// matches the one it came from and one that differs on every path it
+    /// contains.
+    #[test]
+    fn gsons_html_escapes_are_copied_exactly() {
+        let value = Value::String("a<b>c&d=e'f\"g\\h/i".to_owned());
+        assert_eq!(
+            write(&value),
+            "\"a\\u003cb\\u003ec\\u0026d\\u003de\\u0027f\\\"g\\\\h/i\"",
+        );
+    }
+
+    #[test]
+    fn control_characters_take_gsons_spellings() {
+        assert_eq!(
+            write(&Value::String("\t\n\r\u{8}\u{c}".to_owned())),
+            r#""\t\n\r\b\f""#
+        );
+        assert_eq!(
+            write(&Value::String("\u{1}\u{1f}".to_owned())),
+            "\"\\u0001\\u001f\""
+        );
+        // U+007F and U+009F are above the escaped range and are written raw,
+        // which is what Gson does with them.
+        assert_eq!(
+            write(&Value::String("\u{7f}\u{9f}".to_owned())),
+            "\"\u{7f}\u{9f}\""
+        );
+    }
+
+    /// Two characters far above the control range that Gson escapes anyway,
+    /// because a raw one ends a line for a JavaScript parser.
+    #[test]
+    fn the_line_separators_are_escaped() {
+        let value = Value::String("x\u{2028}y\u{2029}z".to_owned());
+        assert_eq!(write(&value), "\"x\\u2028y\\u2029z\"");
+    }
+
+    /// Everything above ASCII is written as itself, so a pixel unit stays one
+    /// character and a study named in Greek stays readable in the file.
+    #[test]
+    fn characters_outside_ascii_are_written_raw() {
+        let value = Value::String("0.2498 \u{b5}m — études 🔬".to_owned());
+        assert_eq!(write(&value), "\"0.2498 \u{b5}m — études 🔬\"");
+    }
+
+    /// A number is written as the text it was read as, so nothing goes through
+    /// a float and back.
+    #[test]
+    fn numbers_keep_the_text_they_arrived_as() {
+        let value = parse(r#"{"a": 1.0, "b": 1, "c": 1.0E30, "d": -0.0, "e": 9007199254740993}"#)
+            .expect("valid");
+        assert_eq!(
+            write(&value),
+            "{\n  \"a\": 1.0,\n  \"b\": 1,\n  \"c\": 1.0E30,\n  \"d\": -0.0,\n  \
+             \"e\": 9007199254740993\n}"
+        );
+    }
+
+    /// Whatever this writes, it must read back the same.
+    ///
+    /// The weaker half of the byte-exact check in `parity_project_export.rs`,
+    /// and the half that covers the characters no fixture happens to hold.
+    #[test]
+    fn what_is_written_parses_back_to_what_it_was() {
+        let value = parse(concat!(
+            r#"{"name": "a<b>&c='d\"e\\f\tg", "unicode": "µm 🔬", "#,
+            r#""n": [1.0, -2, 3.5E-7], "deep": {"empty": {}, "list": []}, "#,
+            r#""flags": [true, false, null]}"#,
+        ))
+        .expect("valid");
+        assert_eq!(parse(&write(&value)).expect("what was written"), value);
+    }
+
+    #[test]
+    fn a_bare_value_is_a_document() {
+        assert_eq!(write(&Value::Null), "null");
+        assert_eq!(write(&Value::Bool(true)), "true");
+        assert_eq!(write(&parse("[]").expect("valid")), "[]");
+        assert_eq!(write(&parse("{}").expect("valid")), "{}");
     }
 
     /// Gson pretty-prints, so the reader has to be indifferent to layout.

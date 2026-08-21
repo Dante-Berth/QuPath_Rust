@@ -1902,6 +1902,37 @@ summarises rather than preserves — an entry's `description`, its metadata map,
 its tags, and any server metadata block. Losing those is data loss, and it is
 silent.
 
+#### Rewriting one without emptying it
+
+Adding a slide to a project means writing the index back, and writing it back
+from what `read` returns would have been **silent data loss**. `Stored` is a
+summary — an id, a name, a path per image — and an entry carries more than
+that: a `description`, a `metadata` map QuPath's browser lets a user edit, a set
+of `tags`, and a `serverBuilder` that may hold the whole stored metadata block
+recorded two sections above. A rebuilt index deletes every one of those from
+every entry it did not touch, and the result still opens, still lists the same
+images, and has lost what someone wrote against them.
+
+So `read` keeps the document, and `added` appends to it: `images` gains the new
+entries, `lastID` becomes the last id issued, `modifyTimestamp` becomes now, and
+every other byte at every depth is what was read.
+
+The check that this is complete is an equality rather than an argument —
+`a_project_qupath_wrote_is_written_back_unchanged` reads `ProjectExport.json`
+and writes it back **byte for byte**. That is only available if `json`'s writer
+spells things the way Gson does, so it does, and every part of that had to be
+measured against a real `GsonTools.getInstance(true)`: two-space indent, `": "`
+between a key and its value, empty containers inline, `<`, `>`, `&`, `=` and `'`
+as lowercase `\u00xx` escapes because `disableHtmlEscaping` is never called,
+`/` left alone, U+2028 and U+2029 escaped, everything else above ASCII raw, and
+no trailing newline.
+
+`lastID` is where the one bug in this was, and it was found by the degenerate
+case: an append of *nothing* still advanced the counter, because `next_id` is
+the id the next entry takes and writing it back claims that entry exists. The
+next append would then skip a number and leave a `data/` directory nothing
+points at. No test that added something could have seen it.
+
 ### 8.4 The overview — the invariant is that the two mappings agree
 
 `overview.rs` is `ImageOverview.java`'s arithmetic: slide to overview, which

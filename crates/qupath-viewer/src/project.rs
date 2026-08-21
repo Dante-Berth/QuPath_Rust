@@ -240,15 +240,8 @@ pub fn project_file(project_path: &Path, entries: &[Entry<'_>], written: Timesta
         if index > 0 {
             out.push(',');
         }
-        out.push_str("\n    {\n      \"entryID\": ");
-        let _ = write!(out, "{}", index + 1);
-        out.push_str(",\n      \"randomizedName\": \"");
-        escape(&mut out, &placeholder_name(index));
-        out.push_str("\",\n      \"imageName\": \"");
-        escape(&mut out, entry.name);
-        out.push_str("\",\n      \"serverBuilder\": ");
-        out.push_str(&server_builder(entry));
-        out.push_str("\n    }");
+        out.push('\n');
+        out.push_str(&entry_object(index as u64 + 1, entry));
     }
     // An empty project closes the array on the same line, so it reads
     // `"images": []` rather than a bracket pair with a blank line between
@@ -260,6 +253,31 @@ pub fn project_file(project_path: &Path, entries: &[Entry<'_>], written: Timesta
     } else {
         out.push_str("\n  ]\n}\n");
     }
+    out
+}
+
+/// One entry of the `images` array, indented as it sits inside the file.
+///
+/// One definition, because there are two callers: [`project_file`], writing a
+/// project that does not exist yet, and [`added`], appending to one that does.
+/// Two spellings of an entry would be two things to keep in step, and the way
+/// they would eventually differ is a project whose first entries QuPath reads
+/// and whose last one it does not.
+///
+/// `id` rather than a position: an appended entry's id continues the project's
+/// counter, and the two are the same number only in a project written from
+/// scratch.
+fn entry_object(id: u64, entry: &Entry<'_>) -> String {
+    let mut out = String::new();
+    out.push_str("    {\n      \"entryID\": ");
+    let _ = write!(out, "{id}");
+    out.push_str(",\n      \"randomizedName\": \"");
+    escape(&mut out, &placeholder_name(id));
+    out.push_str("\",\n      \"imageName\": \"");
+    escape(&mut out, entry.name);
+    out.push_str("\",\n      \"serverBuilder\": ");
+    out.push_str(&server_builder(entry));
+    out.push_str("\n    }");
     out
 }
 
@@ -380,13 +398,18 @@ pub const IMAGE_TYPE: &str = "UNSET";
 /// The name QuPath would randomise for a blinded study.
 ///
 /// QuPath uses `UUID.randomUUID()`. This writes a stable name derived from the
-/// index instead, because a random one makes the same project written twice
-/// differ byte for byte, which is untestable and produces a spurious diff every
-/// time a project is rewritten. It is **not** a substitute for real
+/// entry's id instead, because a random one makes the same project written
+/// twice differ byte for byte, which is untestable and produces a spurious diff
+/// every time a project is rewritten. It is **not** a substitute for real
 /// randomisation: masking names for a blinded study needs unpredictability, and
 /// a caller doing that should supply its own. Nothing here claims to.
-fn placeholder_name(index: usize) -> String {
-    format!("entry-{}", index + 1)
+///
+/// QuPath's own is not stable across a *read* either: its copy constructor for
+/// an entry does not carry the field over, so `UUID.randomUUID()` runs again
+/// every time a project is loaded. `parity/record-project.sh` has to substitute
+/// them out of its fixture for that reason.
+fn placeholder_name(id: u64) -> String {
+    format!("entry-{id}")
 }
 
 /// A `file:` URI for a path, percent-encoding what has to be encoded.
@@ -518,6 +541,24 @@ pub struct Stored {
     pub uri: Option<String>,
     /// The images, in file order.
     pub images: Vec<Image>,
+    /// The file as it was read, whole.
+    ///
+    /// Everything above is a *summary*: the fields a browser needs, in the
+    /// types it wants them in. This is the rest — an entry's `description`, its
+    /// metadata map, its tags, a stored server metadata block, and every field
+    /// a later QuPath adds that this has never heard of.
+    ///
+    /// It is kept because a project that is rewritten must not be a project
+    /// that has been quietly emptied. Building a new index out of the summary
+    /// would drop all of the above, and it would drop it *silently* — the file
+    /// would still open, still list the same images, and have lost whatever
+    /// someone had recorded against them. [`added`] rewrites this instead.
+    ///
+    /// Private, and not merely because [`crate::json`] is: what a caller can do
+    /// with it is [`added`], and a `Value` on the public surface would be an
+    /// invitation to edit a project field by field with nothing checking the
+    /// result is still a project.
+    document: crate::json::Value,
 }
 
 /// Reads a `project.qpproj`.
@@ -580,7 +621,145 @@ pub fn read(text: &str) -> Result<Stored, String> {
             .and_then(crate::json::Value::as_str)
             .map(str::to_owned),
         images,
+        document: value,
     })
+}
+
+impl Stored {
+    /// The index written back out, unchanged.
+    ///
+    /// For a file Gson wrote this is **byte for byte the file that was read**,
+    /// which is the check that says nothing was lost — see
+    /// `parity_project_export.rs`. It is not a formatting coincidence:
+    /// [`crate::json`]'s writer copies Gson's spelling precisely so that this
+    /// claim can be made as an equality rather than as an argument.
+    #[must_use]
+    pub fn rewritten(&self) -> String {
+        crate::json::write(&self.document)
+    }
+
+    /// The id the next entry added to this project takes.
+    ///
+    /// The larger of `lastID` and the biggest `entryID` present, plus one,
+    /// which is `DefaultProject.loadProject`'s own arithmetic — it sets the
+    /// counter to `max(lastID, max(entryID))` and `incrementAndGet`s from
+    /// there. Taking `lastID` alone would reuse an id in a project whose
+    /// `lastID` is stale, and reusing one means two entries sharing a directory
+    /// under `data/`.
+    #[must_use]
+    pub fn next_id(&self) -> u64 {
+        let last = self
+            .document
+            .get("lastID")
+            .and_then(crate::json::Value::as_u64)
+            .unwrap_or(0);
+        let highest = self.images.iter().map(|image| image.id).max().unwrap_or(0);
+        last.max(highest) + 1
+    }
+}
+
+/// Every file to write when `entries` are added to a project that already
+/// exists.
+///
+/// The counterpart of [`files`], and the difference between them is the whole
+/// point of this one. [`files`] writes a project from nothing, so every byte in
+/// it is a byte this module chose. This writes a project **someone else may
+/// have written**, so the index is [`Stored::rewritten`] with the new entries
+/// appended — not rebuilt from what was read.
+///
+/// # What that preserves, and why rebuilding would not
+///
+/// An entry carries more than a name and a URI. `DefaultProjectImageEntry` has
+/// a `description`, a `metadata` map that QuPath's browser lets a user edit, a
+/// set of `tags`, and a `serverBuilder` that may hold a full metadata block
+/// with the image's pyramid in it. None of those is in [`Image`], because a
+/// browser does not need them — and a rewrite built from [`Image`] would delete
+/// every one of them from every entry it did not touch. The file would still
+/// open, still list the same images, and have lost what someone recorded
+/// against them, which is the worst shape a bug of this kind can take.
+///
+/// # What it changes
+///
+/// `images` gains the new entries, `lastID` becomes the last id issued, and
+/// `modifyTimestamp` becomes `written.modified`. `createTimestamp` is left
+/// alone: the project was created when it was created. Everything else in the
+/// file, at every depth, is exactly as it was read.
+///
+/// Updating `modifyTimestamp` is a deliberate departure from
+/// `DefaultProject.writeProject`, which writes back whatever it loaded and so
+/// never advances the field at all. The field means when the project was last
+/// written; a rewrite that leaves it stale is reporting something untrue about
+/// a file it has just changed.
+#[must_use]
+pub fn added(stored: &Stored, entries: &[Entry<'_>], written: Timestamps) -> Vec<Output> {
+    let mut document = stored.document.clone();
+    let first = stored.next_id();
+
+    let images: Vec<crate::json::Value> = entries
+        .iter()
+        .enumerate()
+        .map(|(offset, entry)| {
+            let id = first + offset as u64;
+            // Through the one definition of an entry, and back through the
+            // parser. The alternative is a second way of building the same
+            // object, which is the thing `entry_object` exists to prevent — and
+            // this way a change to the format cannot make `files` and `added`
+            // disagree, because the text is the same text.
+            crate::json::parse(&entry_object(id, entry)).expect("an entry this module just wrote")
+        })
+        .collect();
+
+    if let crate::json::Value::Object(fields) = &mut document {
+        match fields.iter_mut().find(|(key, _)| key == "images") {
+            Some((_, crate::json::Value::Array(listed))) => listed.extend(images),
+            // A project with no `images` key at all is one QuPath reads as
+            // empty — `element.has("images") ? ... : emptyList()` — so adding
+            // the key is adding what was meant rather than inventing a field.
+            _ => fields.push((
+                "images".to_owned(),
+                crate::json::Value::Array(images),
+            )),
+        }
+        // Only when an id was actually issued. `first` is the id the *next*
+        // entry would take, so writing it back with nothing added advances the
+        // counter past an entry that does not exist — and the next append then
+        // skips a number, leaving a `data/` directory nothing points at.
+        if let Some(last) = entries.len().checked_sub(1) {
+            set(fields, "lastID", first + last as u64);
+        }
+        set(fields, "modifyTimestamp", written.modified);
+    }
+
+    let mut out = vec![Output {
+        path: "project.qpproj".to_owned(),
+        contents: crate::json::write(&document),
+    }];
+    for (offset, entry) in entries.iter().enumerate() {
+        let directory = (first + offset as u64).to_string();
+        out.push(Output {
+            path: format!("data/{directory}/server.json"),
+            contents: server_file(entry),
+        });
+        out.push(Output {
+            path: format!("data/{directory}/summary.json"),
+            contents: summary_file(entry, written),
+        });
+    }
+    out
+}
+
+/// Replaces a numeric field in place, or appends it if the file has none.
+///
+/// In place, so a project's field order survives a rewrite. Appending a
+/// `lastID` that was already there — at the end, where QuPath writes it near
+/// the top — would make a diff of the two files look like a rewrite of the
+/// whole thing.
+fn set(fields: &mut Vec<(String, crate::json::Value)>, key: &str, value: u64) {
+    let number = crate::json::Value::Number(value.to_string());
+    match fields.iter_mut().find(|(name, _)| name == key) {
+        Some((_, existing)) => *existing = number,
+        None => fields.push((key.to_owned(), number)),
+    }
 }
 
 /// One entry of the `images` array.
@@ -1137,6 +1316,151 @@ mod tests {
         assert!(bare.images.is_empty());
         assert_eq!(bare.version, None);
         assert_eq!(bare.uri, None);
+    }
+
+    /// A project written here, read, added to and read again.
+    #[test]
+    fn adding_an_entry_continues_the_project() {
+        let text = project_file(Path::new("/study/project.qpproj"), &[entry()], written());
+        let stored = read(&text).expect("a project");
+        assert_eq!(stored.next_id(), 2);
+
+        let extra = Entry {
+            path: Path::new("/data/second.svs"),
+            name: "Second",
+            width: 100,
+            height: 200,
+        };
+        let later = Timestamps {
+            created: written().created,
+            modified: 1_800_000_000_000,
+        };
+        let files = added(&stored, &[extra], later);
+
+        let paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "project.qpproj",
+                "data/2/server.json",
+                "data/2/summary.json",
+            ],
+            "an appended entry's files must go in its own directory"
+        );
+
+        let reread = read(&files[0].contents).expect("the rewritten project");
+        assert_eq!(reread.images.len(), 2);
+        assert_eq!(reread.images[0].name, entry().name, "the first entry changed");
+        assert_eq!(reread.images[1].id, 2);
+        assert_eq!(reread.images[1].name, "Second");
+        assert_eq!(
+            reread.images[1].slide.as_deref(),
+            Ok(Path::new("/data/second.svs"))
+        );
+        assert_eq!(reread.written.created, written().created);
+        assert_eq!(reread.written.modified, later.modified);
+    }
+
+    /// A rewrite with nothing to add changes the clock and nothing else.
+    ///
+    /// **`lastID` in particular.** It is the id the *next* entry takes, so
+    /// advancing it with nothing added skips a number, and the entry after that
+    /// lands in a `data/` directory one further along than the project says.
+    /// The first version of `added` did exactly that, and no test that added
+    /// something could have seen it.
+    #[test]
+    fn a_rewrite_that_adds_nothing_changes_nothing_but_the_clock() {
+        let text = project_file(Path::new("/study/project.qpproj"), &[entry()], written());
+        let stored = read(&text).expect("a project");
+        assert_eq!(stored.rewritten(), stored.rewritten(), "the writer is stable");
+
+        let later = Timestamps {
+            created: written().created,
+            modified: 1_800_000_000_000,
+        };
+        let files = added(&stored, &[], later);
+        assert_eq!(files.len(), 1, "no entries means no entry directories");
+        assert_eq!(
+            files[0].contents,
+            stored
+                .rewritten()
+                .replace("\"modifyTimestamp\": 1700000060000", "\"modifyTimestamp\": 1800000000000"),
+            "a rewrite that added nothing changed something other than the clock",
+        );
+        // And the counter is still where it was, so the next entry is still 2.
+        assert_eq!(read(&files[0].contents).expect("a project").next_id(), 2);
+    }
+
+    /// `lastID` is what QuPath counts from, and a stale one must not reissue an
+    /// id — two entries sharing a directory under `data/` is one overwriting
+    /// the other.
+    #[test]
+    fn a_new_id_clears_both_the_counter_and_the_entries() {
+        // `lastID` behind the entries: QuPath takes the larger, and so does
+        // this. Reading `lastID` alone would hand out 2, which entry 7 has
+        // already used.
+        let behind = read(
+            r#"{"createTimestamp": 1, "modifyTimestamp": 2, "lastID": 1,
+                "images": [{"entryID": 7, "serverBuilder": {"builderType": "uri",
+                            "uri": "file:/data/x.svs"}}]}"#,
+        )
+        .expect("a project");
+        assert_eq!(behind.next_id(), 8);
+
+        // `lastID` ahead of them, which is a project an entry has been removed
+        // from. The counter is what QuPath keeps, so it wins.
+        let ahead = read(r#"{"createTimestamp": 1, "modifyTimestamp": 2, "lastID": 9}"#)
+            .expect("a project");
+        assert_eq!(ahead.next_id(), 10);
+
+        // Neither: the first entry of an empty project is 1.
+        let bare = read(r#"{"createTimestamp": 1, "modifyTimestamp": 2}"#).expect("a project");
+        assert_eq!(bare.next_id(), 1);
+    }
+
+    /// A project whose file has no `images` key is one QuPath reads as empty,
+    /// so adding the key is writing down what was meant.
+    #[test]
+    fn adding_to_a_project_with_no_images_key_creates_one() {
+        let stored = read(r#"{"createTimestamp": 1, "modifyTimestamp": 2}"#).expect("a project");
+        let files = added(&stored, &[entry()], written());
+        let reread = read(&files[0].contents).expect("the rewritten project");
+        assert_eq!(reread.images.len(), 1);
+        assert_eq!(reread.images[0].id, 1);
+        assert!(files.iter().any(|file| file.path == "data/1/server.json"));
+    }
+
+    /// Fields QuPath has and this does not interpret survive a rewrite.
+    ///
+    /// The unit half of `parity_project_export.rs`'s claim, on the fields that
+    /// fixture does not happen to carry: an entry's `description`, its
+    /// `metadata` map and its `tags` are all things QuPath's browser lets a
+    /// user set, and all things `Image` does not report.
+    #[test]
+    fn what_the_reader_does_not_interpret_is_not_deleted() {
+        let stored = read(
+            r#"{"createTimestamp": 1, "modifyTimestamp": 2, "lastID": 1,
+                "somethingNewer": {"deep": [1, 2]},
+                "images": [{"entryID": 1, "imageName": "A",
+                            "description": "cut on Tuesday",
+                            "metadata": {"case": "17B"}, "tags": ["control"],
+                            "serverBuilder": {"builderType": "uri",
+                                              "uri": "file:/data/x.svs"}}]}"#,
+        )
+        .expect("a project");
+        let rewritten = added(&stored, &[entry()], written())
+            .into_iter()
+            .next()
+            .expect("the index")
+            .contents;
+        for kept in [
+            "\"description\": \"cut on Tuesday\"",
+            "\"case\": \"17B\"",
+            "\"control\"",
+            "\"somethingNewer\"",
+        ] {
+            assert!(rewritten.contains(kept), "{kept} was deleted by the rewrite");
+        }
     }
 
     #[test]
