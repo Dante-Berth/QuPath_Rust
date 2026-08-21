@@ -1776,6 +1776,16 @@ is written and never loaded — so no amount of running QuPath would have
 reported it. It is corrected because a file that claims to be in QuPath's format
 and is not is exactly what this module exists not to produce.
 
+What opens now: both entries, in order, under the names they were given, with
+`entryID` naming the directory, the URI resolved to a slide that is there, the
+builder dispatched to `DefaultImageServerBuilder`, and QuPath's own summary
+reporting "No data file" — which is true, and is what §8.3 said would happen.
+`parity/record-project.sh` writes the project, records QuPath's reading and
+deletes it; `crates/qupath-viewer/tests/parity_project_import.rs` asserts the
+reading against the same entries the project was written from. The directory
+cannot be committed the way the GeoJSON sample is, because every path in it is
+an absolute URI naming the machine that wrote it.
+
 ### 8.4 The overview — the invariant is that the two mappings agree
 
 `overview.rs` is `ImageOverview.java`'s arithmetic: slide to overview, which
@@ -2240,12 +2250,18 @@ In the order it is worth having.
   photograph is what showed `Fit` leaving slide behind the status bar.
   What is *still* unlooked-at is everything that needs a hand on the machine —
   the trackpad, hover states, resizing, and the window manager.
-- **Parity for the project format.** GeoJSON has now been through QuPath —
-  §8.6, and it found a rounded measurement column on the way — but the project
-  directory has not. A `.qpproj` and its `server.json` have been checked against
-  a JSON parser and against `DefaultProject.java`, which is a stronger claim
-  than "it validates" and a weaker one than "QuPath opened it". Until
-  `ProjectIO.loadProject` has read one, that is the honest description. It is a
-  harder check than the GeoJSON one for a reason worth writing down: every path
-  in a project is an absolute `file:` URI, so a committed sample would name this
-  machine, and the recorder has to write the project before reading it.
+- **Stored image metadata in a project, which needs the pyramid.** §8.3's
+  metadata block is not written, because a block QuPath can apply needs
+  `levels` and the preferred tile sizes and this crate knows neither — the
+  first is `openslide`'s level table and the second is a property of the file.
+  A project browser that wanted stored metadata would have to carry both from
+  an open `Slide`, and until it does, QuPath reading the slide itself is better
+  information than anything written here.
+- **An image opened from a project.** Both formats have now been through QuPath
+  itself — §8.6 and §8.3 — but `ProjectImport` deliberately stops before the
+  pixels: opening the image needs `qupath-extension-openslide` and a working
+  native library, and would be testing OpenSlide rather than the format. What
+  is asserted is everything QuPath can tell about an entry before the pixels.
+  The one thing that would have failed there was found by reading
+  `setMetadata`, and is now measured — `levels` is recorded, and it recorded a
+  `NullPointerException` until the metadata block went.

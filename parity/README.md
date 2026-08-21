@@ -97,6 +97,24 @@ honest. Without it a change to `geojson::write` would leave the fixture
 describing a file nothing produces any more, and every other assertion in that
 test would keep passing about the wrong thing.
 
+`ProjectImport.json` runs the same way and has its own script, because its
+input **cannot** be committed:
+
+```bash
+./parity/record-project.sh                          # needs the slides in data/
+cargo test -p qupath-viewer --test parity_project_import
+```
+
+Every path QuPath stores in a project is an absolute `file:` URI, so a
+committed project would name the machine that recorded it. The script writes
+one to a temporary directory, records QuPath's reading and deletes it; what
+ties the fixture to the code is `examples/shared/project.rs`, which the writer
+and the test both read the entries from.
+
+Both recorders answer a question the other fixtures cannot: whether QuPath can
+read what this project writes. The project one came back with four reasons it
+could not.
+
 ## Tolerances
 
 Exact equality with QuPath does not hold in general: Java dropped `strictfp`

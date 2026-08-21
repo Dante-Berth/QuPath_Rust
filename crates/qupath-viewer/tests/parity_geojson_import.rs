@@ -64,7 +64,12 @@ fn objects(fixture: &str) -> Vec<&str> {
         .collect()
 }
 
-/// The text of one field, up to the comma or newline that ends it.
+/// The text of one field.
+///
+/// A quoted value ends at its closing quote and **not** at the first comma:
+/// `"CMU-1, JP2K"` is one of the sample's names precisely because a name with a
+/// comma in it is ordinary, and the first version of this helper split it in
+/// half and reported a mismatch that was its own.
 fn text<'a>(block: &'a str, key: &str) -> &'a str {
     let needle = format!("\"{key}\": ");
     let at = block
@@ -72,8 +77,12 @@ fn text<'a>(block: &'a str, key: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no {key} in {block}"))
         + needle.len();
     let rest = &block[at..];
+    if let Some(body) = rest.strip_prefix('"') {
+        let end = body.find('"').expect("an unterminated string in the fixture");
+        return &body[..end];
+    }
     let end = rest.find([',', '\n']).unwrap_or(rest.len());
-    rest[..end].trim().trim_matches('"')
+    rest[..end].trim()
 }
 
 /// One numeric field.

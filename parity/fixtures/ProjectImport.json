@@ -1,0 +1,35 @@
+02:58:34.197 [main] DEBUG qupath.lib.projects.ProjectIO -- Loading project from /tmp/tmp.QTJMQISYyh/study/project.qpproj
+{
+  "version": "0.6.0",
+  "name": "study/project.qpproj",
+  "uriFileName": "project.qpproj",
+  "movedFromPreviousUri": false,
+  "entries": [
+    {
+      "id": "1",
+      "imageName": "CMU-1 small region",
+      "entryDirectory": "1",
+      "hasImageData": false,
+      "thumbnailReadable": false,
+      "uris": 1,
+      "slideFileName": "CMU-1-Small-Region.svs",
+      "slideExists": true,
+      "builderClass": "DefaultImageServerBuilder",
+      "metadata": null,
+      "summary": "CMU-1 small region | ID:	1 |  | No data file"
+    },
+    {
+      "id": "2",
+      "imageName": "CMU-1, JP2K",
+      "entryDirectory": "2",
+      "hasImageData": false,
+      "thumbnailReadable": false,
+      "uris": 1,
+      "slideFileName": "CMU-1-JP2K-33005.svs",
+      "slideExists": true,
+      "builderClass": "DefaultImageServerBuilder",
+      "metadata": null,
+      "summary": "CMU-1, JP2K | ID:	2 |  | No data file"
+    }
+  ]
+}
