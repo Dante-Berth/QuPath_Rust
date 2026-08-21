@@ -49,6 +49,13 @@ pub enum Command {
     AddToProject,
     /// Put the project list away. The slide showing stays open.
     CloseProject,
+    /// Narrow the browser's list to the rows whose name matches this text.
+    ///
+    /// Carries the whole text rather than a keystroke, for
+    /// [`Command::SetTuning`]'s reason: the field is edited, not incremented,
+    /// and a command per character would make the list a function of how many
+    /// frames the typing was spread across.
+    Filter(String),
     /// Show or hide the project browser.
     ToggleProject,
     Fit,
@@ -1252,11 +1259,20 @@ fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
     };
 
     ui.add(egui::Label::new(egui::RichText::new(&project.name).strong()).wrap());
+
+    let images = project.stored.images.len();
+    let shown = project
+        .stored
+        .images
+        .iter()
+        .filter(|image| matches(&image.name, &app.filter))
+        .count();
     ui.label(
-        egui::RichText::new(match project.stored.images.len() {
-            0 => "No images".to_owned(),
-            1 => "1 image, click it to open".to_owned(),
-            many => format!("{many} images, click one to open"),
+        egui::RichText::new(match (images, shown, images == shown) {
+            (0, ..) => "No images".to_owned(),
+            (_, _, false) => format!("{shown} of {images} images shown"),
+            (1, ..) => "1 image, click it to open".to_owned(),
+            (many, ..) => format!("{many} images, click one to open"),
         })
         .weak()
         .small(),
@@ -1283,6 +1299,7 @@ fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
 
     ui.add_space(8.0);
     add_slide(ui, app, command);
+    search(ui, app, command);
 
     if project.stored.images.is_empty() {
         ui.add(
@@ -1299,8 +1316,26 @@ fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
         return;
     }
 
+    if shown == 0 {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new("No image in this project matches the search.")
+                    .weak()
+                    .small(),
+            )
+            .wrap(),
+        );
+        return;
+    }
+
     let showing = app.open.as_ref().map(|open| open.path.as_path());
     for (index, image) in project.stored.images.iter().enumerate() {
+        // The row is skipped and the *index* is not: a picture belongs to the
+        // entry it was read for, and renumbering the rows a search leaves
+        // showing would hand row 3's picture to row 1.
+        if !matches(&image.name, &app.filter) {
+            continue;
+        }
         let current = is_showing(image, showing);
         let present = project.present(index);
         let openable = image.slide.is_ok();
@@ -1393,6 +1428,78 @@ fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
         }
         ui.add_space(2.0);
     }
+}
+
+/// The search box that narrows the list.
+///
+/// QuPath's `tfFilter`, at the top of its browser above the tree. Here it is
+/// under the add button, because the button is about the slide showing and the
+/// search is about the list — putting the search directly over the rows it
+/// changes keeps a control beside the thing it acts on.
+///
+/// Emits the whole text through [`Command::Filter`] rather than writing
+/// [`App::filter`], for `appearance_pane`'s reason: this function takes `&App`
+/// and every change to the application is a command.
+fn search(ui: &mut egui::Ui, app: &App, command: &mut Command) {
+    let mut text = app.filter.clone();
+    let field = egui::TextEdit::singleline(&mut text)
+        .hint_text("Search names")
+        .desired_width(f32::INFINITY);
+    let response = ui.add(field).on_hover_text(
+        "Shows the images whose name contains this. Separate several with `|` \
+         and every one of them has to match.",
+    );
+    ui.add_space(6.0);
+    if response.changed() && *command == Command::None {
+        *command = Command::Filter(text);
+    }
+}
+
+/// Whether `name` passes the browser's search box.
+///
+/// `ProjectEntryPredicate.createIgnoreCase`, which is what QuPath's browser
+/// builds unless the regular-expression toggle is on:
+///
+/// - the text is trimmed, and an empty one — or one that is nothing but `|`
+///   separators — accepts everything;
+/// - the comparison is case-insensitive, both sides lowercased;
+/// - the whole text is looked for in the name first;
+/// - and only if the text contains `|` is it split into tokens, of which
+///   **every one** must be found.
+///
+/// **`|` reads as "or" and means "and"**, which is worth stating because it is
+/// the one thing about this control a user can get wrong: `tif|block` shows the
+/// images whose name has both, not either. QuPath's own documentation for the
+/// field is the class comment quoted above, and it says the same thing in the
+/// same surprising way.
+///
+/// What is **not** ported is the other half of a token: QuPath also tests each
+/// one against the entry's metadata as `key=value`, plus a synthesised
+/// `has_data=<bool>`. `project::read` summarises an entry to an id, a name, a
+/// builder and a path — the metadata map stays in the document, unread — so a
+/// token like `has_data=true` matches nothing here where QuPath would match a
+/// row. Narrowing that would mean reading the map, which is a different change
+/// from a search box.
+fn matches(name: &str, filter: &str) -> bool {
+    let filter = filter.trim();
+    if filter.replace('|', "").is_empty() {
+        return true;
+    }
+    let filter = filter.to_lowercase();
+    let name = name.to_lowercase();
+    if name.contains(&filter) {
+        return true;
+    }
+    if !filter.contains('|') {
+        return false;
+    }
+    // Not trimmed, which is QuPath's behaviour rather than an oversight: it
+    // drops a *blank* token and matches the rest as they are, so `a | b` looks
+    // for `a ` and ` b` with their spaces.
+    filter
+        .split('|')
+        .filter(|token| !token.trim().is_empty())
+        .all(|token| name.contains(token))
 }
 
 /// Whether this row's image is the slide on screen.
@@ -1905,6 +2012,36 @@ mod tests {
         let (value, unit) = label.split_once(' ').expect("a value and a unit");
         let value: f64 = value.parse().expect("a number");
         if unit == "mm" { value * 1000.0 } else { value }
+    }
+
+    /// The search box narrows by name, the way QuPath's does.
+    ///
+    /// The case worth having a test for is the last group: `|` looks like "or"
+    /// and QuPath means "and". A port that read it the obvious way would show
+    /// *more* rows than QuPath for the same text, and every one of them would
+    /// look like a match.
+    #[test]
+    fn the_search_box_follows_qupaths_predicate() {
+        // Nothing typed, and nothing but separators, accept everything.
+        assert!(super::matches("CMU-1", ""));
+        assert!(super::matches("CMU-1", "   "));
+        assert!(super::matches("CMU-1", "|"));
+        assert!(super::matches("CMU-1", " || "));
+
+        // A substring, either case, anywhere in the name.
+        assert!(super::matches("CMU-1, JP2K", "jp2k"));
+        assert!(super::matches("CMU-1, JP2K", "CMU"));
+        assert!(super::matches("CMU-1, JP2K", "1, jp"));
+        assert!(!super::matches("CMU-1, JP2K", "block"));
+
+        // Every token has to be found, not any of them.
+        assert!(super::matches("CMU-1, JP2K", "cmu|jp2k"));
+        assert!(!super::matches("CMU-1, JP2K", "cmu|block"));
+        assert!(!super::matches("CMU-1, JP2K", "block|section"));
+
+        // And the whole text is tried against the name before it is split, so
+        // a name that really does contain a `|` matches it literally.
+        assert!(super::matches("scan | second pass", "n | s"));
     }
 
     /// A row is marked only when its own slide is the one on screen.

@@ -448,6 +448,28 @@ fn a_project_and_a_slide_can_be_asked_for_together() {
     );
 }
 
+/// A search does not outlive the project it was typed against.
+///
+/// The state this prevents is a list with rows missing and no visible reason:
+/// the box holding the text is at the top of the pane, and a study of fifty
+/// rows is scrolled. QuPath clears `tfFilter` on the same event.
+#[test]
+fn a_search_does_not_outlive_the_project_it_was_typed_against() {
+    let first = project_in("searched", &[("liver", true), ("kidney", true)]);
+    let second = project_in("searched-again", &[("spleen", true)]);
+
+    let mut app = App::new(None);
+    app.open_project(first);
+    app.filter = String::from("liver");
+    app.open_project(second);
+
+    assert!(
+        app.filter.is_empty(),
+        "the search from the last study is still narrowing this one: {}",
+        app.filter,
+    );
+}
+
 /// Waits for the browser to finish making the pictures it is going to make.
 ///
 /// The worker is a thread and the application takes delivery a frame at a time,

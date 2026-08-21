@@ -2031,6 +2031,39 @@ merely late — the frame resolves the id to whatever the previous project left
 there. `Pictures::ready` is false until the renderer holds *this* project's copy,
 and `App::take_pictures` runs beside `request_tiles` rather than inside `draw`.
 
+#### Searching it, and the separator that reads backwards
+
+A study is fifty slides, and a list of fifty names is scrolled rather than read.
+QuPath's browser has `tfFilter` over its tree for that, and this has the same box
+under the add button — the button is about the slide showing, the search is about
+the list, and a control belongs beside the thing it acts on.
+
+`matches` is `ProjectEntryPredicate.createIgnoreCase`, which is what QuPath
+builds unless the regular-expression toggle is on: trim, accept everything for an
+empty text *or one that is nothing but separators*, lowercase both sides, look
+for the whole text in the name — and only then, if the text contains `|`, split
+it into tokens of which **every one** must be found.
+
+**`|` reads as "or" and means "and".** `tif|block` shows the images whose name
+has both. That is the one thing about the control a user can get wrong, and a
+port that read it the obvious way would show *more* rows than QuPath for the same
+text with every one of them looking like a match — which is why it has a test
+rather than a comment.
+
+What is not ported is the other half of a token: QuPath tests each against the
+entry's metadata as `key=value`, plus a synthesised `has_data=<bool>`.
+`project::read` summarises an entry to an id, a name, a builder and a path, so
+the metadata map is in the document and unread, and `has_data=true` matches
+nothing here. Reading it is a different change from a search box, and §8.8 has
+it now.
+
+**A row is skipped and its index is not.** A picture belongs to the entry it was
+read for, and renumbering the rows a search leaves showing would hand row 3's
+picture to row 1 — the same index-identity trap as the one `Pictures` is owned by
+a project to avoid, one layer up. The search clears when a project is opened, as
+QuPath's does: a search typed against one study hides rows of the next for a
+reason that is one scroll off the top of the pane.
+
 #### Three more things the running window found
 
 **A row with no picture and no cross says "wait" for ever.** The study opened for

@@ -641,6 +641,15 @@ pub struct App {
     pub project: Option<Project>,
     /// Whether the project browser is showing.
     pub show_project: bool,
+    /// What the browser's search box holds.
+    ///
+    /// On [`App`] rather than on [`Project`] because it is a state of the
+    /// *interface*, and because it survives nothing: opening a project clears
+    /// it, as QuPath's browser clears `tfFilter`. A search left over from
+    /// another study is a list with rows missing and nothing on screen that
+    /// looks like a reason — the box holds the text, but a pane scrolled past
+    /// it does not.
+    pub filter: String,
 }
 
 impl App {
@@ -703,6 +712,7 @@ impl App {
             unreported: false,
             project: None,
             show_project: false,
+            filter: String::new(),
         }
     }
 
@@ -936,6 +946,10 @@ impl App {
                     pictures: Pictures::start(&slides, &known),
                 });
                 self.show_project = true;
+                // Cleared with the project, as QuPath's browser clears its own
+                // filter: a search typed against one study hides rows of the
+                // next for a reason that is one scroll off the top of the pane.
+                self.filter.clear();
                 // Said in the status bar as well as shown in the pane, because
                 // a project of zero images opens a pane with nothing in it and
                 // the pane alone cannot distinguish that from one that failed.
@@ -1525,6 +1539,7 @@ impl App {
                 self.message = String::from("Project closed.");
             }
             Command::ToggleProject => self.show_project = !self.show_project,
+            Command::Filter(text) => self.filter = text,
             Command::Close => {
                 self.open = None;
                 self.uploaded_overview = false;

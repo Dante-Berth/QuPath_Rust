@@ -52,6 +52,13 @@ fn main() {
     app.open_project(sample_project());
     render("chrome-project.png", &mut app);
 
+    // And with the search narrowing it, which is the state a fifty-slide study
+    // is worked in and the one an empty search box says nothing about: the
+    // count line changes, and the rows that are left keep their own pictures.
+    app.filter = String::from("jp2k");
+    render("chrome-project-search.png", &mut app);
+    app.filter.clear();
+
     // And with a slide, which is the state the controls exist for: the empty
     // panels above are what a first-time user meets, and these are what
     // everyone else does. The path is optional so the example still runs on a
