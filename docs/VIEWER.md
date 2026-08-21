@@ -1874,7 +1874,40 @@ than merely more: a detection's measurements are stored by QuPath as **`float`**
 (`PathDetectionObject` asks `MeasurementListFactory` for
 `MeasurementListType.FLOAT`), `Measurement::values` is `f32`, and `{}` on an
 `f32` is the shortest decimal that reads back as the same float. So the 32 bits
-that go in are the 32 bits QuPath ends up holding.
+that go in are the 32 bits QuPath ends up holding, and
+`parity_geojson_import.rs` asserts that bit for bit rather than within a
+tolerance.
+
+**It has now been opened by QuPath, which is what §8.8 said had never happened.**
+`parity/java/GeoJsonImport.java` reads `parity/samples/detections.geojson`
+through `PathIO.readObjects` — the entry point behind *Open objects* in the GUI,
+not a hand-driven Gson call — and records what came back;
+`crates/qupath-viewer/tests/parity_geojson_import.rs` asserts that reading is
+the overlay the sample was built from, with no JVM in the loop. Geometry agrees
+to a worst relative 4.8e-8, which is `f32` rounding in QuPath's own ROIs
+(`PackedCoordinateSequenceFactory.FLOAT_FACTORY`) and not a disagreement about
+anything; areas agree exactly.
+
+The sample is seven objects and every one of them is a case: downsample 1.0, 4.0
+and 2.5, an SVS pyramid's 4.000123, an eight-sided traced outline, and an empty
+ring and a two-vertex ring that the writer skips. **The skipped pair is what
+puts the measurement columns under test** — rows are indexed by object, so a
+writer that advanced them by written feature instead would put object 5's area
+on object 3, a number of the right kind on the wrong outline that nothing
+downstream can detect. QuPath is what reads those columns back.
+
+Two guesses about the reader were wrong and only running it said so: QuPath
+**keeps** the closing position GeoJSON requires, so an eight-vertex ring comes
+back with nine points, and an axis-aligned four-corner ring does not come back a
+polygon at all — the reader recognises it and builds a **Rectangle** ROI. Neither
+moves a coordinate, and both would have failed an assertion written from the
+specification instead of from the run.
+
+The chain has one weak link and it is guarded:
+`the_committed_sample_is_what_the_writer_produces` asserts the committed file is
+what `geojson::write` produces today. Without it a change to the writer would
+leave the fixture describing QuPath's reading of a file nothing produces any
+more, and every other assertion would keep passing about the wrong thing.
 
 ### 8.7 The brightness/contrast panel — the controls, and where the range lives
 
@@ -2151,8 +2184,12 @@ In the order it is worth having.
   photograph is what showed `Fit` leaving slide behind the status bar.
   What is *still* unlooked-at is everything that needs a hand on the machine —
   the trackpad, hover states, resizing, and the window manager.
-- **Parity for the two file formats.** Nothing here has been opened *by QuPath*.
-  Both formats were checked against a JSON parser and against the Java that
-  writes them, which is a stronger claim than "it validates" and a weaker one
-  than "QuPath opened it". Until a file has been through QuPath, that is the
-  honest description.
+- **Parity for the project format.** GeoJSON has now been through QuPath —
+  §8.6, and it found a rounded measurement column on the way — but the project
+  directory has not. A `.qpproj` and its `server.json` have been checked against
+  a JSON parser and against `DefaultProject.java`, which is a stronger claim
+  than "it validates" and a weaker one than "QuPath opened it". Until
+  `ProjectIO.loadProject` has read one, that is the honest description. It is a
+  harder check than the GeoJSON one for a reason worth writing down: every path
+  in a project is an absolute `file:` URI, so a committed sample would name this
+  machine, and the recorder has to write the project before reading it.

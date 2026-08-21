@@ -75,6 +75,28 @@ be picking a number to pass rather than to measure. It is a reported comparison
 until the remaining divergence is understood, per the rule below about never
 widening a tolerance.
 
+## A recorder that runs the other way
+
+Every fixture above records what QuPath *computes*, so a Rust test can be
+checked against it. `GeoJsonImport.json` records what QuPath **reads**, from a
+file this project wrote:
+
+```bash
+cargo run -p qupath-viewer --example geojson_sample   # parity/samples/detections.geojson
+./parity/record.sh                                    # GeoJsonImport reads it back
+cargo test -p qupath-viewer --test parity_geojson_import
+```
+
+`parity/samples/` holds the input, and it is committed for the same reason the
+fixtures are: it is what makes the recorded reading mean anything. The order
+matters — the recorder reads the sample, so regenerate the sample *first* and
+record *second*, or the fixture describes QuPath's reading of the previous file.
+
+`the_committed_sample_is_what_the_writer_produces` is what keeps the pair
+honest. Without it a change to `geojson::write` would leave the fixture
+describing a file nothing produces any more, and every other assertion in that
+test would keep passing about the wrong thing.
+
 ## Tolerances
 
 Exact equality with QuPath does not hold in general: Java dropped `strictfp`

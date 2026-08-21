@@ -21,9 +21,23 @@ mkdir -p "$fixtures"
 for src in "$root"/parity/java/*.java; do
     case "$(basename "$src")" in Bench* | SlideRegion.java) continue ;; esac
     name="$(basename "$src" .java)"
+    # GeoJsonImport reads a file this project wrote rather than computing one,
+    # so it takes the sample's path. Passed absolutely, because the recorder is
+    # run from wherever the caller happens to be and a relative default would
+    # empty the fixture rather than fail loudly.
+    args=()
+    if [[ "$name" == GeoJsonImport ]]; then
+        sample="$root/parity/samples/detections.geojson"
+        if [[ ! -f "$sample" ]]; then
+            echo "error: $sample not found; regenerate it with" >&2
+            echo "       cargo run -p qupath-viewer --example geojson_sample" >&2
+            exit 1
+        fi
+        args=("$sample")
+    fi
     echo "==> recording $name" >&2
     # Recorders write JSON to stdout; SLF4J and JVM warnings go to stderr.
-    "$java_bin" -cp "$cp." "$src" >"$fixtures/$name.json"
+    "$java_bin" -cp "$cp." "$src" "${args[@]}" >"$fixtures/$name.json"
 done
 
 echo "==> done; fixtures in parity/fixtures/" >&2

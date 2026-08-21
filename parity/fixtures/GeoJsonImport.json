@@ -1,0 +1,82 @@
+02:41:06.214 [main] DEBUG qupath.lib.roi.GeometryTools -- Setting -Djts.overlay=ng
+02:41:06.215 [main] DEBUG qupath.lib.roi.GeometryTools -- Setting -Djts.relate=ng
+{
+  "source": "detections.geojson",
+  "objects": [
+    {
+      "detection": true,
+      "class": null,
+      "roi": "Rectangle",
+      "points": 4,
+      "area": 36.0,
+      "centroidX": 13.0,
+      "centroidY": 23.0,
+      "boundsX": 10.0,
+      "boundsY": 20.0,
+      "boundsWidth": 6.0,
+      "boundsHeight": 6.0,
+      "valid": true,
+      "measurements": [{"name": "Nucleus: Area (px)", "value": 36.0}, {"name": "Nucleus: Haematoxylin OD mean", "value": 0.3499999940395355}]
+    },
+    {
+      "detection": true,
+      "class": null,
+      "roi": "Rectangle",
+      "points": 4,
+      "area": 16384.0,
+      "centroidX": 4160.0,
+      "centroidY": 8256.0,
+      "boundsX": 4096.0,
+      "boundsY": 8192.0,
+      "boundsWidth": 128.0,
+      "boundsHeight": 128.0,
+      "valid": true,
+      "measurements": [{"name": "Nucleus: Area (px)", "value": 16384.0}, {"name": "Nucleus: Haematoxylin OD mean", "value": 0.812345027923584}]
+    },
+    {
+      "detection": true,
+      "class": null,
+      "roi": "Rectangle",
+      "points": 4,
+      "area": 306.25,
+      "centroidX": 16.25,
+      "centroidY": 21.25,
+      "boundsX": 7.5,
+      "boundsY": 12.5,
+      "boundsWidth": 17.5,
+      "boundsHeight": 17.5,
+      "valid": true,
+      "measurements": [{"name": "Nucleus: Area (px)", "value": 306.25}, {"name": "Nucleus: Haematoxylin OD mean", "value": 0.0}]
+    },
+    {
+      "detection": true,
+      "class": null,
+      "roi": "Polygon",
+      "points": 9,
+      "area": 248.0,
+      "centroidX": 1208.44091796875,
+      "centroidY": 1409.3709716796875,
+      "boundsX": 1200.0,
+      "boundsY": 1400.0,
+      "boundsWidth": 18.0,
+      "boundsHeight": 18.0,
+      "valid": true,
+      "measurements": [{"name": "Nucleus: Area (px)", "value": 232.0}, {"name": "Nucleus: Haematoxylin OD mean", "value": 1.25}]
+    },
+    {
+      "detection": true,
+      "class": null,
+      "roi": "Polygon",
+      "points": 9,
+      "area": 992.0,
+      "centroidX": 8017.1318359375,
+      "centroidY": 12019.1123046875,
+      "boundsX": 8000.25,
+      "boundsY": 12000.3701171875,
+      "boundsWidth": 36.0,
+      "boundsHeight": 36.0,
+      "valid": true,
+      "measurements": [{"name": "Nucleus: Area (px)", "value": 991.5}, {"name": "Nucleus: Haematoxylin OD mean", "value": 0.05999999865889549}]
+    }
+  ]
+}
