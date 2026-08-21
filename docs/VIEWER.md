@@ -1720,6 +1720,62 @@ harder thing to trace back to one missing slash.
 the lexical form of that — it joins the working directory without resolving
 symlinks or touching the file.
 
+**QuPath could not open it, and the reasons came one at a time.**
+`parity/java/ProjectImport.java` calls `ProjectIO.loadProject`, which is what
+*Open project* reaches. The first four runs failed, each hiding the next:
+
+1. **No `createTimestamp` or `modifyTimestamp`.** `DefaultProject.loadProject`
+   reads both with `getAsLong()` and **no `has` guard** — the first two lines of
+   the method, before the URI, the version, the entries or `lastID`, every one
+   of which *is* guarded. A project without them throws a
+   `NullPointerException` wrapped in an `IOException`, and the message names
+   Gson rather than the field. Every project this module has ever written was
+   unopenable, and nothing here could have seen it: the file parses, and
+   `DefaultProject.java` had been read for what it *writes* rather than for what
+   it *demands*. [`Timestamps`](../crates/qupath-viewer/src/project.rs) is a
+   parameter and not a clock, so the format stays comparable against itself.
+2. **`"channels": ["Red", "Green", "Blue"]`.** An `ImageChannel` is an object
+   with a name and a packed colour, so Gson threw `Expected BEGIN_OBJECT but was
+   STRING at path $.metadata.channels[0]` — and it took the **whole project**
+   down, not the one entry.
+3. **`"rgb"` and `"pixelWidthMicrons"` are not fields.** Gson uses the declared
+   field name and QuPath registers no naming policy: the flag is `isRGB`, and
+   the pixel size lives in a `pixelCalibration` object of `{value, unit}`
+   quantities whose unit is compared by string equality against `"µm"` — U+00B5
+   MICRO SIGN, not U+03BC GREEK SMALL LETTER MU, which is identical in most
+   fonts. Both were being written, dropped, and reported by nothing: QuPath read
+   `rgb: false` off a project that said `true`.
+4. And with all of those corrected, `metadata.getLevels()` threw
+   `NullPointerException`. That is not an idle call — it is what
+   `AbstractImageServer.setMetadata` reaches, and `setMetadata` is what
+   `AbstractServerBuilder.build` calls **when the image is opened**. The project
+   would have opened and every image in it failed.
+
+**So the metadata block is not written at all, and that is the finding rather
+than a retreat.** `getLevels()` is `Arrays.asList(levels)` over a field Gson
+leaves null, and the pyramid is precisely what this crate does not know: `Entry`
+carries a width, a height and — until this — a pixel size, while the level
+table and the preferred tile sizes come from `openslide` reading the file.
+Writing one level would be worse than writing none, since it says the image has
+no pyramid and QuPath would then read full resolution for every view of a
+46,000-pixel slide. QuPath's own API has the shape for this already:
+`DefaultImageServerBuilder.createInstance(providerClass, uri, args)` passes a
+null metadata, and `build` then leaves the server with what OpenSlide read.
+That is strictly better information than anything written here.
+
+`Entry::microns_per_pixel` went with it, and its going is the point. With no
+metadata block there is nowhere in the format QuPath reads a pixel size from —
+`ImageDataSummary` has no such field either — so it was a struct field that
+reached a file, was discarded by Gson, and was reported by nothing. That is the
+same shape as §8.6's export with no caller, one level further in.
+
+Two more names were wrong in `summary.json` and could not have failed:
+`ImageDataSummary`'s fields are **`server`** and **`hierarchy`**, not
+`serverSummary` and `hierarchySummary`. Nothing in QuPath reads that file — it
+is written and never loaded — so no amount of running QuPath would have
+reported it. It is corrected because a file that claims to be in QuPath's format
+and is not is exactly what this module exists not to produce.
+
 ### 8.4 The overview — the invariant is that the two mappings agree
 
 `overview.rs` is `ImageOverview.java`'s arithmetic: slide to overview, which

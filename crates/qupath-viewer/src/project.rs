@@ -67,7 +67,66 @@ pub const BUILDER_TYPE: &str = "uri";
 /// is for QuPath to read, not for this to read back.
 pub const OPENSLIDE_PROVIDER: &str = "qupath.lib.images.servers.openslide.OpenslideServerBuilder";
 
+/// When a project was created and when it was last written, in milliseconds
+/// since the Unix epoch.
+///
+/// **QuPath requires both, and this is not a soft requirement.**
+/// `DefaultProject.loadProject` reads them with no `has` guard at all:
+///
+/// ```java
+/// creationTimestamp = element.get("createTimestamp").getAsLong();
+/// modificationTimestamp = element.get("modifyTimestamp").getAsLong();
+/// ```
+///
+/// Every other field it reads — `uri`, `version`, `images`, `lastID` — is
+/// guarded. These two are the first thing it touches, so a project without them
+/// throws a `NullPointerException` wrapped in an `IOException` before a single
+/// entry is looked at, and the message names Gson rather than the field. A
+/// project this module wrote could not be opened at all until they were here.
+///
+/// Taken as a parameter rather than read from the clock inside [`files`],
+/// because this module's whole design is that the format is testable with no
+/// directory on disk — and a function that reads the time is one that cannot be
+/// compared against itself. It is also the honest shape: the two are genuinely
+/// different values once a project is rewritten, and only the caller knows when
+/// the project it is rewriting was made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timestamps {
+    /// When the project was created.
+    pub created: u64,
+    /// When it was last written.
+    pub modified: u64,
+}
+
+impl Timestamps {
+    /// Both fields set to now, for a project being created.
+    ///
+    /// Falls back to the epoch if the system clock is before it, which is a
+    /// machine with its clock wrong rather than a case worth an error: QuPath
+    /// shows these and reads nothing else from them, so a project that opens
+    /// with a wrong date beats one that is not written.
+    #[must_use]
+    pub fn now() -> Self {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
+        Self {
+            created: millis,
+            modified: millis,
+        }
+    }
+}
+
 /// One image in a project.
+///
+/// **There is no pixel size here.** There was, and it had nowhere to go: the
+/// only field QuPath reads one from is the server metadata block, which
+/// [`server_builder`] does not write and explains why, and `summary.json` has
+/// no such field in `ImageDataSummary`. A pixel size on this struct would have
+/// been written into a file, discarded by Gson, and reported by nothing —
+/// which is the shape of every claim this project has had to go back and
+/// check. QuPath reads the slide's own pixel size when it opens the image,
+/// which is where this one came from.
 #[derive(Debug, Clone)]
 pub struct Entry<'a> {
     /// The slide's path on disk.
@@ -78,13 +137,6 @@ pub struct Entry<'a> {
     pub width: u32,
     /// Level-0 height in pixels.
     pub height: u32,
-    /// Pixel size in microns, if the slide records one.
-    ///
-    /// `Option` for `Slide::microns_per_pixel`'s reason, carried through: a
-    /// missing pixel size is written as absent rather than as a plausible
-    /// default, because a wrong pixel size makes every micron-derived number
-    /// downstream wrong in a way nothing flags.
-    pub microns_per_pixel: Option<f64>,
 }
 
 impl Entry<'_> {
@@ -120,11 +172,12 @@ pub struct Output {
 ///
 /// `project_path` is where `project.qpproj` will live; it becomes the `uri`
 /// field, which QuPath uses to tell a moved project from one in place.
+/// `written` is [`Timestamps`], which QuPath requires and does not guard.
 #[must_use]
-pub fn files(project_path: &Path, entries: &[Entry<'_>]) -> Vec<Output> {
+pub fn files(project_path: &Path, entries: &[Entry<'_>], written: Timestamps) -> Vec<Output> {
     let mut out = vec![Output {
         path: "project.qpproj".to_owned(),
-        contents: project_file(project_path, entries),
+        contents: project_file(project_path, entries, written),
     }];
     for (index, entry) in entries.iter().enumerate() {
         let directory = Entry::directory(index);
@@ -134,7 +187,7 @@ pub fn files(project_path: &Path, entries: &[Entry<'_>]) -> Vec<Output> {
         });
         out.push(Output {
             path: format!("data/{directory}/summary.json"),
-            contents: summary_file(entry),
+            contents: summary_file(entry, written),
         });
     }
     out
@@ -146,12 +199,22 @@ pub fn files(project_path: &Path, entries: &[Entry<'_>]) -> Vec<Output> {
 /// project's own: it says which reader the file was written for, and claiming a
 /// version this format does not match is how a file gets read by the wrong
 /// code path.
+///
+/// The two timestamps are not optional; [`Timestamps`] says why.
 #[must_use]
-pub fn project_file(project_path: &Path, entries: &[Entry<'_>]) -> String {
+pub fn project_file(project_path: &Path, entries: &[Entry<'_>], written: Timestamps) -> String {
     let mut out = String::new();
     out.push_str("{\n  \"version\": \"");
     escape(&mut out, FORMAT_VERSION);
-    out.push_str("\",\n  \"uri\": \"");
+    // The order is `DefaultProject.writeProject`'s: version, the two
+    // timestamps, uri, lastID, images. Gson does not care about field order and
+    // this follows it anyway, so that a project written here and one written by
+    // QuPath can be read side by side.
+    out.push_str("\",\n  \"createTimestamp\": ");
+    let _ = write!(out, "{}", written.created);
+    out.push_str(",\n  \"modifyTimestamp\": ");
+    let _ = write!(out, "{}", written.modified);
+    out.push_str(",\n  \"uri\": \"");
     escape(&mut out, &file_uri(project_path));
     out.push_str("\",\n  \"lastID\": ");
     let _ = write!(out, "{}", entries.len());
@@ -204,6 +267,45 @@ pub fn server_file(entry: &Entry<'_>) -> String {
 ///
 /// One function for both because QuPath writes the same structure to each, and
 /// two copies of it are two things to keep in step.
+///
+/// # Why there is no `metadata` block, and what was in it
+///
+/// QuPath writes one — `OpenslideImageServer.createServerBuilder` passes
+/// `getMetadata()` — and this deliberately does not, because a stored metadata
+/// block is **applied to the server when the image is opened**:
+/// `AbstractServerBuilder.build` calls `server.setMetadata(metadata)` when one
+/// is present, and `AbstractImageServer.setMetadata` reaches
+/// `metadata.getLevels()`, which is `Arrays.asList(levels)` over a field Gson
+/// leaves null when the JSON has no `levels`. A block without them is a
+/// `NullPointerException` at the moment someone double-clicks the image.
+///
+/// The pyramid is the thing this crate cannot know. [`Entry`] carries a
+/// width, a height and a pixel size; a level table is what `openslide` reports
+/// from the file, and so are the preferred tile sizes, which arrive as `0` when
+/// absent. Writing one level would be worse than writing none — it says the
+/// image has no pyramid, and QuPath would then read full resolution for every
+/// view of a 46,000-pixel slide.
+///
+/// QuPath's own API has the shape for this:
+/// `DefaultImageServerBuilder.createInstance(providerClass, uri, args)` passes
+/// a null metadata, and `build` then leaves the server with what OpenSlide read
+/// from the slide. That is strictly better information than anything written
+/// here, since it comes from the file.
+///
+/// **Three separate fields in that block were silently wrong before it was
+/// removed**, and they are recorded because they are what a reader of
+/// `ImageServerMetadata` should expect rather than assume:
+///
+/// - `"rgb": true` is not a field. Gson uses the field name, which is `isRGB`,
+///   and QuPath read `false` off a project that said `true`;
+/// - `"pixelWidthMicrons"` is not a field either. The pixel size lives in a
+///   `pixelCalibration` object holding `{value, unit}` quantities, and the unit
+///   is compared by string equality against `"\u{b5}m"` — U+00B5 MICRO SIGN,
+///   not U+03BC GREEK SMALL LETTER MU, which looks identical in most fonts;
+/// - `"channels": ["Red", "Green", "Blue"]` is the one that was not silent. An
+///   `ImageChannel` is an object, so Gson threw
+///   `Expected BEGIN_OBJECT but was STRING` and the **whole project** failed to
+///   load, not just the entry.
 fn server_builder(entry: &Entry<'_>) -> String {
     let mut out = String::new();
     out.push_str("{\n        \"builderType\": \"");
@@ -212,21 +314,10 @@ fn server_builder(entry: &Entry<'_>) -> String {
     out.push_str(OPENSLIDE_PROVIDER);
     out.push_str("\",\n        \"uri\": \"");
     escape(&mut out, &file_uri(entry.path));
-    out.push_str("\",\n        \"args\": [],\n        \"metadata\": {\n          \"width\": ");
-    let _ = write!(out, "{}", entry.width);
-    out.push_str(",\n          \"height\": ");
-    let _ = write!(out, "{}", entry.height);
-    out.push_str(",\n          \"sizeZ\": 1,\n          \"sizeT\": 1,\n          \"channels\": [\"Red\", \"Green\", \"Blue\"],\n          \"rgb\": true");
-    if let Some(microns) = entry.microns_per_pixel
-        && microns.is_finite()
-        && microns > 0.0
-    {
-        out.push_str(",\n          \"pixelWidthMicrons\": ");
-        let _ = write!(out, "{microns}");
-        out.push_str(",\n          \"pixelHeightMicrons\": ");
-        let _ = write!(out, "{microns}");
-    }
-    out.push_str("\n        }\n      }");
+    // No `metadata` block. The slide's own metadata is what QuPath uses, and
+    // it is better than anything that could be written here; the doc comment
+    // above says what happens to a project that claims otherwise.
+    out.push_str("\",\n        \"args\": []\n      }");
     out
 }
 
@@ -236,19 +327,38 @@ fn server_builder(entry: &Entry<'_>) -> String {
 /// objects of each kind an entry has. This writes zero, and that is accurate
 /// rather than a placeholder: no `data.qpdata` is written, so the entry
 /// genuinely contains no objects as far as QuPath is concerned.
+///
+/// **The keys are `server` and `hierarchy`**, which are the field names
+/// `ImageDataSummary` declares — not `serverSummary` and `hierarchySummary`,
+/// which is what this wrote until a real QuPath was asked. Nothing in QuPath
+/// reads this file, so the mistake could not have surfaced as a failure; it is
+/// corrected because a file that claims to be in QuPath's format and is not is
+/// exactly what this module exists not to produce.
 #[must_use]
-pub fn summary_file(entry: &Entry<'_>) -> String {
+pub fn summary_file(entry: &Entry<'_>, written: Timestamps) -> String {
     let mut out = String::new();
-    out.push_str("{\n  \"serverSummary\": {\n    \"width\": ");
+    out.push_str("{\n  \"timestamp\": ");
+    let _ = write!(out, "{}", written.modified);
+    out.push_str(",\n  \"imageType\": \"");
+    out.push_str(IMAGE_TYPE);
+    out.push_str("\",\n  \"server\": {\n    \"width\": ");
     let _ = write!(out, "{}", entry.width);
     out.push_str(",\n    \"height\": ");
     let _ = write!(out, "{}", entry.height);
     out.push_str(
         ",\n    \"sizeC\": 3,\n    \"sizeZ\": 1,\n    \"sizeT\": 1\n  },\n  \
-         \"hierarchySummary\": {\n    \"nObjects\": 0\n  }\n}\n",
+         \"hierarchy\": {\n    \"nObjects\": 0\n  }\n}\n",
     );
     out
 }
+
+/// The image type an entry claims, which is that it does not know.
+///
+/// `ImageData.ImageType` has `BRIGHTFIELD_H_E` and this writes `UNSET`, because
+/// nothing here has looked at the pixels. Naming the stain would be right for
+/// every slide this project has been run on and wrong the first time someone
+/// opens an immunohistochemistry slide, and QuPath asks when the type is unset.
+pub const IMAGE_TYPE: &str = "UNSET";
 
 /// The name QuPath would randomise for a blinded study.
 ///
@@ -316,19 +426,30 @@ pub fn file_uri(path: &Path) -> String {
 mod tests {
     use super::*;
 
+    /// A fixed pair, so two writes of the same project are comparable.
+    ///
+    /// Distinct values rather than one repeated, because `createTimestamp` and
+    /// `modifyTimestamp` are different fields and a test written with the same
+    /// number in both cannot see them swapped.
+    fn written() -> Timestamps {
+        Timestamps {
+            created: 1_700_000_000_000,
+            modified: 1_700_000_060_000,
+        }
+    }
+
     fn entry() -> Entry<'static> {
         Entry {
             path: Path::new("/data/CMU-1.svs"),
             name: "CMU-1.svs",
             width: 46000,
             height: 32914,
-            microns_per_pixel: Some(0.499),
         }
     }
 
     #[test]
     fn a_project_names_every_file_qupath_looks_for() {
-        let files = files(Path::new("/study/project.qpproj"), &[entry()]);
+        let files = files(Path::new("/study/project.qpproj"), &[entry()], written());
         let paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
         assert_eq!(
             paths,
@@ -344,7 +465,7 @@ mod tests {
     /// later is a deliberate act rather than a quiet one.
     #[test]
     fn no_qpdata_is_written() {
-        let files = files(Path::new("/study/project.qpproj"), &[entry(), entry()]);
+        let files = files(Path::new("/study/project.qpproj"), &[entry(), entry()], written());
         assert!(
             !files.iter().any(|file| file.path.contains("qpdata")),
             "data.qpdata is Java serialisation and is deliberately not attempted",
@@ -364,7 +485,7 @@ mod tests {
     fn entries_are_numbered_from_one() {
         assert_eq!(Entry::directory(0), "1");
         assert_eq!(Entry::directory(4), "5");
-        let files = files(Path::new("/p.qpproj"), &[entry(), entry()]);
+        let files = files(Path::new("/p.qpproj"), &[entry(), entry()], written());
         assert!(files.iter().any(|f| f.path == "data/2/server.json"));
     }
 
@@ -421,43 +542,57 @@ mod tests {
         );
     }
 
-    /// A missing pixel size is absent rather than defaulted, which is
-    /// `Slide::microns_per_pixel`'s rule carried into the format.
+    /// No server metadata, and no pixel size anywhere.
+    ///
+    /// Both were written until a real QuPath was asked to open the result. The
+    /// metadata block is applied to the image server when the image is opened —
+    /// `AbstractImageServer.setMetadata` reaches `metadata.getLevels()` — and a
+    /// block with no `levels` is a `NullPointerException` at that moment. The
+    /// pyramid is the one thing this crate cannot know, so the block goes, and
+    /// the pixel size with it: `pixelWidthMicrons` was never a field QuPath has
+    /// and Gson had been silently dropping it.
     #[test]
-    fn a_missing_pixel_size_is_omitted_rather_than_guessed() {
-        let mut without = entry();
-        without.microns_per_pixel = None;
-        let json = server_file(&without);
-        assert!(!json.contains("pixelWidthMicrons"), "{json}");
-        // And when it is there, it is there.
-        assert!(server_file(&entry()).contains("\"pixelWidthMicrons\": 0.499"));
-    }
-
-    /// A non-finite or non-positive pixel size is refused for the reason
-    /// `scalebar` refuses one: it reaches a label and a measurement, and NaN
-    /// in a project file is worse than a missing field.
-    #[test]
-    fn a_nonsense_pixel_size_is_refused() {
-        for bad in [f64::NAN, 0.0, -0.5, f64::INFINITY] {
-            let mut odd = entry();
-            odd.microns_per_pixel = Some(bad);
-            let json = server_file(&odd);
-            assert!(!json.contains("pixelWidthMicrons"), "{bad} produced {json}");
+    fn no_metadata_is_claimed_about_the_image() {
+        let json = server_file(&entry());
+        for absent in [
+            "metadata",
+            "pixelWidthMicrons",
+            "pixelCalibration",
+            "channels",
+            "rgb",
+            "width",
+        ] {
+            assert!(!json.contains(absent), "{absent} is still written: {json}");
         }
+        // What is left is what QuPath dispatches on and opens with.
+        assert!(json.contains("\"builderType\": \"uri\""), "{json}");
+        assert!(json.contains("\"uri\": \"file:///data/CMU-1.svs\""), "{json}");
+        assert!(json.contains("\"args\": []"), "{json}");
     }
 
+    /// `summary.json`'s keys are the field names `ImageDataSummary` declares.
+    ///
+    /// `serverSummary` and `hierarchySummary` were plausible and wrong. Nothing
+    /// in QuPath reads this file, so no failure could have reported it.
     #[test]
-    fn the_summary_reports_no_objects_because_there_are_none() {
-        let json = summary_file(&entry());
+    fn the_summary_uses_qupaths_field_names() {
+        let json = summary_file(&entry(), written());
+        assert!(json.contains("\"server\": {"), "{json}");
+        assert!(json.contains("\"hierarchy\": {"), "{json}");
+        assert!(!json.contains("serverSummary"), "{json}");
+        assert!(!json.contains("hierarchySummary"), "{json}");
         assert!(json.contains("\"nObjects\": 0"), "{json}");
+        assert!(json.contains("\"timestamp\": 1700000060000"), "{json}");
+        // Unset, because nothing here has looked at the pixels.
+        assert!(json.contains("\"imageType\": \"UNSET\""), "{json}");
     }
 
     /// Writing the same project twice must produce the same bytes, or every
     /// rewrite is a spurious diff.
     #[test]
     fn the_output_is_stable_across_runs() {
-        let first = files(Path::new("/study/project.qpproj"), &[entry()]);
-        let second = files(Path::new("/study/project.qpproj"), &[entry()]);
+        let first = files(Path::new("/study/project.qpproj"), &[entry()], written());
+        let second = files(Path::new("/study/project.qpproj"), &[entry()], written());
         for (a, b) in first.iter().zip(&second) {
             assert_eq!(a.contents, b.contents);
         }
@@ -465,7 +600,7 @@ mod tests {
 
     #[test]
     fn every_file_is_balanced_json() {
-        for file in files(Path::new("/study/p.qpproj"), &[entry(), entry()]) {
+        for file in files(Path::new("/study/p.qpproj"), &[entry(), entry()], written()) {
             assert_eq!(
                 file.contents.matches('{').count(),
                 file.contents.matches('}').count(),
@@ -481,9 +616,42 @@ mod tests {
         }
     }
 
+    /// The two fields QuPath reads before it reads anything else.
+    ///
+    /// `DefaultProject.loadProject` calls `getAsLong()` on both with no `has`
+    /// guard, so their absence is not a missing nicety — it is a
+    /// `NullPointerException` wrapped in an `IOException`, thrown before a
+    /// single entry is looked at, with a message that names Gson rather than
+    /// the field. Every project this module wrote was unopenable until they
+    /// were written, and nothing here could see it: the file parses, the field
+    /// names that *are* present are right, and `DefaultProject.java` was read
+    /// for what it writes rather than for what it demands.
+    #[test]
+    fn a_project_carries_the_timestamps_qupath_reads_unguarded() {
+        let json = project_file(Path::new("/study/project.qpproj"), &[entry()], written());
+        assert!(
+            json.contains("\"createTimestamp\": 1700000000000"),
+            "no createTimestamp: {json}"
+        );
+        assert!(
+            json.contains("\"modifyTimestamp\": 1700000060000"),
+            "no modifyTimestamp: {json}"
+        );
+
+        // Written as JSON numbers. `getAsLong` on a quoted string happens to
+        // work in Gson, which is exactly why writing one would survive here and
+        // be wrong beside a project QuPath wrote.
+        assert!(!json.contains("\"createTimestamp\": \""), "{json}");
+
+        // A clock that has not been asked twice still gives two fields.
+        let now = Timestamps::now();
+        assert!(now.created > 1_600_000_000_000, "the epoch is in milliseconds");
+        assert_eq!(now.created, now.modified, "a new project is written once");
+    }
+
     #[test]
     fn a_project_with_no_images_is_still_a_project() {
-        let files = files(Path::new("/study/project.qpproj"), &[]);
+        let files = files(Path::new("/study/project.qpproj"), &[], written());
         assert_eq!(files.len(), 1);
         assert!(files[0].contents.contains("\"images\": []"));
     }
