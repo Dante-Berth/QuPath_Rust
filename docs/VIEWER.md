@@ -1732,8 +1732,8 @@ symlinks or touching the file.
    Gson rather than the field. Every project this module has ever written was
    unopenable, and nothing here could have seen it: the file parses, and
    `DefaultProject.java` had been read for what it *writes* rather than for what
-   it *demands*. [`Timestamps`](../crates/qupath-viewer/src/project.rs) is a
-   parameter and not a clock, so the format stays comparable against itself.
+   it *demands*. `Timestamps` is a parameter and not a clock, so the format
+   stays comparable against itself.
 2. **`"channels": ["Red", "Green", "Blue"]`.** An `ImageChannel` is an object
    with a name and a packed colour, so Gson threw `Expected BEGIN_OBJECT but was
    STRING at path $.metadata.channels[0]` — and it took the **whole project**
