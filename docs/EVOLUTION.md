@@ -26,6 +26,53 @@ inside one function belongs in that function's doc comment, not here.
 
 ---
 
+## 2026-08 — A missing file is not a missing capability
+
+`86d74e7`
+
+`VIEWER.md` §8.8 kept the project browser's thumbnail under "the same missing
+JPEG encoder as ever" for several sessions. The picture was assumed to be the
+entry's `data/<id>/thumbnail.jpg`, this workspace has no JPEG codec, therefore
+no pictures. Every clause of that is true and the conclusion was wrong.
+
+QuPath's browser asks `entry.getThumbnail()`, and **when the answer is null it
+opens the image and makes one**. The stored file is a cache. The capability the
+entry was waiting on had been in the repository since §8.4 — the overview pane
+draws exactly this picture, from the coarsest pyramid level, for the slide that
+is open.
+
+**Transferable:** when a feature is blocked on an artefact this cannot produce,
+go and read what the other implementation does *when that artefact is absent*.
+A format's optional file is optional for a reason, and the reason is usually
+that somebody already wrote the fallback. The same shape as the memory
+`read-the-layer-below`, one level sideways: there the work had already been
+done underneath, here it had already been done next door.
+
+**Cost of the mistake:** nothing was built wrong — the browser simply listed
+names for four sessions while the answer sat in `ProjectBrowser.java`, thirty
+lines from the class the format was ported from.
+
+## 2026-08 — A widget that will not be narrow is a panel that clips
+
+`86d74e7`, `a14dc59`
+
+Third occurrence, which is the one that earns an entry. §8.1c had panels whose
+contents refused the cap that bound them; §8.7 had slider labels laid out inline
+and clipped to `Bac`; now a browser row's label, which stopped the *pane's
+heading* from wrapping.
+
+The mechanism is one line of egui and worth writing down: **inside a horizontal
+layout a `Label` defaults to `TextWrapMode::Extend`**, so its desired width is
+its whole text. A `SidePanel` sizes itself from its contents, grows to
+`max_width`, and clips there. So a widget added to *one row* changes the width
+every other widget in the panel is laid out against, and the symptom appears
+three widgets away from the change.
+
+**Transferable:** in a content-sized panel, every widget's *minimum* width is a
+shared resource. When a panel starts clipping, the thing to look for is not the
+clipped widget but whichever widget can no longer be narrow — and the fix is
+always to let the new content wrap rather than to widen the cap.
+
 ## 2026-08 — Looking at a thing is a test that assertions are not
 
 `a14dc59`, `25abc5d`
