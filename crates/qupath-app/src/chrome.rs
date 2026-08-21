@@ -27,8 +27,20 @@ pub enum Command {
     #[default]
     None,
     Open,
-    OpenRecent(PathBuf),
+    /// Open this slide, with no dialog.
+    ///
+    /// Named for what it does rather than for where it came from: the recent
+    /// menu, the welcome screen and the project browser all mean the same act,
+    /// and a variant called `OpenRecent` sent from a project entry would be
+    /// naming the wrong one of them.
+    OpenPath(PathBuf),
     Close,
+    /// Open a project, through a dialog.
+    OpenProject,
+    /// Put the project list away. The slide showing stays open.
+    CloseProject,
+    /// Show or hide the project browser.
+    ToggleProject,
     Fit,
     /// Zoom about the centre of the view by this many steps, in or out.
     Zoom(i32),
@@ -123,7 +135,13 @@ const PANEL_SHARE: f32 = 0.5;
 
 /// How many side panels are open.
 fn open_panels(app: &App) -> u32 {
-    u32::from(app.show_analysis) + u32::from(app.show_metadata) + u32::from(app.show_help)
+    u32::from(app.show_analysis)
+        + u32::from(app.show_metadata)
+        + u32::from(app.show_help)
+        // Counted only when there is a project to list. The pane is not drawn
+        // otherwise, and a cap divided by a panel that is not there is the
+        // arithmetic that makes every other panel narrower than it needs to be.
+        + u32::from(app.show_project && app.project.is_some())
 }
 
 /// The widest a single side panel may be, given the window and how many panels
@@ -165,12 +183,31 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
                     ui.menu_button("Open recent", |ui| {
                         for path in &app.recent {
                             if ui.button(display_name(path)).clicked() {
-                                command = Command::OpenRecent(path.clone());
+                                command = Command::OpenPath(path.clone());
                                 ui.close();
                             }
                         }
                     });
                 });
+                ui.separator();
+                if ui
+                    .button("Open project…")
+                    .on_hover_text(
+                        "Open a QuPath project and list its images (p).                          Opening one of them is a second click.",
+                    )
+                    .clicked()
+                {
+                    command = Command::OpenProject;
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(app.project.is_some(), egui::Button::new("Close project"))
+                    .on_hover_text("Put the list away. The slide showing stays open.")
+                    .clicked()
+                {
+                    command = Command::CloseProject;
+                    ui.close();
+                }
                 ui.separator();
                 // Enabled on there being something to write, not on a slide
                 // being open: an overlay outlives the run that made it, and a
@@ -255,6 +292,19 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
                     .clicked()
                 {
                     command = Command::ToggleMetadata;
+                    ui.close();
+                }
+                let mut project = app.show_project;
+                if ui
+                    .add_enabled(
+                        app.project.is_some(),
+                        egui::Checkbox::new(&mut project, "Project"),
+                    )
+                    .on_hover_text("The images in the project that is open.")
+                    .on_disabled_hover_text("Open a project first (p).")
+                    .clicked()
+                {
+                    command = Command::ToggleProject;
                     ui.close();
                 }
                 let mut help = app.show_help;
@@ -473,6 +523,18 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
             .max_width(cap)
             .show(context, |ui| {
                 scrolled("metadata", ui, |ui| metadata(ui, app, &mut command))
+            });
+    }
+    // First on the left, because it is the outermost thing being worked
+    // through: a study is opened, then an image in it, then that image's
+    // details. The metadata pane beside it is about whichever image the list
+    // led to.
+    if app.show_project && app.project.is_some() {
+        egui::SidePanel::left("project")
+            .default_width(250.0_f32.min(cap))
+            .max_width(cap)
+            .show(context, |ui| {
+                scrolled("project", ui, |ui| project_pane(ui, app, &mut command));
             });
     }
     if app.show_help {
@@ -1118,6 +1180,135 @@ fn metadata(ui: &mut egui::Ui, app: &App, command: &mut Command) {
         });
 }
 
+/// The project browser: the images in the project that is open.
+///
+/// # Why a row is a name and not a thumbnail
+///
+/// QuPath's `ProjectBrowser` is a grid of thumbnails, and this is a list.
+/// `thumbnail.jpg` is the one file of an entry's four that nothing in this
+/// workspace can produce — there is no JPEG encoder here — so a thumbnail grid
+/// would be a grid of placeholders for any project this application wrote, and
+/// a grid of QuPath's own thumbnails for any project it did not. A list is the
+/// same information for every project, which is the version worth having until
+/// a decoder makes the other one honest.
+///
+/// # Every row is shown, including the ones that will not open
+///
+/// An entry whose slide has moved, or whose image is built by one of the
+/// sixteen transforms QuPath supports and this does not, is listed with the
+/// reason under it rather than left out. A browser that dropped those rows
+/// would show a project with fewer images than it has, and nothing about the
+/// picture would say so — the same argument `project::read` makes for keeping
+/// them, arriving here as the reason it matters.
+fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
+    ui.heading("Project");
+    ui.separator();
+    let Some(project) = &app.project else {
+        return;
+    };
+
+    ui.add(egui::Label::new(egui::RichText::new(&project.name).strong()).wrap());
+    ui.label(
+        egui::RichText::new(match project.stored.images.len() {
+            0 => "No images".to_owned(),
+            1 => "1 image, click it to open".to_owned(),
+            many => format!("{many} images, click one to open"),
+        })
+        .weak()
+        .small(),
+    );
+
+    // A moved project is the explanation for a list of rows that will not
+    // open, and it is worth saying once at the top rather than fifty times
+    // below. QuPath makes the same comparison for the same reason.
+    if project.moved() {
+        ui.add_space(4.0);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(
+                    "This project has been moved. Its images are stored as \
+                     absolute paths, so any that were not moved with it will \
+                     not open.",
+                )
+                .color(ui.visuals().warn_fg_color)
+                .small(),
+            )
+            .wrap(),
+        );
+    }
+
+    ui.add_space(8.0);
+    if project.stored.images.is_empty() {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(
+                    "The project file has no images in it. Adding them is done \
+                     in QuPath.",
+                )
+                .weak()
+                .small(),
+            )
+            .wrap(),
+        );
+        return;
+    }
+
+    let showing = app.open.as_ref().map(|open| open.path.as_path());
+    for (index, image) in project.stored.images.iter().enumerate() {
+        match &image.slide {
+            Ok(path) => {
+                let current = showing == Some(path.as_path());
+                let present = project.present(index);
+                let label = if current {
+                    // The row being looked at is marked, because a list of
+                    // fifty names says nothing about which of them is on
+                    // screen — and the title bar naming the file is not an
+                    // answer when two entries name the same slide.
+                    egui::RichText::new(&image.name).strong()
+                } else if present {
+                    egui::RichText::new(&image.name)
+                } else {
+                    egui::RichText::new(&image.name).color(ui.visuals().warn_fg_color)
+                };
+                let row = ui.add(egui::Label::new(label).wrap().sense(egui::Sense::click()));
+                let row = if present {
+                    row.on_hover_text(path.display().to_string())
+                } else {
+                    row.on_hover_text(format!(
+                        "{}\n\nThis file was not there when the project was \
+                         opened. Clicking still tries it.",
+                        path.display()
+                    ))
+                };
+                if row.clicked() {
+                    // The same command the recent menu and the welcome screen
+                    // send. A row that will not open reports through
+                    // `App::open`'s own message rather than being refused
+                    // here: the check above is from when the project was
+                    // opened, and a slide plugged in since is one this should
+                    // not be second-guessing.
+                    *command = Command::OpenPath(path.clone());
+                }
+            }
+            Err(reason) => {
+                // Not clickable, and greyed rather than absent. The reason is
+                // shown because "cannot open" and "cannot open *because the
+                // image is a rotated view of another one*" are different
+                // amounts of help.
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&image.name).weak())
+                        .wrap(),
+                );
+                ui.add(
+                    egui::Label::new(egui::RichText::new(reason).weak().small())
+                        .wrap(),
+                );
+            }
+        }
+        ui.add_space(2.0);
+    }
+}
+
 /// The viewport's scale in the unit `egui` draws in.
 ///
 /// `Viewport::scale` is **physical** screen pixels per level-0 pixel — the
@@ -1218,6 +1409,7 @@ fn help(ui: &mut egui::Ui) {
                 ("h", "Show or hide the outlines."),
                 ("s", "Save what was found as GeoJSON."),
                 ("o", "Open a slide."),
+                ("p", "Open a QuPath project and list its images."),
             ] {
                 ui.label(egui::RichText::new(gesture).strong());
                 // Wrapped, not merely long: a `Grid` sizes itself to its widest
@@ -1353,12 +1545,20 @@ fn welcome(ui: &mut egui::Ui, app: &App, command: &mut Command) {
         if ui.button("Open a slide…").clicked() {
             *command = Command::Open;
         }
+        ui.add_space(4.0);
+        if ui
+            .button("Open a project…")
+            .on_hover_text("A QuPath project directory's .qpproj file.")
+            .clicked()
+        {
+            *command = Command::OpenProject;
+        }
         if !app.recent.is_empty() {
             ui.add_space(16.0);
             ui.label(egui::RichText::new("Recent").weak());
             for path in &app.recent {
                 if ui.link(display_name(path)).clicked() {
-                    *command = Command::OpenRecent(path.clone());
+                    *command = Command::OpenPath(path.clone());
                 }
             }
         }

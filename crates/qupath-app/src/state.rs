@@ -23,6 +23,7 @@ use qupath_pipeline::{Micron, Stains};
 use qupath_slide::Slide;
 use qupath_viewer::compose::{self, Framebuffer, MeshVertex, Texture};
 use qupath_viewer::overview::Overview;
+use qupath_viewer::project;
 use qupath_viewer::{
     Display, Overlay, ScreenPoint, SlidePoint, SlideTiles, Stain, TileCache, TileLoader, Viewport,
 };
@@ -397,6 +398,83 @@ impl Appearance {
     }
 }
 
+/// A project the browser has open.
+///
+/// The path and what was read from it, kept together because every path in a
+/// project is resolved against neither — `project.qpproj` stores absolute
+/// `file:` URIs — but *the project's own* location is what tells a project that
+/// has been moved from one in place, and what a rewrite has to be written back
+/// to.
+///
+/// There is no slide here. Opening a project shows a list; opening one of its
+/// images is a second act, and [`App::open`] is what performs it, exactly as it
+/// does for a slide picked from the file dialog. Coupling the two would mean a
+/// project of fifty slides opened the first of them, which is a wait nobody
+/// asked for.
+pub struct Project {
+    /// Where `project.qpproj` is.
+    pub path: PathBuf,
+    /// What to call it, which is the study's directory and not the file.
+    ///
+    /// Every project file in the world is called `project.qpproj`, so a browser
+    /// headed with the file name heads every project identically. QuPath's own
+    /// `getName()` is `dirBase.getName() + "/" + file.getName()` — the study
+    /// directory *and* the file — and this follows it, because the directory
+    /// alone loses the distinction between a project and its backup sitting
+    /// beside it.
+    ///
+    /// Built once, when the project is read. QuPath's version has a branch for
+    /// the directory having gone, and that branch cannot be reached from here:
+    /// the file inside it has just been read.
+    pub name: String,
+    /// What it said.
+    pub stored: project::Stored,
+    /// Whether each image's slide was on disk when the project was opened, in
+    /// the same order as `stored.images`.
+    ///
+    /// Checked **once**, and that is the trade rather than an oversight. A
+    /// browser is a list someone scrolls, and a `stat` per row per frame is a
+    /// syscall storm for an answer that changes about as often as a drive is
+    /// plugged in. The cost of it being stale is bounded: the mark is a
+    /// warning colour and a hover, clicking a row still tries the file, and
+    /// [`App::open`] reports what actually happened. QuPath checks on open for
+    /// the same reason.
+    present: Vec<bool>,
+}
+
+impl Project {
+    /// Whether entry `index`'s slide was there when the project was opened.
+    ///
+    /// Out of range reads as present, because the only way to be out of range
+    /// is a caller iterating something other than `stored.images` — and the
+    /// answer that does not add a warning to a row is the one that does not
+    /// invent information.
+    #[must_use]
+    pub fn present(&self, index: usize) -> bool {
+        self.present.get(index).copied().unwrap_or(true)
+    }
+
+    /// Whether the project is where it says it is.
+    ///
+    /// QuPath compares its `uri` field against the file it opened to tell a
+    /// moved project from one in place, and a moved project is worth saying: a
+    /// directory copied from another machine has entries whose URIs point at
+    /// slides that are not there, and "the project moved" is the explanation
+    /// for a list of rows that will not open.
+    ///
+    /// Compared as paths rather than as URI text, because the two spellings of
+    /// a `file:` URI are different strings for the same place — see
+    /// `project::uri_path`.
+    #[must_use]
+    pub fn moved(&self) -> bool {
+        self.stored
+            .uri
+            .as_deref()
+            .and_then(|uri| project::uri_path(uri).ok())
+            .is_some_and(|was| was != self.path)
+    }
+}
+
 /// The whole application.
 pub struct App {
     pub window: Option<Arc<Window>>,
@@ -414,6 +492,14 @@ pub struct App {
     /// file dialog's answer. Applied at the top of a frame, when the window
     /// size that `Viewport::fit` needs is known.
     pending: Option<PathBuf>,
+    /// A project asked for and not yet read, from the command line.
+    ///
+    /// Separate from [`App::pending`] rather than a tagged one, because the two
+    /// are not alternatives: `--` a project *and* a slide is a reasonable thing
+    /// to ask for, and a single slot would silently drop one of them. Applied
+    /// in the same place for the same reason, so there is one moment at which
+    /// what the command line asked for becomes what is open.
+    pending_project: Option<PathBuf>,
     dragging: bool,
     /// Where a right-drag began, while one is going.
     ///
@@ -531,9 +617,30 @@ pub struct App {
     /// image changes, and a user comparing two slides at the same range would
     /// have to dial it in twice otherwise.
     pub appearance: Appearance,
+    /// The project whose images the browser is listing, if any.
+    ///
+    /// Independent of [`App::open`] in both directions: a project can be open
+    /// with no slide showing, and a slide can be open that belongs to no
+    /// project. That is how a study is actually worked through — the list stays
+    /// up while the images under it are opened one after another.
+    pub project: Option<Project>,
+    /// Whether the project browser is showing.
+    pub show_project: bool,
 }
 
 impl App {
+    /// Whether a path is a project rather than a slide.
+    ///
+    /// By extension, which is what the file dialog filters on and what QuPath
+    /// registers. Reading the first bytes would be stronger and would also mean
+    /// a slow disk read before the window exists, for a distinction the file
+    /// name already makes.
+    #[must_use]
+    pub fn is_project(path: &Path) -> bool {
+        path.extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("qpproj"))
+    }
+
     #[must_use]
     pub fn new(path: Option<String>) -> Self {
         let context = egui::Context::default();
@@ -546,7 +653,8 @@ impl App {
             open: None,
             message: String::from("Open a slide to begin."),
             recent: Vec::new(),
-            pending: path.map(PathBuf::from),
+            pending: path.clone().map(PathBuf::from).filter(|path| !Self::is_project(path)),
+            pending_project: path.map(PathBuf::from).filter(|path| Self::is_project(path)),
             dragging: false,
             band: None,
             slide_area: None,
@@ -567,6 +675,8 @@ impl App {
             uploaded_overview: false,
             refit: false,
             unreported: false,
+            project: None,
+            show_project: false,
         }
     }
 
@@ -618,6 +728,56 @@ impl App {
             Err(error) => {
                 // Kept open. Failing to open a second slide must not close the
                 // first, which is the behaviour that makes a viewer annoying.
+                self.message = format!("{}: {error}", display_name(&path));
+            }
+        }
+    }
+
+    /// Opens a project, replacing whatever project was open.
+    ///
+    /// The slide showing is left alone, and deliberately: a project is a list,
+    /// and opening one does not say which of its images the user wants. The
+    /// alternative — opening the first entry — is a fifty-slide study deciding
+    /// for itself which slide someone wanted to look at.
+    ///
+    /// Every failure ends in [`App::message`] rather than a panic, for
+    /// [`Open::new`]'s reason: an unreadable file is an ordinary thing to be
+    /// handed.
+    pub fn open_project(&mut self, path: PathBuf) {
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) => {
+                self.message = format!("{}: {error}", display_name(&path));
+                return;
+            }
+        };
+        match project::read(&text) {
+            Ok(stored) => {
+                let images = stored.images.len();
+                let present = stored
+                    .images
+                    .iter()
+                    .map(|image| image.slide.as_ref().is_ok_and(|path| path.is_file()))
+                    .collect();
+                self.project = Some(Project {
+                    name: project_name(&path),
+                    path,
+                    stored,
+                    present,
+                });
+                self.show_project = true;
+                // Said in the status bar as well as shown in the pane, because
+                // a project of zero images opens a pane with nothing in it and
+                // the pane alone cannot distinguish that from one that failed.
+                self.message = match images {
+                    0 => String::from("The project has no images in it."),
+                    1 => String::from("1 image in the project."),
+                    many => format!("{many} images in the project."),
+                };
+            }
+            Err(error) => {
+                // The project already open is kept, for the reason a slide that
+                // will not open does not close the one showing.
                 self.message = format!("{}: {error}", display_name(&path));
             }
         }
@@ -907,6 +1067,10 @@ impl App {
                 self.run(Command::Open, window);
                 true
             }
+            Key::Character("p") => {
+                self.run(Command::OpenProject, window);
+                true
+            }
             Key::Character("d") => {
                 self.run(Command::Detect, window);
                 true
@@ -1120,10 +1284,44 @@ impl App {
                     window.request_redraw();
                 }
             }
-            Command::OpenRecent(path) => {
+            Command::OpenPath(path) => {
                 self.pending = Some(path);
                 window.request_redraw();
             }
+            Command::OpenProject => {
+                // Blocking and on the main thread, as `Open` is, and for the
+                // same reason.
+                let mut dialog = rfd::FileDialog::new()
+                    .set_title("Open a QuPath project")
+                    .add_filter("QuPath project", &["qpproj"])
+                    .add_filter("Any file", &["*"]);
+                // Beside the project already open before beside the last slide:
+                // someone opening a second project is far more likely to be in
+                // the directory of studies than in the directory of one study's
+                // slides.
+                if let Some(directory) = self
+                    .project
+                    .as_ref()
+                    .map(|project| project.path.as_path())
+                    .or_else(|| self.recent.first().map(PathBuf::as_path))
+                    .and_then(Path::parent)
+                {
+                    dialog = dialog.set_directory(directory);
+                }
+                if let Some(path) = dialog.pick_file() {
+                    self.open_project(path);
+                    window.request_redraw();
+                }
+            }
+            Command::CloseProject => {
+                // The slide stays open. Closing the list is not closing what is
+                // being looked at, and a viewer that shut the image because a
+                // list was dismissed would lose the view someone had navigated
+                // to.
+                self.project = None;
+                self.message = String::from("Project closed.");
+            }
+            Command::ToggleProject => self.show_project = !self.show_project,
             Command::Close => {
                 self.open = None;
                 self.uploaded_overview = false;
@@ -1208,6 +1406,12 @@ impl App {
     /// Draws one frame: the slide, then the interface over it.
     pub fn render(&mut self, window: &Arc<Window>) {
         let started = Instant::now();
+        // The project first: a slide named on the same command line is the one
+        // that should be showing when both arrive, and opening it second is
+        // what makes that true whichever order they were typed in.
+        if let Some(path) = self.pending_project.take() {
+            self.open_project(path);
+        }
         if let Some(path) = self.pending.take() {
             self.open(path);
         }
@@ -1659,6 +1863,24 @@ pub fn export_name(slide: Option<&Path>) -> String {
 }
 
 /// The file name of a path, for a title bar.
+/// What to call a project, following `DefaultProject.getName()`.
+///
+/// The study directory and the file, `study/project.qpproj`, because the file
+/// name alone is the same for every project there has ever been. Falls back to
+/// the file name when the path has no parent, which is a `.qpproj` at the root
+/// of a filesystem and not a project anyone has.
+#[must_use]
+pub fn project_name(path: &Path) -> String {
+    let directory = path
+        .parent()
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned());
+    match directory {
+        Some(directory) => format!("{directory}/{}", display_name(path)),
+        None => display_name(path),
+    }
+}
+
 pub fn display_name(path: &Path) -> String {
     path.file_name().map_or_else(
         || path.display().to_string(),

@@ -1858,6 +1858,50 @@ would take. What was missing was never only the pyramid — it was also what the
 block has to look like, and that part is no longer a matter of reading
 `ImageServerMetadata` and hoping.
 
+#### The browser pane, which is what §8.8 asked for
+
+`project.rs` had no caller. It has one: a left-hand pane listing the images in
+the project that is open, a `File` menu that opens one, `p` on the keyboard, and
+a `.qpproj` on the command line —
+`cargo run -p qupath-app --release -- study/project.qpproj`.
+
+**Opening a project does not open an image.** A study is fifty slides and a
+project says nothing about which of them someone wants; opening the first would
+be a wait nobody asked for. A row is a click, and it sends the same command the
+recent menu and the welcome screen send — `OpenPath`, renamed from `OpenRecent`
+for exactly that reason: three places mean the same act and only one of them is
+about recency.
+
+**A row is a name, not a thumbnail**, and that is `thumbnail.jpg` again. It is
+the one file of an entry's four this workspace cannot produce, so a grid would
+be placeholders for every project this application wrote and pictures for every
+project it did not. A list is the same information for both.
+
+**Every row is shown, including the ones that will not open.** A slide that is
+not on disk is marked in the warning colour with the path on hover; an entry
+built by one of the sixteen transforms QuPath supports is greyed with the reason
+under it. Dropping either would show a project with fewer images than it has.
+The disk check runs **once**, when the project is opened — a `stat` per row per
+frame is a syscall storm for an answer that changes when a drive is plugged in,
+and the staleness is bounded because clicking the row still tries the file and
+reports what happened. QuPath checks on open for the same reason.
+
+A moved project is said once at the top rather than fifty times below: the `uri`
+field against the file that was actually opened, compared as paths because the
+two spellings of a `file:` URI are different strings for the same place.
+
+The pane is headed by QuPath's own `getName()` — `study/project.qpproj`, the
+directory *and* the file — because every project file there has ever been is
+called `project.qpproj`, and a browser headed with the file name heads every
+project identically.
+
+What is **not** here is writing: no way to create a project and no way to add a
+slide to one. That is §8.8's next entry, and the reason it is a separate one is
+that rewriting a project's index means writing back entries this reader
+summarises rather than preserves — an entry's `description`, its metadata map,
+its tags, and any server metadata block. Losing those is data loss, and it is
+silent.
+
 ### 8.4 The overview — the invariant is that the two mappings agree
 
 `overview.rs` is `ImageOverview.java`'s arithmetic: slide to overview, which
@@ -2302,11 +2346,15 @@ exactly what the supersede did to them.
 
 In the order it is worth having.
 
-- **The project browser pane.** §8.3's format is written and nothing in the
-  application creates or opens a project, so `project.rs` is a library with no
-  caller. Writing the pane is what would make it real; it is also the point at
-  which the §0 argument deserves revisiting rather than being treated as
-  settled once.
+- **Creating a project, and adding a slide to one — the half of the browser
+  that writes.** The pane is written (§8.3) and it only reads. Creating a
+  project from scratch is safe, because every entry in it is one this wrote.
+  *Adding* to a project QuPath wrote is not: rewriting the index means writing
+  back entries the reader summarises rather than preserves — a `description`, a
+  metadata map, tags, a server metadata block — and dropping those is silent
+  data loss. What would make it safe is a reader that keeps what it does not
+  interpret, and the test for that is a project file re-serialised byte for
+  byte.
 - **`data.qpdata`, which should stay missing.** Java serialisation tied to
   Java's object graph. A guessed version is how a project becomes corrupt in a
   way someone discovers much later, having trusted it. The detections belong
@@ -2314,6 +2362,11 @@ In the order it is worth having.
 - **A JPEG encoder for `thumbnail.jpg`.** `project.rs` returns the JSON files
   and leaves the thumbnail to the caller, because nothing in this workspace
   encodes JPEG. QuPath tolerates its absence.
+- **Driving the real window.** The application has been launched on a project
+  and photographed — `WINIT_X11_SCALE_FACTOR=2`, the list drawn, no stderr —
+  but nothing has *clicked* a row, and the click is where `OpenPath` meets
+  `Open::new`. The same hole as the overview's click-to-jump and escape during
+  a run: reachable only with a hand on the machine.
 - **A look at the interface in a real window — started, and it paid at once.**
   The application has now been run and photographed on X11 at
   `WINIT_X11_SCALE_FACTOR=2`, which is what an offscreen render cannot be: a

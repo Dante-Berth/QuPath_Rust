@@ -41,6 +41,16 @@ fn main() {
     app.show_help = true;
     render("chrome-everything.png", &mut app);
 
+    // The project browser, in the three states a row can be in: a slide that is
+    // there, one that is not, and an entry this cannot open at all. All three
+    // are reachable from an ordinary project and none of them is reachable
+    // without a project on disk, which is why this writes one.
+    let mut app = App::new(None);
+    app.show_metadata = true;
+    app.show_overview = true;
+    app.open_project(sample_project());
+    render("chrome-project.png", &mut app);
+
     // And with a slide, which is the state the controls exist for: the empty
     // panels above are what a first-time user meets, and these are what
     // everyone else does. The path is optional so the example still runs on a
@@ -57,6 +67,79 @@ fn main() {
         app.appearance.channel = qupath_app::state::Channel::Haematoxylin;
         render("chrome-slide-stain.png", &mut app);
     }
+}
+
+/// Writes a project to a temporary directory and returns its `.qpproj`.
+///
+/// Written with `project::files` rather than by hand, so the picture is of a
+/// project this application would actually produce — the same reason
+/// `parity/samples/` is generated rather than committed as text.
+///
+/// The three rows are chosen for the three states:
+///
+/// - a slide that **is** there. The file is created empty; nothing here opens
+///   it, and the browser's mark is `Path::is_file`;
+/// - a slide that **is not**. A study directory copied without its images is
+///   the ordinary way this happens, and it is the state a browser exists to
+///   make visible before fifty clicks do;
+/// - an entry this **cannot open**, which needs one of the sixteen builder
+///   types that wrap another builder. There is no way to write one with
+///   `project.rs`, because writing one is exactly what it refuses to do, so the
+///   discriminator is edited into the file afterwards. That is a picture of a
+///   file QuPath writes and this reads, which is what the row is for.
+fn sample_project() -> std::path::PathBuf {
+    use qupath_viewer::project::{self, Entry, Timestamps};
+
+    let directory = std::env::temp_dir().join("qupath-rust-chrome-project");
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("a temporary project directory");
+
+    let here = directory.join("CMU-1-Small-Region.svs");
+    std::fs::write(&here, b"").expect("a stand-in slide");
+    let gone = directory.join("CMU-1, JP2K.svs");
+    let rotated = directory.join("CMU-1 rotated.svs");
+
+    let entries = [
+        Entry {
+            path: &here,
+            name: "CMU-1 small region",
+            width: 2220,
+            height: 2967,
+        },
+        Entry {
+            path: &gone,
+            name: "CMU-1, JP2K",
+            width: 46_000,
+            height: 32_914,
+        },
+        Entry {
+            path: &rotated,
+            name: "CMU-1, rotated 90°",
+            width: 32_914,
+            height: 46_000,
+        },
+    ];
+
+    let project = directory.join("project.qpproj");
+    for file in project::files(&project, &entries, Timestamps::now()) {
+        let path = directory.join(&file.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("an entry directory");
+        }
+        // The last entry's builder is rewritten to one QuPath registers and
+        // `project.rs` will not write. `rsplit_once` so it lands on the last
+        // occurrence and the two above it are untouched.
+        let contents = if file.path == "project.qpproj" {
+            match file.contents.rsplit_once("\"builderType\": \"uri\"") {
+                Some((before, after)) => format!("{before}\"builderType\": \"rotated\"{after}"),
+                None => file.contents.clone(),
+            }
+        } else {
+            file.contents.clone()
+        };
+        std::fs::write(&path, contents).expect("write a project file");
+    }
+    project
 }
 
 /// Lays the interface out and rasterises it.

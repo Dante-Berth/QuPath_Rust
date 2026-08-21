@@ -34,11 +34,14 @@
 //! ```text
 //! cargo run -p qupath-app --release
 //! cargo run -p qupath-app --release -- data/CMU-1.svs
+//! cargo run -p qupath-app --release -- study/project.qpproj
 //! ```
 //!
 //! A path on the command line is opened at startup; without one the window
-//! comes up empty and asks for a slide. `--release` matters: a debug build
-//! decodes JPEG tiles slowly enough to be annoying.
+//! comes up empty and asks for a slide. A `.qpproj` opens as a project and
+//! lists its images without opening any of them, which is what a project is
+//! for. `--release` matters: a debug build decodes JPEG tiles slowly enough to
+//! be annoying.
 
 use winit::event_loop::{ControlFlow, EventLoop};
 
