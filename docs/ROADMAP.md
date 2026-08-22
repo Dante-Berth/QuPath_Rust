@@ -524,12 +524,42 @@ ratio measured on a synthetic input is not that ratio on a real one**, which is
 What remains — the old list's steps 4 and 5, with one added — none of which
 changes how many objects the pipeline finds:
 
-- **Step 4, ROI vertices — the contour is done; smoothing is not.**
+- **Step 4, ROI vertices — done, contour and smoothing both.**
   `qupath-watershed`'s `outline` traces the vertex list QuPath's `PathObject`
   carries, pinned against ImageJ's own Wand by `WandOutline.json` over nine
-  cases. What is left of this step is `smoothBoundaries`, which D-008 needs and
-  which is the interpolate/smooth/interpolate chain at
-  `WatershedCellDetection`'s line 925.
+  cases, and `smooth_boundary` runs `smoothBoundaries` over it — the
+  interpolate/smooth/interpolate/simplify chain at `WatershedCellDetection`'s
+  lines 925-933 — pinned stage by stage by `SmoothBoundaries.json` over twelve.
+
+  Every intermediate is compared, not only the polygon that comes out, because
+  stage three's interpolation interval is `min(2, n * 0.1)` over the count
+  **stage two** produced: a stage two of the right shape and the wrong length
+  respaces everything after it and can still land close to the recorded end.
+
+  Four things in that chain are not what they look like, and the last one is
+  the reason the fixture exists rather than a careful reading:
+
+  - `getInterpolatedPolygon` **closes the ring** before walking it, so four
+    vertices go in and five come out, and it is the five that stage two's
+    stride counts over.
+  - `smoothPolygonRoi` steps `i += 2` and so **halves** the ring. It is not a
+    3-point moving average, though `ShapeSimplifier.smoothPoints` — public, in
+    the same codebase, and the one actually named "smooth" — is exactly that.
+  - A **coarser downsample simplifies less**. The threshold is
+    `sqrt(downsample)/2` while the coordinates scale by `downsample`, so the
+    polygon outgrows the tolerance: `ell` keeps 3 points at downsample 1 and 7
+    at downsample 4. At downsample 1 the scaling is the identity and the whole
+    interaction is invisible, which is why the fixture records two.
+  - `getInterpolatedPolygon`'s `allowToAdjust` is **`interval < 0`**, not
+    `>= 0`. A negative interval asks ImageJ to converge the spacing until the
+    ring closes evenly; a positive one asks for exactly that spacing with a
+    short last segment. Reading the bytecode's `dcmpg; ifge` the natural way
+    round inverts this, and it fails quietly rather than loudly: the
+    convergence loop then runs on every call, a unit square converges near
+    0.87, and every vertex comes back slightly off. What settled it was asking
+    ImageJ rather than reading it — a 3x2 rectangle interpolated at 1.0, 3.0
+    and 0.7 comes back with steps of exactly those, which is only possible if
+    the loop never runs. §5's lesson again, applied to a branch.
 
   Four things the fixture settled, and three would have been guessed wrong:
   vertices sit on pixel **corners**, not centres; collinear runs emit **only
@@ -556,6 +586,10 @@ changes how many objects the pipeline finds:
   depends on which vertex is written first.
 - **Step 4b, cell expansion**, which D-008 shows is not optional for the count
   claim even though it adds no objects — the seam resolution runs on cells.
+  With smoothing landed this is now the **only** thing between here and D-008,
+  and the tempting shortcut is worth naming: smoothing the nuclei and resolving
+  on those would look like progress and close nothing, because it would compare
+  smoothed nuclei where QuPath compares smoothed cells.
 - **Step 5, measurements**, into the columnar table `qupath-objects` already
   provides.
 

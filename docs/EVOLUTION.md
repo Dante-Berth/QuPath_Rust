@@ -26,6 +26,56 @@ inside one function belongs in that function's doc comment, not here.
 
 ---
 
+## 2026-08 — Decompiled bytecode is a source you can misread, not a source of truth
+
+`cd18b4e`
+
+`smoothBoundaries` calls ImageJ's `getInterpolatedPolygon`, whose source is not
+in the checkout — only the compiled `ij-1.54p` jar. `javap -c` gives the whole
+method, so it looked like the problem was solved: read the bytecode, port it.
+
+The first two branches of that method are
+
+```text
+0: dload_2        // interval
+1: dconst_0
+2: dcmpg
+3: ifge 10        // -> push 0
+6: iconst_1       // else push 1
+```
+
+which is `allowToAdjust = interval < 0`. It was read as `interval >= 0`, the
+natural way round for a flag named "allow", and that inversion enables a
+50-iteration convergence loop on **every** call. It does not fail loudly: a
+unit square converges on an interval near 0.87 and comes back with four
+vertices in roughly the right places, all slightly wrong. Hours went into the
+convergence loop's control flow — which was correct — because the failure
+looked like a convergence bug.
+
+What settled it took one file: call the real `getInterpolatedPolygon` on a 3x2
+rectangle at 1.0, 3.0 and 0.7, and look at the step lengths. They are exactly
+1.0, 3.0 and 0.7, with a short final segment. That is only possible if the
+convergence loop never runs, which pins the flag's sense in one observation
+and says nothing about the loop at all.
+
+**Transferable:** `javap -c` output reads like source and is not source — every
+comparison in it is a sense you can invert, with no name, no comment and no
+type to catch you. It is worth having, but as a *hypothesis generator*: the
+thing that decides between two readings is running the method and looking at
+what comes out. This is `read-it-with-their-reader` arriving from a third
+direction — first their reader over our files, then their writer to get theirs,
+now their function to settle what their code means. It also cost the most of
+the three, because a decompiler feels authoritative in a way a summary does
+not, so the reading went unquestioned longest.
+
+**The corollary is where the fixture earned its keep.** `SmoothBoundaries.json`
+records every intermediate of the chain, not just the polygon that comes out.
+That is what made this debuggable at all: the failure reported
+`single_pixel/interpolated: point 1 is (1.132, 2), QuPath has (1, 2)` — first
+stage, first case, one coordinate. Had only the final polygon been recorded,
+the same bug would have surfaced four stages downstream as a different point
+count, and the interval's sign is not what anyone would have suspected.
+
 ## 2026-08 — A blocker is a claim about a test that was run
 
 `875dd7d`, `94cfdc4`

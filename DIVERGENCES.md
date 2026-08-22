@@ -257,12 +257,29 @@ different objects.
 that runs over the vertex list. Nothing in `overlaps.rs` can be made to match
 until both are, and stubbing either would be §10's plausible wrong value.
 
-**One of the two is now half-answered.** The vertex list itself exists —
-`qupath-watershed`'s `outline` traces it, pinned against ImageJ's Wand by
-`WandOutline.json`, and `ROADMAP.md` §1.5b step 4 has what that cost. What is
-still missing is `smoothBoundaries`, the interpolate/smooth/interpolate chain
-this entry turns on, and cell expansion. So the polygon exists to be smoothed;
-nothing smooths it yet, and this entry stands unchanged until something does.
+**One of the two is now answered.** The smoothed polygon exists.
+`qupath-watershed`'s `outline` traces the vertex list, pinned against ImageJ's
+Wand by `WandOutline.json`, and `smooth_boundary` runs the whole
+interpolate/smooth/interpolate/simplify chain over it, pinned stage by stage
+against `SmoothBoundaries.json`. So `geometry.getArea()` of the polygon this
+entry turns on is now computable here.
+
+**What still blocks the entry is cell expansion alone.** The rule compares two
+*cells*, and `PathObjectTools.getROI(pathObject, false)` returns the cell
+boundary; there are no cell objects here to smooth. Smoothing the nuclei and
+comparing those would be a change that looks like progress and closes nothing —
+it would compare smoothed nuclei where QuPath compares smoothed cells, which is
+the same wrong-object error this entry already describes, carried out more
+precisely. So the entry stands, with one of its two prerequisites removed
+rather than both.
+
+**One thing the port found that this entry should carry forward.** ImageJ's
+`getInterpolatedPolygon` treats a *negative* interval as "adjust the spacing
+until the ring closes evenly" and a positive one as "use exactly this spacing".
+The chain passes positive intervals, so the polygon's vertices are not evenly
+spaced around the ring and its last segment is short. Anything later reasoning
+about this polygon as a uniform resampling of the boundary — a perimeter from
+the point count, say — would be wrong for that reason.
 
 **Direction of the error, and it is not neutral.** A cell is strictly larger than
 its nucleus, so two copies of the same object across a 60 px band intersect more
@@ -295,8 +312,8 @@ QuPath on 17 images and they pass, which puts the suspicion on what reaches
 them — the background estimate and its threshold — rather than on the tests.
 
 **Status:** known, quantified in direction, contributes but does not dominate.
-Unfixable before cell expansion and boundary smoothing land (`docs/ROADMAP.md` §1.5b
-steps 4 and 5). The density-dependent remainder is a separate and currently
+Boundary smoothing has landed; unfixable before **cell expansion** does
+(`docs/ROADMAP.md` §1.5b step 4b). The density-dependent remainder is a separate and currently
 unexplained divergence; see `docs/MEMO.md` §2.
 
 ## D-009 — The count gap concentrates in the merge and the shape split, on clumped tissue
