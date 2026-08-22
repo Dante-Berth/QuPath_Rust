@@ -3032,13 +3032,42 @@ In the order it is worth having.
   Java's object graph. A guessed version is how a project becomes corrupt in a
   way someone discovers much later, having trusted it. The detections belong
   beside it as GeoJSON, which both sides can read.
-- **A JPEG encoder for `thumbnail.jpg`, which is a debt to QuPath and not to
-  this browser.** `project.rs` returns the JSON files and leaves the thumbnail
-  to the caller, because nothing in this workspace encodes JPEG. QuPath
-  tolerates its absence — its browser makes the picture itself, which is what
-  this one now does — so what the file buys is QuPath not re-reading every slide
-  in a study the first time it opens it. Worth having, and no longer in front of
-  anything.
+- ~~**A JPEG encoder for `thumbnail.jpg`.**~~ **Done, and QuPath reads what it
+  writes.** `thumbnails::encode_jpeg` encodes the picture the browser already
+  makes, and `add_to_project` writes it beside the entry's JSON. What the file
+  buys is what this entry always said: QuPath not re-reading every slide in a
+  study the first time it opens it. It was never in front of anything.
+
+  It lives in `qupath-app`, not in `qupath-viewer`, and that is the §7 rule
+  holding rather than an accident — the crate that defines the format depends on
+  `qupath-slide` alone, and `project::files` already said it returns the JSON and
+  leaves this file to its caller. `Output::contents` is a `String`; these are
+  bytes. The dependency is `image` with `default-features = false` and only
+  `jpeg`, which adds **no new crate to the tree**: `image` was already there
+  through `arboard` under `egui-winit`. `zune-jpeg`, which reads the tiles, is
+  decode-only.
+
+  **The alpha channel is the whole trap, and it is a §6 failure exactly.**
+  `Thumbnail::pixels` is RGBA because a texture upload wants it; JPEG has no
+  alpha. Handing four-channel data to an encoder expecting three does not fail —
+  it reads each pixel's fourth byte as the next one's first, so the picture
+  shears by a channel and slides further out of register down the image. It
+  produces a valid JPEG of the right size in false colour. The size-only test
+  passes on it; only decoding and comparing against the source pixels catches
+  it, which is what `a_thumbnail_round_trips_through_a_decoder` does — and it
+  was confirmed by reintroducing the bug and watching that test go red while the
+  other stayed green. It decodes with `zune-jpeg` rather than with `image`, so
+  the check is not one implementation agreeing with itself.
+
+  **And then QuPath was asked to read one.** `ProjectImport`'s
+  `thumbnailReadable` had recorded `false` for as long as it existed, which
+  measured only that QuPath tolerates the file's absence — it could never say
+  whether a JPEG written here is one `ImageIO.read` accepts. `record-project.sh`
+  now writes thumbnails before recording, and the field reads **`true`**. The
+  JP2K entry still reads `false`, because this project cannot decode its pixels
+  (§3) and so writes it no thumbnail: one recording now carries both the format
+  being accepted and the absence still being tolerated, which is a better
+  fixture than either alone.
 - **Driving the real window.** The application has been launched on a project
   and a slide together and photographed — `WINIT_X11_SCALE_FACTOR=2`, the list
   drawn, the add button live, no stderr — and those photographs are what found

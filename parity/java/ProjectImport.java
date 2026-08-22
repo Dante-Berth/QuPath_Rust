@@ -25,13 +25,16 @@ import java.nio.file.Path;
  * point at a file that exists, and the metadata block — which is where a
  * width, a height and a pixel size go in and come back out.
  *
- * <p>Three of the four files QuPath expects per entry are written by
- * {@code project.rs} and two are deliberately absent: no {@code thumbnail.jpg},
- * because nothing in that workspace encodes JPEG, and no {@code data.qpdata},
- * because it is Java serialisation and a guessed one is how a project becomes
- * corrupt in a way someone discovers later. {@code hasImageData} and
- * {@code thumbnailReadable} are recorded so that "QuPath tolerates their
- * absence" is a measurement rather than an expectation.
+ * <p>{@code data.qpdata} is deliberately absent — Java serialisation, and a
+ * guessed one is how a project becomes corrupt in a way somebody discovers much
+ * later. {@code thumbnail.jpg} is now written, by {@code qupath-app}'s
+ * {@code project_thumbnails} example, so {@code thumbnailReadable} records
+ * something it never could before: whether {@code ImageIO.read} accepts a JPEG
+ * that workspace encoded. It reads {@code true} for the slide whose pixels can
+ * be decoded and {@code false} for the JPEG 2000 one, which has no thumbnail at
+ * all — so one recording carries both the format being accepted and the absence
+ * still being tolerated. {@code hasImageData} keeps the latter role for
+ * {@code data.qpdata}.
  *
  * <p>Paths are <b>not</b> recorded, only file names and booleans. A project's
  * URIs are absolute, so recording them would put the machine that ran the

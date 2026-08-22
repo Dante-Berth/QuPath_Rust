@@ -109,6 +109,66 @@ pub fn make(slide: &Slide) -> Result<Thumbnail, String> {
     Ok(Thumbnail { pixels, overview })
 }
 
+/// JPEG quality for `thumbnail.jpg`.
+///
+/// QuPath writes the file with `ImageIO.write(img, "JPEG", stream)` and so takes
+/// the JDK's default, which is 0.75. Matching it is deliberate: this file is a
+/// *cache* of a picture either side can regenerate, so the only thing a
+/// different quality would buy is a project whose thumbnails visibly change
+/// depending on which application last touched them.
+const THUMBNAIL_QUALITY: u8 = 75;
+
+/// Encodes a thumbnail as the JPEG QuPath stores at `data/<id>/thumbnail.jpg`.
+///
+/// # What this is for, and what it is not
+///
+/// It is **not** what makes the browser's rows show a picture. That was the
+/// reasoning §8.8 carried for a long time, and the module comment above has why
+/// it was wrong: QuPath's own browser opens the image when the file is absent,
+/// and so does this one. Nothing here is waiting on this function.
+///
+/// What it buys is QuPath not re-reading every slide in a study the first time
+/// somebody opens a project written here — the file is a cache, and writing it
+/// is a debt to *QuPath*, not to this browser.
+///
+/// # The alpha channel, which is the whole trap
+///
+/// [`Thumbnail::pixels`] is **RGBA**, because that is what a texture upload
+/// wants. JPEG has no alpha. Handing four-channel data to an encoder expecting
+/// three does not fail — it reads the fourth byte of each pixel as the first of
+/// the next, so every row shears by one channel and the picture comes out in
+/// false colour, sliding further out of register the further down it goes. That
+/// is a `docs/VIEWER.md` §6 failure exactly: plausible output, wrong. The alpha
+/// is dropped here explicitly, and `a_thumbnail_round_trips_through_a_decoder`
+/// checks the result against the source pixels rather than merely checking that
+/// bytes were produced.
+///
+/// # Errors
+///
+/// Fails if `pixels` is not `width * height * 4` bytes, or if the encoder does.
+pub fn encode_jpeg(thumbnail: &Thumbnail) -> Result<Vec<u8>, String> {
+    let (width, height) = thumbnail.overview.size();
+    let expected = width as usize * height as usize * 4;
+    if thumbnail.pixels.len() != expected {
+        return Err(format!(
+            "the thumbnail is {} bytes, not the {expected} that {width} by {height} RGBA needs",
+            thumbnail.pixels.len()
+        ));
+    }
+
+    // RGBA to RGB. See the note above: this is the step that cannot be skipped.
+    let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
+    for pixel in thumbnail.pixels.chunks_exact(4) {
+        rgb.extend_from_slice(&pixel[..3]);
+    }
+
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, THUMBNAIL_QUALITY)
+        .encode(&rgb, width, height, image::ExtendedColorType::Rgb8)
+        .map_err(|error| error.to_string())?;
+    Ok(out)
+}
+
 /// One picture, on its way back from the worker.
 struct Made {
     /// Which row asked for it, in `project::Stored::images` order.
@@ -334,4 +394,119 @@ fn spawn(queue: Vec<(usize, PathBuf)>, stop: Arc<AtomicBool>) -> Receiver<Made> 
         }
     });
     receiver
+}
+
+#[cfg(test)]
+mod tests {
+    use qupath_viewer::overview::Overview;
+    use zune_jpeg::JpegDecoder;
+    use zune_jpeg::zune_core::colorspace::ColorSpace;
+    use zune_jpeg::zune_core::options::DecoderOptions;
+
+    use super::{Thumbnail, encode_jpeg};
+
+    /// A thumbnail with a horizontal red ramp and a vertical green one.
+    ///
+    /// A gradient rather than flat colour on purpose: a flat picture survives
+    /// the channel shear this test exists to catch, because every pixel is the
+    /// same and sliding the phase changes nothing. `ROADMAP.md` §5's "plausible
+    /// wrong output" applies to test *inputs* too.
+    fn ramp(width: u32, height: u32) -> Thumbnail {
+        let overview = Overview::fit(width * 4, height * 4).expect("a slide size that fits");
+        let (width, height) = overview.size();
+        let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
+        for row in 0..height {
+            for column in 0..width {
+                let red = u8::try_from(column * 255 / width.max(1)).unwrap_or(255);
+                let green = u8::try_from(row * 255 / height.max(1)).unwrap_or(255);
+                pixels.extend_from_slice(&[red, green, 64, 255]);
+            }
+        }
+        Thumbnail { pixels, overview }
+    }
+
+    /// The bytes are a JPEG a decoder accepts, at the size that was asked for.
+    #[test]
+    fn a_thumbnail_encodes_to_a_jpeg() {
+        let thumbnail = ramp(64, 48);
+        let (width, height) = thumbnail.overview.size();
+        let encoded = encode_jpeg(&thumbnail).expect("it encodes");
+
+        assert_eq!(
+            &encoded[..2],
+            &[0xFF, 0xD8],
+            "a JPEG starts with SOI, and QuPath reads this with ImageIO"
+        );
+
+        let mut decoder = JpegDecoder::new_with_options(
+            &encoded[..],
+            DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB),
+        );
+        let decoded = decoder.decode().expect("it decodes");
+        assert_eq!(
+            decoded.len(),
+            width as usize * height as usize * 3,
+            "the decoded picture is not the size that was encoded"
+        );
+    }
+
+    /// The picture that comes back is the picture that went in.
+    ///
+    /// This is the test that matters, and the alpha channel is why. Handing
+    /// RGBA to an encoder that wants RGB does not fail: it reads each pixel's
+    /// fourth byte as the next pixel's first, so the image shears by one
+    /// channel and slides further out of register down the picture. The result
+    /// is a plausible-looking JPEG in false colour — `docs/VIEWER.md` §6's
+    /// recurring failure. Comparing corners against the source is what sees it;
+    /// checking that bytes were produced is not.
+    ///
+    /// The tolerance is for JPEG being lossy, and is far tighter than the shear:
+    /// dropping a channel moves red at the right-hand edge by nearly the full
+    /// range.
+    #[test]
+    fn a_thumbnail_round_trips_through_a_decoder() {
+        let thumbnail = ramp(64, 48);
+        let (width, height) = thumbnail.overview.size();
+        let encoded = encode_jpeg(&thumbnail).expect("it encodes");
+
+        let mut decoder = JpegDecoder::new_with_options(
+            &encoded[..],
+            DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB),
+        );
+        let decoded = decoder.decode().expect("it decodes");
+
+        for (row, column) in [
+            (0, 0),
+            (0, width - 1),
+            (height - 1, 0),
+            (height - 1, width - 1),
+            (height / 2, width / 2),
+        ] {
+            let source = (row as usize * width as usize + column as usize) * 4;
+            let target = (row as usize * width as usize + column as usize) * 3;
+            for channel in 0..3 {
+                let want = i32::from(thumbnail.pixels[source + channel]);
+                let got = i32::from(decoded[target + channel]);
+                assert!(
+                    (want - got).abs() <= 24,
+                    "channel {channel} at {row},{column}: wrote {want}, read back {got}"
+                );
+            }
+        }
+    }
+
+    /// Pixels that are not RGBA are refused rather than encoded as something.
+    ///
+    /// The failure this prevents is silent: a buffer one pixel short still
+    /// encodes, into a picture shifted by a channel.
+    #[test]
+    fn a_thumbnail_of_the_wrong_length_is_refused() {
+        let mut thumbnail = ramp(64, 48);
+        thumbnail.pixels.truncate(thumbnail.pixels.len() - 4);
+        let error = encode_jpeg(&thumbnail).expect_err("a short buffer is refused");
+        assert!(
+            error.contains("RGBA"),
+            "the error should say what was wrong: {error}"
+        );
+    }
 }

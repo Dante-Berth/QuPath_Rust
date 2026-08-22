@@ -47,6 +47,15 @@ source "$root/parity/classpath.sh"
 fixtures="$root/parity/fixtures"
 mkdir -p "$fixtures"
 
+# The thumbnails, from the crate that has the encoder. Separate from the writer
+# above because `qupath-viewer` depends on `qupath-slide` alone and cannot
+# encode a JPEG; see the example's own comment. Without this, ProjectImport's
+# `thumbnailReadable` records only that QuPath tolerates the file's absence,
+# which is not the same as knowing our JPEG is one ImageIO reads.
+echo "==> writing thumbnails" >&2
+(cd "$root" && cargo run --quiet -p qupath-app --example project_thumbnails -- \
+    "$study" "$slide" "$second" >/dev/null)
+
 echo "==> recording ProjectImport" >&2
 # Recorders write JSON to stdout; SLF4J and JVM warnings go to stderr. Written
 # to a temporary file first: a recorder that fails must not leave the committed

@@ -1051,6 +1051,10 @@ impl App {
             height,
         };
 
+        // The directory this entry's files will land in, taken before `added`
+        // consumes the index: `next_id` is the id it will be issued, and the
+        // entry directory is named after it.
+        let id = project.stored.next_id();
         let files = project::added(&project.stored, &[entry], project::Timestamps::now());
         let path = project.path.clone();
         let directory = path.parent().unwrap_or(&path).to_path_buf();
@@ -1058,8 +1062,31 @@ impl App {
             self.message = error;
             return;
         }
+
+        // `thumbnail.jpg`, which QuPath caches so that opening a study does not
+        // re-read every slide in it. Written after the JSON and not through
+        // `project::files`, for two reasons: `Output::contents` is a `String`
+        // and these are bytes, and this file is the one part of an entry that
+        // is a *cache* rather than a fact — QuPath regenerates it from the
+        // pixels when it is absent, and so does this browser.
+        //
+        // Which is also why a failure here is not a failure of the add. The
+        // entry is already written and correct; a project missing a thumbnail
+        // is one both applications handle. Saying nothing would be wrong, so it
+        // rides along on the message rather than replacing it.
+        let thumbnail = crate::thumbnails::make(open.slide())
+            .and_then(|thumbnail| crate::thumbnails::encode_jpeg(&thumbnail))
+            .and_then(|bytes| {
+                let at = directory.join(format!("data/{id}/thumbnail.jpg"));
+                std::fs::write(&at, bytes)
+                    .map_err(|error| format!("Could not write {}: {error}", at.display()))
+            });
+
         self.open_project(path);
-        self.message = format!("Added {name} to the project.");
+        self.message = match thumbnail {
+            Ok(()) => format!("Added {name} to the project."),
+            Err(reason) => format!("Added {name} to the project, without a thumbnail: {reason}"),
+        };
     }
 
     /// Writes entry `id`'s metadata back to the project on disk.
@@ -1758,8 +1785,8 @@ impl App {
                 }
             }
             Command::NewProject => {
-                let mut dialog = rfd::FileDialog::new()
-                    .set_title("Choose a directory for the new project");
+                let mut dialog =
+                    rfd::FileDialog::new().set_title("Choose a directory for the new project");
                 if let Some(directory) = self
                     .project
                     .as_ref()

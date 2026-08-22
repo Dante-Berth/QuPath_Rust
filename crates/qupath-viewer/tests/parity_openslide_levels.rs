@@ -96,7 +96,7 @@ fn check(name: &str, fixture: &str) {
         "level count for {name}: OpenSlide keeps a different set of directories"
     );
     assert_eq!(
-        number(fixture, "levelCount") as usize,
+        usize::try_from(number(fixture, "levelCount")).expect("a level count"),
         recorded.len(),
         "the fixture's own levelCount disagrees with the levels it lists"
     );

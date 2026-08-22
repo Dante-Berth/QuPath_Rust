@@ -25,6 +25,23 @@ png = "0.18"
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
 softbuffer = "0.4"
 winit = "0.30"
+# Encodes `thumbnail.jpg`, which is what a project written here owes QuPath —
+# see `thumbnails::encode_jpeg`. `default-features = false` with only `jpeg` on
+# purpose: the default set pulls every codec this application never writes.
+#
+# Not a new crate in the tree. `image` is already there transitively, through
+# `arboard` under `egui-winit`; what this line adds is the `jpeg` feature and a
+# direct name to call. `zune-jpeg`, which `qupath-slide` reads tiles with, is
+# decode-only and could not have done it.
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# Decodes what `encode_jpeg` wrote, so the round-trip test is checked by a
+# *different* implementation than the one that produced it. Encoding with
+# `image` and decoding with `image` would agree about a shared misreading of
+# the pixel layout; this is the same reason the parity fixtures exist at all.
+# It is already the workspace's decoder, through `qupath-slide`.
+zune-jpeg = "0.4"

@@ -65,7 +65,9 @@ fn text<'a>(block: &'a str, key: &str) -> &'a str {
         + needle.len();
     let rest = &block[at..];
     if let Some(body) = rest.strip_prefix('"') {
-        let end = body.find('"').expect("an unterminated string in the fixture");
+        let end = body
+            .find('"')
+            .expect("an unterminated string in the fixture");
         return &body[..end];
     }
     let end = rest.find([',', '\n']).unwrap_or(rest.len());
@@ -115,7 +117,10 @@ fn qupath_reads_back_the_entries_it_was_given() {
     // dispatches on it, so a project claiming a version it does not match is
     // read by the wrong code path.
     assert!(
-        FIXTURE.contains(&format!("\"version\": \"{}\"", qupath_viewer::project::FORMAT_VERSION)),
+        FIXTURE.contains(&format!(
+            "\"version\": \"{}\"",
+            qupath_viewer::project::FORMAT_VERSION
+        )),
         "the recorded project claims a different format version"
     );
     // `uri` is the field QuPath compares to tell a moved project from one in
@@ -181,10 +186,25 @@ fn qupath_reads_back_the_entries_it_was_given() {
             "false",
             "data.qpdata is Java serialisation and is not attempted"
         );
+        // The thumbnail is now written, and QuPath reads it — but only for
+        // slides whose pixels this project can decode. `CMU-1-JP2K-33005.svs`
+        // is Aperio JPEG 2000 (§3), so its entry has no thumbnail at all, and
+        // that is a state QuPath handles by making the picture itself.
+        //
+        // Asserted per entry rather than as one value, because a single
+        // recording now carries both answers and collapsing them would lose the
+        // half that is evidence: `true` is `ImageIO.read` accepting a JPEG this
+        // workspace encoded, which is the only thing that could confirm it.
+        let expected = if text(block, "slideFileName").starts_with("CMU-1-JP2K") {
+            "false"
+        } else {
+            "true"
+        };
         assert_eq!(
             text(block, "thumbnailReadable"),
-            "false",
-            "nothing in this workspace encodes JPEG"
+            expected,
+            "thumbnail for {}",
+            text(block, "slideFileName")
         );
         assert!(
             text(block, "summary").contains("No data file"),

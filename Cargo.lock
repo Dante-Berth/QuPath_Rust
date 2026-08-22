@@ -1436,6 +1436,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core 0.5.3",
+ "zune-jpeg 0.5.15",
 ]
 
 [[package]]
@@ -2376,6 +2378,7 @@ dependencies = [
  "bytemuck",
  "egui",
  "egui-winit",
+ "image",
  "png",
  "qupath-pipeline",
  "qupath-slide",
@@ -2383,6 +2386,7 @@ dependencies = [
  "rfd",
  "softbuffer",
  "winit",
+ "zune-jpeg 0.4.21",
 ]
 
 [[package]]

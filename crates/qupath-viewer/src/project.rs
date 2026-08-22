@@ -126,7 +126,9 @@ impl Timestamps {
     pub fn now() -> Self {
         let millis = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
+            .map_or(0, |since| {
+                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+            });
         Self {
             created: millis,
             modified: millis,
@@ -185,7 +187,9 @@ pub struct Output {
 /// whole format is testable with no directory on disk — the rule
 /// `docs/VIEWER.md` §6 applies to the viewport math, applied to a file format
 /// for the same reason. The caller creates the directories and writes the
-/// bytes, and writes `thumbnail.jpg` itself, since this crate encodes no JPEG.
+/// bytes, and writes `thumbnail.jpg` itself, since this crate encodes no JPEG —
+/// `qupath-app::thumbnails::encode_jpeg` is what does, and it is there because
+/// this crate depends on `qupath-slide` alone (`docs/VIEWER.md` §7).
 ///
 /// `project_path` is where `project.qpproj` will live; it becomes the `uri`
 /// field, which QuPath uses to tell a moved project from one in place.
@@ -769,10 +773,7 @@ pub fn added(stored: &Stored, entries: &[Entry<'_>], written: Timestamps) -> Vec
             // A project with no `images` key at all is one QuPath reads as
             // empty — `element.has("images") ? ... : emptyList()` — so adding
             // the key is adding what was meant rather than inventing a field.
-            _ => fields.push((
-                "images".to_owned(),
-                crate::json::Value::Array(images),
-            )),
+            _ => fields.push(("images".to_owned(), crate::json::Value::Array(images))),
         }
         // Only when an id was actually issued. `first` is the id the *next*
         // entry would take, so writing it back with nothing added advances the
@@ -1034,8 +1035,14 @@ pub fn uri_path(uri: &str) -> Result<PathBuf, String> {
     // `new File(URI)` refuses both. Checked before the authority so that a URI
     // with several problems reports the first one a reader would meet.
     if let Some(at) = rest.find(['?', '#']) {
-        let what = if rest.as_bytes()[at] == b'?' { "query" } else { "fragment" };
-        return Err(format!("`{uri}` has a {what} component, so it does not name a file"));
+        let what = if rest.as_bytes()[at] == b'?' {
+            "query"
+        } else {
+            "fragment"
+        };
+        return Err(format!(
+            "`{uri}` has a {what} component, so it does not name a file"
+        ));
     }
     let path = match rest.strip_prefix("//") {
         // `file://...`: an authority runs to the next `/`. Empty is the
@@ -1451,7 +1458,11 @@ mod tests {
     /// later is a deliberate act rather than a quiet one.
     #[test]
     fn no_qpdata_is_written() {
-        let files = files(Path::new("/study/project.qpproj"), &[entry(), entry()], written());
+        let files = files(
+            Path::new("/study/project.qpproj"),
+            &[entry(), entry()],
+            written(),
+        );
         assert!(
             !files.iter().any(|file| file.path.contains("qpdata")),
             "data.qpdata is Java serialisation and is deliberately not attempted",
@@ -1552,7 +1563,10 @@ mod tests {
         }
         // What is left is what QuPath dispatches on and opens with.
         assert!(json.contains("\"builderType\": \"uri\""), "{json}");
-        assert!(json.contains("\"uri\": \"file:///data/CMU-1.svs\""), "{json}");
+        assert!(
+            json.contains("\"uri\": \"file:///data/CMU-1.svs\""),
+            "{json}"
+        );
         assert!(json.contains("\"args\": []"), "{json}");
     }
 
@@ -1631,7 +1645,10 @@ mod tests {
 
         // A clock that has not been asked twice still gives two fields.
         let now = Timestamps::now();
-        assert!(now.created > 1_600_000_000_000, "the epoch is in milliseconds");
+        assert!(
+            now.created > 1_600_000_000_000,
+            "the epoch is in milliseconds"
+        );
         assert_eq!(now.created, now.modified, "a new project is written once");
     }
 
@@ -1673,7 +1690,10 @@ mod tests {
         let ids: Vec<u64> = stored.images.iter().map(|image| image.id).collect();
         assert_eq!(ids, vec![1, 2]);
         assert_eq!(stored.images[1].name, "Other");
-        assert_eq!(stored.images[1].slide.as_deref(), Ok(Path::new("/data/other.svs")));
+        assert_eq!(
+            stored.images[1].slide.as_deref(),
+            Ok(Path::new("/data/other.svs"))
+        );
     }
 
     /// **The spelling QuPath writes is not the spelling this writes.**
@@ -1685,8 +1705,14 @@ mod tests {
     /// QuPath itself wrote, which is the whole population a browser opens.
     #[test]
     fn both_spellings_of_a_file_uri_name_the_same_path() {
-        assert_eq!(uri_path("file:/data/x.svs"), Ok(PathBuf::from("/data/x.svs")));
-        assert_eq!(uri_path("file:///data/x.svs"), Ok(PathBuf::from("/data/x.svs")));
+        assert_eq!(
+            uri_path("file:/data/x.svs"),
+            Ok(PathBuf::from("/data/x.svs"))
+        );
+        assert_eq!(
+            uri_path("file:///data/x.svs"),
+            Ok(PathBuf::from("/data/x.svs"))
+        );
         // And what this module writes survives its own round trip.
         let uri = file_uri(Path::new("/data/CMU-1.svs"));
         assert_eq!(uri_path(&uri), Ok(PathBuf::from("/data/CMU-1.svs")));
@@ -1788,7 +1814,10 @@ mod tests {
         )
         .expect("a project");
         assert_eq!(stored.images[0].name, "Image 4");
-        assert_eq!(stored.images[0].slide.as_deref(), Ok(Path::new("/data/x.svs")));
+        assert_eq!(
+            stored.images[0].slide.as_deref(),
+            Ok(Path::new("/data/x.svs"))
+        );
     }
 
     /// The reason [`crate::json`] is a parser: a `serverBuilder` QuPath wrote
@@ -1919,7 +1948,10 @@ mod tests {
                     height: 1,
                 },
             ],
-            Timestamps { created: 1, modified: 2 },
+            Timestamps {
+                created: 1,
+                modified: 2,
+            },
         );
         let stored = read(&written).expect("a project");
         let names: Vec<&str> = stored
@@ -2003,7 +2035,11 @@ mod tests {
 
         let reread = read(&files[0].contents).expect("the rewritten project");
         assert_eq!(reread.images.len(), 2);
-        assert_eq!(reread.images[0].name, entry().name, "the first entry changed");
+        assert_eq!(
+            reread.images[0].name,
+            entry().name,
+            "the first entry changed"
+        );
         assert_eq!(reread.images[1].id, 2);
         assert_eq!(reread.images[1].name, "Second");
         assert_eq!(
@@ -2025,7 +2061,11 @@ mod tests {
     fn a_rewrite_that_adds_nothing_changes_nothing_but_the_clock() {
         let text = project_file(Path::new("/study/project.qpproj"), &[entry()], written());
         let stored = read(&text).expect("a project");
-        assert_eq!(stored.rewritten(), stored.rewritten(), "the writer is stable");
+        assert_eq!(
+            stored.rewritten(),
+            stored.rewritten(),
+            "the writer is stable"
+        );
 
         let later = Timestamps {
             created: written().created,
@@ -2035,9 +2075,10 @@ mod tests {
         assert_eq!(files.len(), 1, "no entries means no entry directories");
         assert_eq!(
             files[0].contents,
-            stored
-                .rewritten()
-                .replace("\"modifyTimestamp\": 1700000060000", "\"modifyTimestamp\": 1800000000000"),
+            stored.rewritten().replace(
+                "\"modifyTimestamp\": 1700000060000",
+                "\"modifyTimestamp\": 1800000000000"
+            ),
             "a rewrite that added nothing changed something other than the clock",
         );
         // And the counter is still where it was, so the next entry is still 2.
@@ -2112,10 +2153,12 @@ mod tests {
             "\"control\"",
             "\"somethingNewer\"",
         ] {
-            assert!(rewritten.contains(kept), "{kept} was deleted by the rewrite");
+            assert!(
+                rewritten.contains(kept),
+                "{kept} was deleted by the rewrite"
+            );
         }
     }
-
 
     /// The tiebreak is a part count, and that is not a length.
     ///
@@ -2134,7 +2177,10 @@ mod tests {
         assert_eq!(smart_string_compare("a1", "a1bbbbbbbb"), Less);
         // The same pair with the tail made to lose on text instead, so that
         // the two rules disagree and the text one is seen to be the one used.
-        assert_eq!(smart_string_compare("ab1", "aa1bbbbbbbb"), std::cmp::Ordering::Greater);
+        assert_eq!(
+            smart_string_compare("ab1", "aa1bbbbbbbb"),
+            std::cmp::Ordering::Greater
+        );
     }
 
     /// A digit run meets a text part as the digits it *prints* as.

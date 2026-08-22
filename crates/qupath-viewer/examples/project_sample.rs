@@ -19,9 +19,11 @@
 //! *entries* are committed, in `shared/project.rs`, and they are what the test
 //! compares QuPath's reading against.
 //!
-//! `thumbnail.jpg` is not written here and `data.qpdata` is not written at all;
-//! §8.3 and `project.rs` say why. Whether QuPath minds is one of the things
-//! this exists to find out.
+//! `thumbnail.jpg` is not written *here* and `data.qpdata` is not written at
+//! all; §8.3 and `project.rs` say why. The thumbnail is written straight after
+//! this, by `qupath-app`'s `project_thumbnails` example — the encoder lives in
+//! that crate — and `ProjectImport` then records that QuPath's `ImageIO.read`
+//! accepts it.
 //!
 //! Scratch tooling, not part of the library.
 #![allow(missing_docs, reason = "example binary")]
@@ -35,7 +37,10 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let directory = PathBuf::from(args.next().unwrap_or_else(|| "study".to_owned()));
     let slide = PathBuf::from(args.next().unwrap_or_else(|| sample::SLIDE.to_owned()));
-    let second = PathBuf::from(args.next().unwrap_or_else(|| sample::SECOND_SLIDE.to_owned()));
+    let second = PathBuf::from(
+        args.next()
+            .unwrap_or_else(|| sample::SECOND_SLIDE.to_owned()),
+    );
 
     for path in [&slide, &second] {
         assert!(
