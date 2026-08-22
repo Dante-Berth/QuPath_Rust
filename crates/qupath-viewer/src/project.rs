@@ -802,6 +802,104 @@ pub fn added(stored: &Stored, entries: &[Entry<'_>], written: Timestamps) -> Vec
     out
 }
 
+/// The index rewritten with entry `id`'s metadata map replaced by `metadata`.
+///
+/// The third writer, and the first whose input is something a user *typed*.
+/// [`files`] writes a project from nothing and [`added`] appends to one; this
+/// reaches into an entry somebody else's program wrote and changes a field in
+/// it. So it is the same rewrite-what-was-read shape as [`added`] — the
+/// document is [`Stored`]'s own, cloned and edited at one key — rather than
+/// anything built out of [`Image`]. What that preserves is what [`added`]'s
+/// documentation lists, and the argument is stronger here: the entry being
+/// edited is one that certainly has fields nothing in [`Image`] carries, since
+/// its `serverBuilder` is how the image opens at all.
+///
+/// # Only the one entry, and only its `metadata`
+///
+/// Every other entry is untouched, including its metadata, and every other
+/// field of *this* entry is untouched too. `modifyTimestamp` advances, for the
+/// reason [`added`] advances it: the file has just been written, and a stale
+/// field there reports something untrue.
+///
+/// `lastID` does not, and that is the difference from [`added`] worth naming —
+/// no id is issued, because no entry is created. Advancing the counter here
+/// would leave a `data/` directory nothing points at.
+///
+/// # An empty map removes the field
+///
+/// Rather than writing `"metadata": {}`. `DefaultProjectImageEntry` starts with
+/// an empty `LinkedHashMap` and Gson writes it as `{}` when it is empty, so
+/// both spellings read back identically — but a project whose entries never had
+/// the field should not acquire one because somebody opened a metadata editor
+/// and closed it again. The rule is that clearing the last key returns the
+/// entry to the shape it had.
+///
+/// # Errors
+///
+/// When no entry has this `id`. A caller holding an [`Image`] cannot hit it,
+/// but a caller holding an id across a re-read can — the project may have been
+/// rewritten by something else in between, which is exactly the case the
+/// application checks for before calling this.
+pub fn edited(
+    stored: &Stored,
+    id: u64,
+    metadata: &[(String, String)],
+    written: Timestamps,
+) -> Result<Vec<Output>, String> {
+    let mut document = stored.document.clone();
+
+    let crate::json::Value::Object(fields) = &mut document else {
+        return Err("the project index is not an object".to_owned());
+    };
+    let Some((_, crate::json::Value::Array(images))) =
+        fields.iter_mut().find(|(key, _)| key == "images")
+    else {
+        return Err(format!("no entry {id}: the project has no images"));
+    };
+
+    // By `entryID` and not by position, because the caller's list is the
+    // *browser's* order — sorted, and filtered — and an index into that is an
+    // index into a different list than this one. The same reasoning
+    // `App::picture_for` uses for keying pictures by id.
+    let found = images.iter_mut().enumerate().find(|(position, image)| {
+        image
+            .get("entryID")
+            .and_then(crate::json::Value::as_u64)
+            .unwrap_or(*position as u64 + 1)
+            == id
+    });
+    let Some((_, crate::json::Value::Object(entry))) = found else {
+        return Err(format!("no entry {id} in this project"));
+    };
+
+    let map = crate::json::Value::Object(
+        metadata
+            .iter()
+            .map(|(key, value)| (key.clone(), crate::json::Value::String(value.clone())))
+            .collect(),
+    );
+    // In place where the field already is, appended only when it is new, which
+    // is `set`'s argument applied one level down: an entry that carried
+    // `metadata` between `imageName` and `serverBuilder` keeps it there, so a
+    // diff of the two files is the map that changed rather than the entry
+    // reordered around it.
+    match entry.iter_mut().find(|(key, _)| key == "metadata") {
+        Some(_) if metadata.is_empty() => entry.retain(|(key, _)| key != "metadata"),
+        Some((_, existing)) => *existing = map,
+        None if metadata.is_empty() => {}
+        None => entry.push(("metadata".to_owned(), map)),
+    }
+
+    if let crate::json::Value::Object(fields) = &mut document {
+        set(fields, "modifyTimestamp", written.modified);
+    }
+
+    Ok(vec![Output {
+        path: "project.qpproj".to_owned(),
+        contents: crate::json::write(&document),
+    }])
+}
+
 /// Replaces a numeric field in place, or appends it if the file has none.
 ///
 /// In place, so a project's field order survives a rewrite. Appending a
@@ -1142,6 +1240,188 @@ mod tests {
             created: 1_700_000_000_000,
             modified: 1_700_000_060_000,
         }
+    }
+
+    /// The project the metadata tests edit: QuPath's own, with three entries
+    /// whose `metadata` is present and empty. Present matters — it is the case
+    /// where the field has a *place* in the entry already.
+    const QUPATH_PROJECT: &str = include_str!("../../../parity/fixtures/ProjectExport.json");
+
+    fn pairs(from: &[(&str, &str)]) -> Vec<(String, String)> {
+        from.iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    fn metadata_of(text: &str, id: u64) -> Vec<(String, String)> {
+        let stored = read(text).expect("a project");
+        stored
+            .images
+            .iter()
+            .find(|image| image.id == id)
+            .expect("the entry")
+            .metadata
+            .clone()
+    }
+
+    #[test]
+    fn an_edit_reads_back_as_what_was_typed() {
+        let stored = read(QUPATH_PROJECT).expect("QuPath's own project file");
+        let out = edited(
+            &stored,
+            2,
+            &pairs(&[("stain", "H&E"), ("case", "17")]),
+            written(),
+        )
+        .expect("entry 2 is in this project");
+
+        assert_eq!(out.len(), 1, "an edit writes the index and nothing else");
+        assert_eq!(out[0].path, "project.qpproj");
+        assert_eq!(
+            metadata_of(&out[0].contents, 2),
+            pairs(&[("stain", "H&E"), ("case", "17")]),
+            "the keys read back in the order they were given"
+        );
+    }
+
+    /// The point of rewriting the document rather than rebuilding it. An edit
+    /// to one entry must be invisible in every other entry, and in every other
+    /// field of the one edited.
+    #[test]
+    fn an_edit_changes_one_entry_and_one_field() {
+        let stored = read(QUPATH_PROJECT).expect("QuPath's own project file");
+        let out = edited(&stored, 2, &pairs(&[("stain", "H&E")]), written()).expect("entry 2");
+        let after = read(&out[0].contents).expect("the edited project reads back");
+
+        assert_eq!(after.images.len(), stored.images.len());
+        for (before, after) in stored.images.iter().zip(&after.images) {
+            assert_eq!(before.id, after.id);
+            assert_eq!(before.name, after.name);
+            assert_eq!(before.uri, after.uri);
+            assert_eq!(before.slide, after.slide);
+            assert_eq!(before.tags, after.tags, "tags survive an edit to metadata");
+            assert_eq!(before.randomized_name, after.randomized_name);
+            if after.id != 2 {
+                assert_eq!(
+                    before.metadata, after.metadata,
+                    "entry {} was not the one edited",
+                    after.id
+                );
+            }
+        }
+        // The counter does not move: no entry was created, so no id was issued.
+        assert_eq!(after.next_id(), stored.next_id());
+        assert_eq!(after.written.created, stored.written.created);
+        assert_eq!(after.written.modified, written().modified);
+    }
+
+    /// `serverBuilder` is how the image opens at all, and it is the field a
+    /// rewrite built from [`Image`] would drop. Checked as text, because that
+    /// is the level at which it would go missing.
+    #[test]
+    fn an_edit_keeps_what_the_reader_does_not_summarise() {
+        let stored = read(QUPATH_PROJECT).expect("QuPath's own project file");
+        let out = edited(&stored, 1, &pairs(&[("k", "v")]), written()).expect("entry 1");
+
+        for keep in [
+            "providerClassName",
+            "qupath.lib.images.servers.openslide.OpenslideServerBuilder",
+            "\"args\"",
+            "randomized-name",
+        ] {
+            assert!(
+                out[0].contents.contains(keep),
+                "an edit dropped {keep} from the document it rewrote"
+            );
+        }
+    }
+
+    /// Clearing the last key returns the entry to the shape it had, rather than
+    /// leaving `"metadata": {}` behind — and for this fixture, whose entries
+    /// carry an empty map already, "the shape it had" is that empty map.
+    #[test]
+    fn clearing_every_key_returns_the_entry_to_its_own_shape() {
+        let stored = read(QUPATH_PROJECT).expect("QuPath's own project file");
+        let filled = edited(&stored, 3, &pairs(&[("a", "1")]), written()).expect("entry 3");
+        let reread = read(&filled[0].contents).expect("reads back");
+        let cleared = edited(&reread, 3, &[], written()).expect("entry 3 again");
+
+        assert!(metadata_of(&cleared[0].contents, 3).is_empty());
+        // Down to the byte, against the file that was never edited at all —
+        // which is the claim that "cleared" and "never written" are the same
+        // document rather than merely the same reading. Only the timestamp is
+        // allowed to differ, so the comparison is against a no-op edit of the
+        // original, which moves that field and nothing else.
+        let untouched = edited(&stored, 3, &[], written()).expect("a no-op edit");
+        assert_eq!(
+            cleared[0].contents, untouched[0].contents,
+            "clearing the keys left the document different from never having set them"
+        );
+    }
+
+    /// Editing the same entry twice is the gesture a user actually makes — type
+    /// a key, come back and change it. The second edit must replace the map
+    /// rather than accumulate against it, and must not move the field.
+    #[test]
+    fn editing_twice_replaces_rather_than_accumulates() {
+        let stored = read(QUPATH_PROJECT).expect("QuPath's own project file");
+        let once = edited(&stored, 2, &pairs(&[("stain", "H&E")]), written()).expect("entry 2");
+        let reread = read(&once[0].contents).expect("reads back");
+        let twice = edited(&reread, 2, &pairs(&[("stain", "PAS")]), written()).expect("entry 2");
+
+        assert_eq!(
+            metadata_of(&twice[0].contents, 2),
+            pairs(&[("stain", "PAS")])
+        );
+        assert_eq!(
+            read(&twice[0].contents).expect("reads back").images.len(),
+            stored.images.len(),
+            "a second edit did not add an entry"
+        );
+    }
+
+    /// The field keeps its place in the entry. QuPath writes `metadata` between
+    /// `imageName` and `tags`; an edit that appended it instead would leave a
+    /// file that reads the same and diffs as the entry rewritten.
+    #[test]
+    fn an_edit_leaves_the_field_where_qupath_put_it() {
+        let stored = read(QUPATH_PROJECT).expect("QuPath's own project file");
+        let out = edited(&stored, 1, &pairs(&[("k", "v")]), written()).expect("entry 1");
+        let text = &out[0].contents;
+
+        let name = text.find("\"imageName\"").expect("an imageName");
+        let metadata = text.find("\"metadata\"").expect("a metadata map");
+        let tags = text.find("\"tags\"").expect("tags");
+        assert!(
+            name < metadata && metadata < tags,
+            "metadata moved out from between imageName and tags"
+        );
+    }
+
+    /// An id the project does not have is the case a caller holding one across
+    /// a re-read can reach, and it is refused rather than written somewhere.
+    #[test]
+    fn an_edit_to_an_absent_entry_is_refused() {
+        let stored = read(QUPATH_PROJECT).expect("QuPath's own project file");
+        let error = edited(&stored, 99, &pairs(&[("k", "v")]), written())
+            .expect_err("entry 99 is not in this project");
+        assert!(error.contains("99"), "the message names the entry: {error}");
+    }
+
+    /// A value with the characters that end a JSON string in it. The writer
+    /// escapes through the same path every other string here does, and the
+    /// check is that it survives the round trip rather than that it is spelled
+    /// any particular way.
+    #[test]
+    fn a_value_that_needs_escaping_survives() {
+        let stored = read(QUPATH_PROJECT).expect("QuPath's own project file");
+        let awkward = "a \"quoted\" \\ value\twith\nlines";
+        let out = edited(&stored, 1, &pairs(&[("note", awkward)]), written()).expect("entry 1");
+
+        assert_eq!(
+            metadata_of(&out[0].contents, 1),
+            pairs(&[("note", awkward)])
+        );
     }
 
     fn entry() -> Entry<'static> {
