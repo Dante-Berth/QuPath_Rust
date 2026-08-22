@@ -695,6 +695,31 @@ pub struct App {
     /// So it is per-session here, which is the half of QuPath's behaviour that
     /// can be honoured without the other half being a lie.
     pub order: crate::chrome::Order,
+    /// Whether the browser shows each entry's `randomizedName` in place of its
+    /// name, for blinded analysis.
+    ///
+    /// QuPath's `PathPrefs.maskImageNamesProperty`, which is an application
+    /// preference rather than a project field — so it is per-session here for
+    /// the same reason [`App::order`] is, and QuPath keeps it per-session too.
+    ///
+    /// **It is not honoured for a project this application wrote**, and
+    /// [`crate::chrome::masked_name`] is where that is enforced rather than
+    /// here: `project::files` writes `entry-<id>` into `randomizedName`, which
+    /// spells out the very order masking exists to hide.
+    pub mask_names: bool,
+    /// The order the masked rows are shuffled into, by entry id.
+    ///
+    /// QuPath reshuffles inside `getAllImageRows` on every `refreshTree`, which
+    /// includes every keystroke in its search box. That cannot be copied
+    /// directly: `row_order` runs once per *frame* here, so a shuffle computed
+    /// there would reorder the list sixty times a second and the pane would be
+    /// unreadable. The order is therefore drawn once, when masking is switched
+    /// on, and held until it is switched off.
+    ///
+    /// Keyed by id and not by position so that it survives a project being
+    /// re-read — adding a slide rewrites the index and reopens it, and a
+    /// shuffle stored as positions would silently become a different shuffle.
+    pub masked_order: Vec<u64>,
 }
 
 impl App {
@@ -758,6 +783,8 @@ impl App {
             project: None,
             show_project: false,
             order: crate::chrome::Order::default(),
+            mask_names: false,
+            masked_order: Vec::new(),
             filter: String::new(),
         }
     }
@@ -1605,6 +1632,22 @@ impl App {
             // Not cleared when a project is opened, unlike the filter above:
             // see [`App::order`] for why the two differ.
             Command::SortBy(order) => self.order = order,
+            Command::MaskNames(mask) => {
+                self.mask_names = mask;
+                // Drawn once, here, rather than in the pane: see
+                // [`App::masked_order`] for why a per-frame shuffle is not an
+                // option. Switching masking *off* clears it, so switching it on
+                // again is a fresh shuffle rather than the one somebody has
+                // already seen half of.
+                self.masked_order = if mask {
+                    self.project
+                        .as_ref()
+                        .map(|project| shuffled_ids(&project.stored.images))
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+            }
             Command::Close => {
                 self.open = None;
                 self.uploaded_overview = false;
@@ -2198,6 +2241,53 @@ pub fn requested(paths: impl IntoIterator<Item = String>) -> (Option<PathBuf>, O
 /// A sentence naming the file that could not be written, for the status bar. A
 /// full disk and an unwritable directory are ordinary things to happen to an
 /// application, and the user chose the directory.
+/// The entry ids of `images`, shuffled.
+///
+/// QuPath shuffles its masked list "for less biased analyses" — a blinded
+/// reader who works down the pane in order would otherwise be working through
+/// the study in whatever order the slides were added, which is often the order
+/// they were collected in.
+///
+/// # The seed, and what it has to not be
+///
+/// Seeded from the wall clock, because the one thing it must not be derivable
+/// from is the list being shuffled. A seed taken from the entries — their
+/// count, their ids, a hash of their names — makes the permutation a function
+/// of the project, so the same study masked twice is masked the same way, and
+/// two readers comparing notes recover the order. `SystemTime` is coarse and
+/// guessable and that is fine: the reader is being kept from *recognising*
+/// slides, not from an adversary reconstructing a key.
+///
+/// # A Fisher-Yates with an xorshift, and not a dependency
+///
+/// The workspace has no `rand`, and this is the only thing in it that wants
+/// one. `xorshift64*` is nine lines and its bias over a list of fifty is far
+/// below what a shuffle is for; a dependency pulled in for nine lines is a
+/// dependency the parity crates would carry too.
+fn shuffled_ids(images: &[qupath_viewer::project::Image]) -> Vec<u64> {
+    let mut ids: Vec<u64> = images.iter().map(|image| image.id).collect();
+    let mut state = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0x2545_f491_4f6c_dd1d, |since| since.as_nanos() as u64)
+        // `xorshift64` is stuck at zero, which a clock at the epoch would
+        // reach. The list would come back in its own order, masked but not
+        // shuffled.
+        | 1;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    // Downwards, taking each element to a position at or below it, which is
+    // the unbiased direction: the upwards spelling revisits positions already
+    // placed and is the classic wrong one.
+    for index in (1..ids.len()).rev() {
+        ids.swap(index, (next() % (index as u64 + 1)) as usize);
+    }
+    ids
+}
+
 fn write_project(directory: &Path, files: &[qupath_viewer::project::Output]) -> Result<(), String> {
     let (index, rest): (Vec<_>, Vec<_>) = files
         .iter()
@@ -2406,6 +2496,48 @@ mod tests {
     use qupath_viewer::overview::Overview;
 
     use super::*;
+
+    /// The shuffle is a permutation, and it is not the same one twice.
+    ///
+    /// A permutation because the rows are addressed through it: an id lost is a
+    /// row that vanishes, and one duplicated is a row that appears twice
+    /// wearing another's picture. `sort_by_key` over a shuffle with a repeat
+    /// would put two rows at the same position and pick between them silently.
+    ///
+    /// Not the same one twice because a shuffle seeded from the *list* would
+    /// pass every other assertion here and mask nothing: two readers with the
+    /// same study would see the same order, and comparing notes recovers it.
+    /// Fifty entries makes a collision between two runs about `1/50!`, so a
+    /// failure here is the seed having become a function of the entries rather
+    /// than of the clock.
+    #[test]
+    fn the_mask_shuffle_is_a_permutation_and_not_a_constant() {
+        let images: Vec<qupath_viewer::project::Image> = (1..=50)
+            .map(|id| qupath_viewer::project::Image {
+                id,
+                name: format!("image {id}"),
+                builder: String::from("uri"),
+                slide: Ok(PathBuf::from(format!("/slides/{id}.svs"))),
+                uri: None,
+                description: None,
+                metadata: Vec::new(),
+                tags: Vec::new(),
+                randomized_name: Some(format!("r{id}")),
+            })
+            .collect();
+
+        let once = super::shuffled_ids(&images);
+        let mut sorted = once.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (1..=50).collect::<Vec<u64>>());
+
+        let twice = super::shuffled_ids(&images);
+        assert_ne!(once, twice, "the shuffle does not depend on the clock");
+
+        // And it moves things: an implementation whose loop bound was wrong
+        // leaves the list in its own order and every other assertion holds.
+        assert_ne!(once, sorted, "the shuffle left the list in order");
+    }
 
     /// What one event of each kind is worth, in zoom steps.
     ///

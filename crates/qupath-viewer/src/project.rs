@@ -560,6 +560,22 @@ pub struct Image {
     /// wants to filter on tags should not have to re-read the document to find
     /// them.
     pub tags: Vec<String>,
+    /// The `randomizedName`, which is the name shown when names are masked.
+    ///
+    /// `getImageName()` returns this instead of `imageName` when a project has
+    /// `setMaskImageNames(true)`, for blinded analysis. `Option` because it is
+    /// a field a project may not carry, and a browser that masked names by
+    /// showing an empty string would blind the reader rather than the study.
+    ///
+    /// **What is in it depends on who wrote the project, and the difference
+    /// matters.** QuPath writes `UUID.randomUUID()`. This module writes
+    /// `entry-<id>` — see `placeholder_name`, which says why: a random name
+    /// makes the same project written twice differ byte for byte. That
+    /// placeholder is *derived from the id*, so masking a project this module
+    /// wrote reveals the entry order, which is the one thing masking exists to
+    /// hide. A caller that offers masking has to say so; see
+    /// `chrome::Order::Masked`.
+    pub randomized_name: Option<String>,
 }
 
 /// A project, as read back from `project.qpproj`.
@@ -878,6 +894,10 @@ fn image((position, value): (usize, &crate::json::Value)) -> Image {
             .map(str::to_owned),
         metadata,
         tags,
+        randomized_name: value
+            .get("randomizedName")
+            .and_then(crate::json::Value::as_str)
+            .map(str::to_owned),
     }
 }
 
@@ -1589,6 +1609,52 @@ mod tests {
                 (String::from("stain"), String::from("H&E")),
             ]
         );
+    }
+
+    /// The `randomizedName` is read, and what this module writes into it is
+    /// **not** a mask.
+    ///
+    /// The second half is the point of the test. `placeholder_name` is
+    /// `entry-<id>` so that the same project written twice is the same bytes,
+    /// and that is the right trade for a field nothing was reading — but it
+    /// makes the masked name a spelling of the entry id. A study masked with
+    /// these is one where the rows can be put back in order by reading them,
+    /// which is what masking exists to prevent. Asserted here so that anything
+    /// offering to mask names has to meet this first.
+    #[test]
+    fn the_randomized_name_is_read_and_this_modules_own_is_not_random() {
+        let written = project_file(
+            Path::new("/study/project.qpproj"),
+            &[
+                Entry {
+                    path: Path::new("/slides/a.svs"),
+                    name: "A",
+                    width: 1,
+                    height: 1,
+                },
+                Entry {
+                    path: Path::new("/slides/b.svs"),
+                    name: "B",
+                    width: 1,
+                    height: 1,
+                },
+            ],
+            Timestamps { created: 1, modified: 2 },
+        );
+        let stored = read(&written).expect("a project");
+        let names: Vec<&str> = stored
+            .images
+            .iter()
+            .map(|image| image.randomized_name.as_deref().expect("a randomized name"))
+            .collect();
+        assert_eq!(names, ["entry-1", "entry-2"]);
+        for (image, name) in stored.images.iter().zip(&names) {
+            assert!(
+                name.contains(&image.id.to_string()),
+                "the placeholder no longer names the id, and the warning on \
+                 `Image::randomized_name` needs rewriting rather than deleting"
+            );
+        }
     }
 
     /// The description and the tags, which QuPath writes beside the map.

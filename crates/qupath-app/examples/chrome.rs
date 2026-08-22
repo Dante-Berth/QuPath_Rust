@@ -73,6 +73,23 @@ fn main() {
     render("chrome-project-sorted-metadata.png", &mut app);
     app.order = chrome::Order::default();
 
+    // And with the names masked, which is the state a blinded reader works in:
+    // the rows wear their randomized names, they are shuffled, and the sort
+    // combo has lost the three choices that would rank them by what is hidden.
+    // The pictures are not masked and cannot be — a thumbnail of a slide is the
+    // slide — which is worth being able to see rather than only read.
+    //
+    // Set directly rather than through `Command::MaskNames`, which the rest of
+    // the application reaches through `App::run` and a `Window` this example
+    // does not have — the same way `order` and `filter` are set above. The
+    // shuffle is written out rather than drawn, because a picture whose row
+    // order changes on every run is one nobody can read the diff of.
+    app.mask_names = true;
+    app.masked_order = vec![3, 1, 4, 2];
+    render("chrome-project-masked.png", &mut app);
+    app.mask_names = false;
+    app.masked_order.clear();
+
     // And with a search narrowing on metadata rather than on a name, which is
     // the state the `|` is for: neither token is in a name, and the rows that
     // are left are the ones carrying both. A picture of it is the only thing
@@ -238,7 +255,18 @@ fn with_metadata(project: &str) -> String {
         r#"{"stain": "H&E", "block": "10"}"#,
         r#"{"stain": "CD8"}"#,
     ];
-    let mut out = String::with_capacity(project.len() + 256);
+    // The randomized names go with them, and for a second reason: `project.rs`
+    // writes `entry-<id>` there, which spells out the entry order, so the
+    // browser refuses to mask a project it wrote. Replacing them with names
+    // that are not derived from an id is what puts this project in the state a
+    // project QuPath wrote is in — the only state the checkbox is live in.
+    let random = [
+        "8f14e45f-ea8b-4a92",
+        "c9f0f895-fb98-4e7f",
+        "45c48cce-2e2d-4fb1",
+        "d3d94468-02a4-4d0d",
+    ];
+    let mut out = String::with_capacity(project.len() + 512);
     let mut rest = project;
     let mut written = 0;
     while let Some((before, after)) = rest.split_once("\"entryID\": ") {
@@ -249,7 +277,17 @@ fn with_metadata(project: &str) -> String {
         written += 1;
     }
     out.push_str(rest);
-    out
+
+    // The randomized names are *replaced* rather than inserted, because
+    // `project.rs` already writes one per entry.
+    let mut named = out;
+    for (index, name) in random.iter().enumerate() {
+        named = named.replace(
+            &format!("\"randomizedName\": \"entry-{}\"", index + 1),
+            &format!("\"randomizedName\": \"{name}\""),
+        );
+    }
+    named
 }
 
 /// Writes `patch` into `texture` with its top-left corner at `(x, y)`.

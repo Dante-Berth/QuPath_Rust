@@ -61,6 +61,12 @@ pub enum Command {
     /// Carries the whole choice rather than "the next one", for
     /// [`Command::Filter`]'s reason: the order is picked, not stepped through.
     SortBy(Order),
+    /// Show each entry's `randomizedName` in place of its name, or stop.
+    ///
+    /// Carries the state rather than "toggle", so that a frame in which the
+    /// checkbox is drawn twice cannot turn masking back off — and so that the
+    /// shuffle drawn when it is switched on is drawn once.
+    MaskNames(bool),
     /// Show or hide the project browser.
     ToggleProject,
     Fit,
@@ -232,6 +238,36 @@ impl Order {
     /// text, so the two are listed side by side and say which is which.
     #[must_use]
     pub fn all(images: &[project::Image]) -> Vec<Self> {
+        Self::offered(images, false)
+    }
+
+    /// The choices offered when names are masked, which is fewer.
+    ///
+    /// [`Order::Uri`] and [`Order::Metadata`] order the rows by something the
+    /// mask is hiding: a study's file names are usually its names, and its
+    /// metadata is usually the case it came from. A flat list in that order is
+    /// the hidden ranking on screen — the rows are still anonymous and their
+    /// *sequence* is not, and a reader working down the pane is working through
+    /// the study in exactly the order masking was meant to break.
+    ///
+    /// [`Order::Id`] goes for the same reason and more plainly: it is the order
+    /// the slides were added.
+    ///
+    /// **This is a divergence, and the one place this pane is stricter than
+    /// QuPath.** Its `populateSortByMenu` offers every key whether or not
+    /// `maskImageNames` is set, and `getDefaultValue` hands back the file name
+    /// and the metadata value unmasked. Copied faithfully, the checkbox would
+    /// be a mask a single menu choice lifts. It is offered as a blinding
+    /// control, so it is one or it should not be there — §8.3.
+    ///
+    /// What is left is *Project order*, which under masking is the shuffle, and
+    /// *Name*, which sorts the randomized names — an order that says nothing
+    /// because the names say nothing.
+    #[must_use]
+    pub fn offered(images: &[project::Image], masked: bool) -> Vec<Self> {
+        if masked {
+            return vec![Self::Stored, Self::Name];
+        }
         let mut keys: Vec<&str> = images
             .iter()
             .flat_map(|image| image.metadata.iter().map(|(key, _)| key.as_str()))
@@ -283,6 +319,35 @@ fn metadata_value<'a>(image: &'a project::Image, key: &str) -> &'a str {
         .map_or("", |(_, value)| value.as_str())
 }
 
+/// How the browser is currently looking at a project: the search, the order,
+/// and whether names are masked.
+///
+/// One struct and not three arguments, because the three are read together
+/// everywhere and two of them change what the third means — masking changes
+/// which name the search matches and which name [`Order::Name`] sorts, so a
+/// call site that passed the order and forgot the mask would compile and be
+/// wrong in a way only a picture shows.
+pub struct View<'a> {
+    /// The search box's text.
+    pub filter: &'a str,
+    /// What the rows are put in order by.
+    pub order: &'a Order,
+    /// Whether names are masked, and the shuffle to use if they are.
+    ///
+    /// `None` is unmasked. `Some(ids)` is masked, listing the entry ids in the
+    /// order the rows go in — see `state::App::masked_order` for why the
+    /// shuffle is held rather than drawn per frame.
+    pub masked: Option<&'a [u64]>,
+}
+
+impl View<'_> {
+    /// Whether names are masked.
+    #[must_use]
+    fn masking(&self) -> bool {
+        self.masked.is_some()
+    }
+}
+
 /// The rows the browser draws, in the order it draws them.
 ///
 /// **Indices, not entries, and that is the whole point of the return type.** A
@@ -307,12 +372,40 @@ fn metadata_value<'a>(image: &'a project::Image, key: &str) -> &'a str {
 fn row_order(
     images: &[project::Image],
     has_data: &dyn Fn(usize) -> bool,
-    filter: &str,
-    order: &Order,
+    view: &View<'_>,
 ) -> Vec<usize> {
+    let masked = view.masking();
     let mut rows: Vec<usize> = (0..images.len())
-        .filter(|&index| matches(&images[index], has_data(index), filter))
+        .filter(|&index| matches(&images[index], has_data(index), masked, view.filter))
         .collect();
+    // The shuffle first, so that it is what `Order::Stored` means under
+    // masking: QuPath's `getAllImageRows` shuffles the list *before* the tree
+    // is built over it, so its "no sort" is the shuffled order and its sorts
+    // are sorts of the shuffled list. A sort of a shuffle is the sort, so this
+    // only shows in the unsorted case — which is the default, and the case a
+    // blinded reader is actually in.
+    if let Some(order) = view.masked {
+        rows.sort_by_key(|&index| {
+            order
+                .iter()
+                .position(|&id| id == images[index].id)
+                // An entry the shuffle does not name is one added since it was
+                // drawn. Last, in the project's own order, rather than dropped:
+                // a row that vanishes on being added is worse than a row whose
+                // position says it is new.
+                .unwrap_or(usize::MAX)
+        });
+    }
+    // A sort the mask does not allow is dropped rather than obeyed. Hiding it
+    // from the menu is not enough on its own: the choice outlives the project
+    // it was made in and outlives the checkbox being ticked, so `File name`
+    // picked a moment before masking would go on ordering the rows by the names
+    // being hidden — with nothing on screen saying it was. The rows fall back
+    // to the shuffle, which is what masking's own order is.
+    let order = match view.order {
+        order if !masked || Order::offered(images, true).contains(order) => order,
+        _ => &Order::Stored,
+    };
     if *order == Order::Stored {
         return rows;
     }
@@ -322,7 +415,13 @@ fn row_order(
             // Unreachable: returned above. Written out rather than left to a
             // wildcard so that adding a variant fails here.
             Order::Stored => std::cmp::Ordering::Equal,
-            Order::Name => project::smart_string_compare(&one.name, &two.name),
+            // The shown name, so that sorting a masked list orders it by what
+            // is on screen. Sorting by the real names would put the masked rows
+            // in alphabetical order of the names being hidden, which is a
+            // ranking of the hidden thing displayed in full.
+            Order::Name => {
+                project::smart_string_compare(shown_name(one, masked), shown_name(two, masked))
+            }
             // By value and not by the text of it, because QuPath's key is the
             // entry's `getID()` and the ids are numbers. Smart-sorting their
             // decimal spellings would give the same answer; comparing the
@@ -338,6 +437,60 @@ fn row_order(
         }
     });
     rows
+}
+
+/// The name a row shows, which is the entry's `randomizedName` when names are
+/// masked.
+///
+/// `DefaultProjectImageEntry.getImageName`, which returns `randomizedName`
+/// under `maskNames` and `imageName` otherwise. One function and not a branch
+/// at each call site, because there are three — the row's text, the search, and
+/// the hover — and a masked pane that leaks the real name through any one of
+/// them is a pane that is not masked.
+///
+/// # An entry with no `randomizedName` keeps its own name, and that is not a
+/// hole
+///
+/// It cannot be reached from a project either this or QuPath writes: both write
+/// the field for every entry. What it guards is a hand-edited file, and the
+/// alternative — a blank row, or `Image 7` — would be a row nobody can point at
+/// in a pane whose whole purpose is that the rows are still usable.
+///
+/// The **real** hole is [`maskable`]'s: a project this module wrote has
+/// `entry-<id>` in the field, which is the entry order spelled out. That is
+/// checked where masking is offered, not here — this function is asked for a
+/// name and gives the one it was told to.
+fn shown_name(image: &project::Image, masked: bool) -> &str {
+    if let Some(name) = image.randomized_name.as_deref().filter(|_| masked) {
+        return name;
+    }
+    &image.name
+}
+
+/// Whether masking this project would actually mask it.
+///
+/// `project::files` writes `entry-<id>` into `randomizedName` so that the same
+/// project written twice is the same bytes — the right trade for a field
+/// nothing was reading, and the wrong one for a mask: those names are the entry
+/// order in longhand, and a reader who saw `entry-3` above `entry-7` would know
+/// which slide was added first.
+///
+/// So the control refuses rather than pretending. Offering a mask that does not
+/// mask is worse than offering none: a blinded study is a claim somebody makes
+/// in a paper, and the pane would be the evidence for it.
+///
+/// The test is that *some* entry's name is not derived from its id, which is
+/// deliberately weak. A project QuPath wrote has UUIDs and passes at the first
+/// entry; one this wrote fails at every one. A hand-mixed project passes, which
+/// is right — the entries that carry a real random name are masked by it, and
+/// the ones that do not are the caller's own doing.
+fn maskable(images: &[project::Image]) -> bool {
+    images.iter().any(|image| {
+        image
+            .randomized_name
+            .as_deref()
+            .is_some_and(|name| name != format!("entry-{}", image.id))
+    })
 }
 
 /// The part of an entry's URI QuPath sorts it by: the file name.
@@ -1490,11 +1643,20 @@ fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
     // Computed once and iterated below, rather than filtered twice: the count
     // in the heading and the rows under it are then the same list by
     // construction, and cannot disagree about what the search left.
+    // Masking is honoured only where it would actually mask, which is checked
+    // here rather than trusted from the flag: the control refuses to switch it
+    // on for an unmaskable project, and this is what makes a project that
+    // *becomes* unmaskable — opened while the flag is already set — refuse too.
+    let masking = app.mask_names && maskable(&project.stored.images);
+    let view = View {
+        filter: &app.filter,
+        order: &app.order,
+        masked: masking.then_some(app.masked_order.as_slice()),
+    };
     let rows = row_order(
         &project.stored.images,
         &|index| project.has_data(index),
-        &app.filter,
-        &app.order,
+        &view,
     );
     let shown = rows.len();
     ui.label(
@@ -1530,7 +1692,8 @@ fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
     ui.add_space(8.0);
     add_slide(ui, app, command);
     search(ui, app, command);
-    sort_by(ui, app, &project.stored.images, command);
+    sort_by(ui, app, &project.stored.images, masking, command);
+    mask_names(ui, app, &project.stored.images, command);
 
     if project.stored.images.is_empty() {
         ui.add(
@@ -1585,7 +1748,7 @@ fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
             let background = ui.painter().add(egui::Shape::Noop);
             ui.horizontal(|ui| {
                 row_picture(ui, &project.pictures, index, present && openable);
-                let text = row_text(ui, image, current, present);
+                let text = row_text(ui, image, masking, current, present);
                 // `wrap()` and not the default, which inside a horizontal
                 // layout is `Extend`: a label that refuses to wrap is a label
                 // whose desired width is its whole text, and a side panel sized
@@ -1633,7 +1796,19 @@ fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
         // it at all: a browser that dropped those rows would show a project with
         // fewer images than it has.
         if let Ok(path) = &image.slide {
-            let mut hover = path.display().to_string();
+            // **Not the path, when names are masked.** The path is a file name
+            // under a directory, and a study's file names are its names — a
+            // masked pane whose every row hovers its own slide's file name is
+            // not masked, it just takes one more gesture. The hover is not
+            // dropped, because a row that stops responding reads as broken and
+            // because the two things after it — the missing file, the picture
+            // that could not be read — are about the row rather than about
+            // which slide it is.
+            let mut hover = if masking {
+                String::from("The name is masked. Untick Mask names to see it.")
+            } else {
+                path.display().to_string()
+            };
             if !present {
                 hover.push_str(
                     "\n\nThis file was not there when the project was opened. \
@@ -1708,14 +1883,30 @@ fn search(ui: &mut egui::Ui, app: &App, command: &mut Command) {
 /// width is therefore whatever the row has left after the label, floored so
 /// that a very narrow panel truncates the choice rather than pushing the
 /// panel wider.
-fn sort_by(ui: &mut egui::Ui, app: &App, images: &[project::Image], command: &mut Command) {
+fn sort_by(
+    ui: &mut egui::Ui,
+    app: &App,
+    images: &[project::Image],
+    masked: bool,
+    command: &mut Command,
+) {
     ui.horizontal(|ui| {
         ui.add(egui::Label::new(egui::RichText::new("Sort by").small()).wrap());
         let width = (ui.available_width() - 4.0).max(72.0);
-        let mut chosen = app.order.clone();
+        // What the rows are *actually* in, which under masking is not always
+        // what was picked: `row_order` drops a choice the mask does not allow,
+        // and a box that went on naming it would be a control disagreeing with
+        // the list under it about what it had done.
+        let offered = Order::offered(images, masked);
+        let effective = if offered.contains(&app.order) {
+            app.order.clone()
+        } else {
+            Order::Stored
+        };
+        let mut chosen = effective.clone();
         egui::ComboBox::from_id_salt("project sort")
             .width(width)
-            .selected_text(egui::RichText::new(app.order.label()).small())
+            .selected_text(egui::RichText::new(effective.label()).small())
             .show_ui(ui, |ui| {
                 // Truncate and not `Extend`, which is what `ComboBox` sets for
                 // its list. `Extend` lets an item wider than the box expand the
@@ -1732,7 +1923,7 @@ fn sort_by(ui: &mut egui::Ui, app: &App, images: &[project::Image], command: &mu
                 // truncation above stopped being about a hypothetical fifth
                 // label when this landed: a metadata key is text somebody
                 // typed, and nothing bounds how long it is.
-                for order in Order::all(images) {
+                for order in offered {
                     let label = order.label().to_owned();
                     ui.selectable_value(&mut chosen, order, label);
                 }
@@ -1743,11 +1934,52 @@ fn sort_by(ui: &mut egui::Ui, app: &App, images: &[project::Image], command: &mu
                  order the project file has them in, which is the order they \
                  were added.",
             );
-        if chosen != app.order && *command == Command::None {
+        if chosen != effective && *command == Command::None {
             *command = Command::SortBy(chosen);
         }
     });
     ui.add_space(6.0);
+}
+
+/// The checkbox that masks the names, for a blinded study.
+///
+/// QuPath's **Mask image names**, which is a check menu item on its browser's
+/// menu button bound to `PathPrefs.maskImageNamesProperty`. A checkbox in the
+/// pane here, beside the two controls it changes the meaning of.
+///
+/// # It is disabled rather than absent when it would not mask
+///
+/// A project this application wrote has `entry-<id>` in every `randomizedName`
+/// — see [`maskable`] — so ticking it would replace each name with a spelling
+/// of its entry id. The control is shown disabled with a hover saying so,
+/// rather than hidden: a missing control is indistinguishable from a feature
+/// that does not exist, and somebody who has masked one study and cannot find
+/// the tick for the next needs told which of the two they are looking at.
+fn mask_names(ui: &mut egui::Ui, app: &App, images: &[project::Image], command: &mut Command) {
+    let maskable = maskable(images);
+    let mut ticked = app.mask_names && maskable;
+    let response = ui
+        .add_enabled(
+            maskable,
+            egui::Checkbox::new(&mut ticked, egui::RichText::new("Mask names").small()),
+        )
+        .on_hover_text(
+            "Shows each image's randomized name instead of its own, and \
+             shuffles the rows, for blinded analysis. The search and the sort \
+             follow the masked names. The thumbnails are not masked — QuPath \
+             does not mask them either, and a pane of grey squares would be one \
+             nothing can be done with.",
+        )
+        .on_disabled_hover_text(
+            "This project's randomized names were written by QuPath Rust, and \
+             each one spells out its entry's id — masking with them would show \
+             the order the images were added. A project QuPath wrote has real \
+             random names and can be masked.",
+        );
+    ui.add_space(6.0);
+    if response.changed() && *command == Command::None {
+        *command = Command::MaskNames(ticked);
+    }
 }
 
 /// Whether `name` passes the browser's search box.
@@ -1791,13 +2023,31 @@ fn sort_by(ui: &mut egui::Ui, app: &App, images: &[project::Image], command: &mu
 /// already analysed. `Project::has_data` is where the bool comes from; the
 /// "unless it's already included" guard is ported with it, because an entry
 /// that defines the key means the value it typed rather than the file on disk.
-fn matches(image: &qupath_viewer::project::Image, has_data: bool, filter: &str) -> bool {
+///
+/// # Masking reaches the search, not only the rows
+///
+/// Under `masked` the name searched is the one shown, which is a divergence
+/// from QuPath and a deliberate one: `getAllImageRows` masks the rows and its
+/// predicate still tests `entry.getImageName()` — which *is* the masked name
+/// there, because `getImageName` is the masked accessor. Same behaviour,
+/// reached the other way round. The metadata is searched unmasked in both,
+/// which is worth knowing: a study whose metadata names the case is not
+/// blinded by masking the image names.
+fn matches(
+    image: &qupath_viewer::project::Image,
+    has_data: bool,
+    masked: bool,
+    filter: &str,
+) -> bool {
     let filter = filter.trim();
     if filter.replace('|', "").is_empty() {
         return true;
     }
     let filter = filter.to_lowercase();
-    let name = image.name.to_lowercase();
+    // The name that is *shown*, which under masking is the randomized one. A
+    // search that matched the real name would answer "which row is CMU-1?" with
+    // a list of one, and there would be nothing on screen saying it had.
+    let name = shown_name(image, masked).to_lowercase();
     if name.contains(&filter) {
         return true;
     }
@@ -1864,6 +2114,7 @@ fn is_showing(image: &qupath_viewer::project::Image, showing: Option<&Path>) -> 
 fn row_text(
     ui: &egui::Ui,
     image: &qupath_viewer::project::Image,
+    masked: bool,
     current: bool,
     present: bool,
 ) -> egui::text::LayoutJob {
@@ -1879,7 +2130,7 @@ fn row_text(
     };
     let mut job = egui::text::LayoutJob::default();
     job.append(
-        &image.name,
+        shown_name(image, masked),
         0.0,
         egui::TextFormat {
             font_id: egui::TextStyle::Body.resolve(ui.style()),
@@ -2351,7 +2602,7 @@ mod tests {
     /// look like a match.
     #[test]
     fn the_search_box_follows_qupaths_predicate() {
-        let named = |name: &str, filter: &str| super::matches(&image(name, &[]), false, filter);
+        let named = |name: &str, filter: &str| super::matches(&image(name, &[]), false, false, filter);
 
         // Nothing typed, and nothing but separators, accept everything.
         assert!(named("CMU-1", ""));
@@ -2384,6 +2635,19 @@ mod tests {
     /// since none of their filters mentions `has_data`.
     const NO_DATA: fn(usize) -> bool = |_| false;
 
+    /// A browser looking at a project with this search text and this order,
+    /// names unmasked.
+    ///
+    /// Most of these tests are about one of the two, so spelling out all three
+    /// fields at each call would bury which one the test is varying.
+    fn view<'a>(filter: &'a str, order: &'a super::Order) -> super::View<'a> {
+        super::View {
+            filter,
+            order,
+            masked: None,
+        }
+    }
+
     /// An entry with a name and a metadata map, for the predicate's tests.
     fn image(name: &str, metadata: &[(&str, &str)]) -> qupath_viewer::project::Image {
         qupath_viewer::project::Image {
@@ -2398,6 +2662,7 @@ mod tests {
                 .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
                 .collect(),
             tags: Vec::new(),
+            randomized_name: None,
         }
     }
 
@@ -2417,7 +2682,7 @@ mod tests {
     #[test]
     fn a_token_matches_the_entrys_metadata() {
         let slide = image("scan-3.tif", &[("stain", "H&E"), ("case", "17B")]);
-        let matches = |filter: &str| super::matches(&slide, false, filter);
+        let matches = |filter: &str| super::matches(&slide, false, false, filter);
 
         assert!(matches("tif|stain=h&e"));
         assert!(matches("case=17b|stain=h&e"));
@@ -2445,14 +2710,14 @@ mod tests {
     #[test]
     fn has_data_is_synthesised_unless_the_entry_defines_it() {
         let plain = image("scan-3.tif", &[]);
-        assert!(super::matches(&plain, true, "tif|has_data=true"));
-        assert!(!super::matches(&plain, true, "tif|has_data=false"));
-        assert!(super::matches(&plain, false, "tif|has_data=false"));
-        assert!(!super::matches(&plain, false, "tif|has_data=true"));
+        assert!(super::matches(&plain, true, false, "tif|has_data=true"));
+        assert!(!super::matches(&plain, true, false, "tif|has_data=false"));
+        assert!(super::matches(&plain, false, false, "tif|has_data=false"));
+        assert!(!super::matches(&plain, false, false, "tif|has_data=true"));
 
         let claimed = image("scan-3.tif", &[("has_data", "false")]);
-        assert!(super::matches(&claimed, true, "tif|has_data=false"));
-        assert!(!super::matches(&claimed, true, "tif|has_data=true"));
+        assert!(super::matches(&claimed, true, false, "tif|has_data=false"));
+        assert!(!super::matches(&claimed, true, false, "tif|has_data=true"));
     }
 
     /// A row is marked only when its own slide is the one on screen.
@@ -2476,6 +2741,7 @@ mod tests {
             description: None,
             metadata: Vec::new(),
             tags: Vec::new(),
+            randomized_name: None,
         };
         let here = std::path::Path::new("/slides/one.svs");
         let elsewhere = std::path::Path::new("/slides/two.svs");
@@ -2519,6 +2785,7 @@ mod tests {
                 vec![(String::from("block"), block.to_owned())]
             },
             tags: Vec::new(),
+            randomized_name: None,
         };
         vec![
             entry(7, "scan 10", "c.svs", "2"),
@@ -2531,7 +2798,7 @@ mod tests {
     #[test]
     fn the_rows_come_out_in_the_order_that_was_asked_for() {
         let images = entries();
-        let order = |order| super::row_order(&images, &NO_DATA, "", order);
+        let order = |order: &super::Order| super::row_order(&images, &NO_DATA, &view("", order));
 
         // The project's own order, which is the order they were added.
         assert_eq!(order(&super::Order::Stored), [0, 1, 2]);
@@ -2557,7 +2824,7 @@ mod tests {
     fn a_sorted_row_still_names_its_own_entry() {
         let images = entries();
         for order in super::Order::all(&images) {
-            let rows = super::row_order(&images, &NO_DATA, "", &order);
+            let rows = super::row_order(&images, &NO_DATA, &view("", &order));
             assert_eq!(rows.len(), images.len(), "{order:?} dropped a row");
             // Every entry exactly once: a sort that duplicated or lost one
             // would still be in order.
@@ -2627,8 +2894,7 @@ mod tests {
         let rows = super::row_order(
             &images,
             &NO_DATA,
-            "",
-            &super::Order::Metadata(String::from("block")),
+            &view("", &super::Order::Metadata(String::from("block"))),
         );
         assert_eq!(rows, [1, 0, 2]);
         assert_eq!(super::metadata_value(&images[1], "block"), "");
@@ -2648,10 +2914,152 @@ mod tests {
         let rows = super::row_order(
             &images,
             &NO_DATA,
-            "",
-            &super::Order::Metadata(String::from("stain")),
+            &view("", &super::Order::Metadata(String::from("stain"))),
         );
         assert_eq!(rows, [0, 1, 2]);
+    }
+
+    /// A masked entry, with a `randomizedName` that is not derived from its id.
+    fn masked_entry(id: u64, name: &str, random: &str) -> qupath_viewer::project::Image {
+        let mut image = image(name, &[("case", name)]);
+        image.id = id;
+        image.slide = Ok(std::path::PathBuf::from(format!("/slides/{name}.svs")));
+        image.randomized_name = Some(random.to_owned());
+        image
+    }
+
+    /// Masking shows the randomized name, and the search follows it.
+    ///
+    /// The second half is the leak worth a test. A masked pane whose search box
+    /// still matched the real names answers "which row is `tumour`?" with a
+    /// list of one — and nothing on screen says it has. The row is still
+    /// wearing its masked name while being the only one left.
+    #[test]
+    fn masking_reaches_the_name_and_the_search() {
+        let image = masked_entry(1, "tumour", "9f3a-b1");
+        assert_eq!(super::shown_name(&image, true), "9f3a-b1");
+        assert_eq!(super::shown_name(&image, false), "tumour");
+
+        // Unmasked, the real name is searchable and the random one is not.
+        assert!(super::matches(&image, false, false, "tumour"));
+        assert!(!super::matches(&image, false, false, "9f3a"));
+        // Masked, the other way round.
+        assert!(!super::matches(&image, false, true, "tumour"));
+        assert!(super::matches(&image, false, true, "9f3a"));
+    }
+
+    /// A project whose randomized names spell out the entry ids is not
+    /// maskable, and one QuPath wrote is.
+    ///
+    /// `project::files` writes `entry-<id>`, so this is the state every project
+    /// this application creates is in — the control is disabled for it, and the
+    /// pane refuses the flag even if it is already set. The test is here rather
+    /// than left to the reader because the two projects are indistinguishable
+    /// in the pane until the tick is pressed.
+    #[test]
+    fn a_project_whose_random_names_are_its_ids_is_not_maskable() {
+        let ours = vec![
+            masked_entry(1, "a", "entry-1"),
+            masked_entry(2, "b", "entry-2"),
+        ];
+        assert!(!super::maskable(&ours));
+
+        let theirs = vec![
+            masked_entry(1, "a", "8f14e45f-ea8b"),
+            masked_entry(2, "b", "c9f0f895-fb98"),
+        ];
+        assert!(super::maskable(&theirs));
+
+        // An entry with no randomized name at all is not one either.
+        let mut none = theirs.clone();
+        for image in &mut none {
+            image.randomized_name = None;
+        }
+        assert!(!super::maskable(&none));
+    }
+
+    /// Masked rows come out in the shuffle's order, and an entry the shuffle
+    /// does not name goes last rather than vanishing.
+    ///
+    /// The last part is reachable: the shuffle is drawn when masking is
+    /// switched on and a slide added afterwards is not in it. A row that
+    /// disappeared on being added would look like the add having failed.
+    #[test]
+    fn masked_rows_follow_the_shuffle() {
+        let images = vec![
+            masked_entry(1, "a", "r1"),
+            masked_entry(2, "b", "r2"),
+            masked_entry(3, "c", "r3"),
+        ];
+        let shuffle = [3, 1, 2];
+        let rows = super::row_order(
+            &images,
+            &NO_DATA,
+            &super::View {
+                filter: "",
+                order: &super::Order::Stored,
+                masked: Some(&shuffle),
+            },
+        );
+        assert_eq!(rows, [2, 0, 1]);
+
+        // An entry added since the shuffle was drawn.
+        let partial = [3, 1];
+        let rows = super::row_order(
+            &images,
+            &NO_DATA,
+            &super::View {
+                filter: "",
+                order: &super::Order::Stored,
+                masked: Some(&partial),
+            },
+        );
+        assert_eq!(rows, [2, 0, 1], "the unshuffled entry is not last");
+    }
+
+    /// The orders that would rank the rows by what the mask hides are neither
+    /// offered nor obeyed.
+    ///
+    /// Both halves are needed and the second is the one that is easy to miss:
+    /// the order outlives the checkbox, so `File name` picked a moment before
+    /// masking would go on ordering the rows by the file names being hidden
+    /// with nothing on screen saying so. `row_order` falls back to the shuffle.
+    #[test]
+    fn a_masked_list_is_not_ordered_by_what_it_hides() {
+        let images = vec![
+            masked_entry(3, "carcinoma", "r3"),
+            masked_entry(1, "adenoma", "r1"),
+            masked_entry(2, "benign", "r2"),
+        ];
+        assert_eq!(
+            super::Order::offered(&images, true),
+            [super::Order::Stored, super::Order::Name]
+        );
+        // Unmasked, the file names and the `case` key are both on the menu.
+        let unmasked = super::Order::offered(&images, false);
+        assert!(unmasked.contains(&super::Order::Uri));
+        assert!(unmasked.contains(&super::Order::Metadata(String::from("case"))));
+
+        // And a choice made before the tick is dropped, not obeyed. By file
+        // name these sort adenoma, benign, carcinoma — `[1, 2, 0]`; the shuffle
+        // is what comes back instead.
+        let shuffle = [2, 3, 1];
+        let masked = |order| {
+            super::row_order(
+                &images,
+                &NO_DATA,
+                &super::View {
+                    filter: "",
+                    order,
+                    masked: Some(&shuffle),
+                },
+            )
+        };
+        assert_eq!(masked(&super::Order::Uri), [2, 0, 1]);
+        let by_case = super::Order::Metadata(String::from("case"));
+        assert_eq!(masked(&by_case), [2, 0, 1]);
+        // `Name` is allowed, and sorts the randomized names: r1, r2, r3.
+        assert_eq!(masked(&super::Order::Name), [1, 2, 0]);
     }
 
     /// The search runs first and the sort orders what it leaves.
@@ -2666,14 +3074,14 @@ mod tests {
         // `scan 2` and `scan 10` both contain `scan 1`? No — `scan 2` does
         // not, and `scan 10` does. So this is two rows: `scan 1` and
         // `scan 10`, in that order by name and the other way in the file.
-        let rows = super::row_order(&images, &NO_DATA, "scan 1", &super::Order::Name);
+        let rows = super::row_order(&images, &NO_DATA, &view("scan 1", &super::Order::Name));
         assert_eq!(rows, [2, 0]);
         assert_eq!(images[rows[0]].name, "scan 1");
         assert_eq!(images[rows[1]].name, "scan 10");
 
         // The same search, left in the project's order.
         assert_eq!(
-            super::row_order(&images, &NO_DATA, "scan 1", &super::Order::Stored),
+            super::row_order(&images, &NO_DATA, &view("scan 1", &super::Order::Stored)),
             [0, 2]
         );
     }
@@ -2698,8 +3106,9 @@ mod tests {
             description: None,
             metadata: Vec::new(),
             tags: Vec::new(),
+            randomized_name: None,
         });
-        let rows = super::row_order(&images, &NO_DATA, "", &super::Order::Uri);
+        let rows = super::row_order(&images, &NO_DATA, &view("", &super::Order::Uri));
         assert_eq!(rows[0], 3, "the entry with no file is not first");
 
         // By *name* it sorts where its name puts it, which is the third of
@@ -2709,7 +3118,7 @@ mod tests {
         // falling back to the other; the assumption written here first was
         // that it would be last, and the sort it is a test of is the reason
         // it is not.
-        let by_name = super::row_order(&images, &NO_DATA, "", &super::Order::Name);
+        let by_name = super::row_order(&images, &NO_DATA, &view("", &super::Order::Name));
         let names: Vec<&str> = by_name.iter().map(|&i| images[i].name.as_str()).collect();
         assert_eq!(names, ["scan 1", "scan 2", "scan 3", "scan 10"]);
     }
