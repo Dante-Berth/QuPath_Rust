@@ -2349,6 +2349,22 @@ recording, with the twist that the thing that was wrong was written here. It was
 found by asking what the mask would actually *show*, which is a question a test
 of `shown_name` does not ask.
 
+And then the *control* for it was wrong, which the same memory found the same
+way. Launching the application on both kinds of project at
+`WINIT_X11_SCALE_FACTOR=2` and photographing them says that `add_enabled(false)`
+dims the label from 179 to 103 on a 27 background and the box from 60 to 43 — a
+real difference, and one that reads as **an ordinary unticked checkbox** in a
+dark theme. A user meeting a project that cannot be blinded had no way to tell
+that from blinding simply being off, and the hover that explains it only appears
+to somebody who already suspects there is something to explain. So the label
+carries the reason as well: *Mask names — not for this project*. The hover has
+the whole explanation; the label is what makes anyone hover.
+
+Worth stating plainly, because it is the third time in this file: **a control
+that refuses has to look like it is refusing, and greying it is not that.**
+Nothing but a photograph was ever going to say so — the widget was constructed
+correctly, the test asserted the right function, and the pane was wrong.
+
 #### The shuffle, and the one thing its seed must not be
 
 QuPath reshuffles inside `getAllImageRows` on every `refreshTree` — which

@@ -1951,17 +1951,35 @@ fn sort_by(
 ///
 /// A project this application wrote has `entry-<id>` in every `randomizedName`
 /// — see [`maskable`] — so ticking it would replace each name with a spelling
-/// of its entry id. The control is shown disabled with a hover saying so,
-/// rather than hidden: a missing control is indistinguishable from a feature
-/// that does not exist, and somebody who has masked one study and cannot find
-/// the tick for the next needs told which of the two they are looking at.
+/// of its entry id. The control is shown disabled rather than hidden: a missing
+/// control is indistinguishable from a feature that does not exist, and
+/// somebody who has masked one study and cannot find the tick for the next
+/// needs told which of the two they are looking at.
+///
+/// **Disabled is not enough on its own**, which a photograph of the real window
+/// is what said. `add_enabled(false)` dims the label and the box, and a dimmed
+/// unticked checkbox in a dark theme reads as an ordinary unticked checkbox —
+/// so the label carries the reason too. The hover has the whole explanation;
+/// the label is what makes somebody hover.
 fn mask_names(ui: &mut egui::Ui, app: &App, images: &[project::Image], command: &mut Command) {
     let maskable = maskable(images);
     let mut ticked = app.mask_names && maskable;
+    // The label says *why* when it cannot be ticked, and the reason it does is
+    // that greying alone was not enough. Photographed at a scale factor of 2,
+    // the disabled control and the enabled one differ by a text colour of 103
+    // against 179 on a 27 background and a box fill of 43 against 60 — a real
+    // difference, and one that reads as an ordinary unticked checkbox in a dark
+    // theme rather than as a control that is refusing. A user meeting a project
+    // that cannot be blinded had no way to tell that from blinding being off,
+    // and the hover that explains it only appears to somebody who already
+    // suspects there is something to explain.
     let response = ui
         .add_enabled(
             maskable,
-            egui::Checkbox::new(&mut ticked, egui::RichText::new("Mask names").small()),
+            egui::Checkbox::new(
+                &mut ticked,
+                egui::RichText::new(mask_label(maskable)).small(),
+            ),
         )
         .on_hover_text(
             "Shows each image's randomized name instead of its own, and \
@@ -1979,6 +1997,21 @@ fn mask_names(ui: &mut egui::Ui, app: &App, images: &[project::Image], command: 
     ui.add_space(6.0);
     if response.changed() && *command == Command::None {
         *command = Command::MaskNames(ticked);
+    }
+}
+
+/// What the masking checkbox is called, which says why when it cannot be
+/// ticked.
+///
+/// A function rather than an `if` inside [`mask_names`] so that the two strings
+/// can be asserted to differ without a window — see
+/// `an_unmaskable_project_gets_a_different_label`, and see [`mask_names`] for
+/// what greying alone looked like.
+fn mask_label(maskable: bool) -> &'static str {
+    if maskable {
+        "Mask names"
+    } else {
+        "Mask names — not for this project"
     }
 }
 
@@ -2976,6 +3009,26 @@ mod tests {
             image.randomized_name = None;
         }
         assert!(!super::maskable(&none));
+    }
+
+    /// The two projects give the checkbox two different labels.
+    ///
+    /// A weak test for a thing a photograph found: `add_enabled(false)` dims
+    /// the label from 179 to 103 on a 27 background, which is a real difference
+    /// and reads as an ordinary unticked checkbox in a dark theme. The label is
+    /// what distinguishes them at a glance, so it is worth one assertion that
+    /// the two are not the same string — a refactor that made them the same
+    /// would put the pane back where the photograph found it.
+    #[test]
+    fn an_unmaskable_project_gets_a_different_label() {
+        let ours = [masked_entry(1, "a", "entry-1")];
+        let theirs = [masked_entry(1, "a", "8f14e45f-ea8b")];
+        assert!(!super::maskable(&ours));
+        assert!(super::maskable(&theirs));
+        assert_ne!(
+            super::mask_label(super::maskable(&ours)),
+            super::mask_label(super::maskable(&theirs))
+        );
     }
 
     /// Masked rows come out in the shuffle's order, and an entry the shuffle
