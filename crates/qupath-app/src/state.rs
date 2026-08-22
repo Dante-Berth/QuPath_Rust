@@ -432,6 +432,21 @@ pub struct Project {
     /// [`App::open`] reports what actually happened. QuPath checks on open for
     /// the same reason.
     present: Vec<bool>,
+    /// Whether each image had a `data.qpdata` beside it when the project was
+    /// opened, in the same order as `stored.images`.
+    ///
+    /// `DefaultProjectImageEntry.hasImageData` is `Files.exists` on
+    /// `data/<entryID>/data.qpdata`, so this is that answer and not an
+    /// approximation of it — the file being Java serialisation this refuses to
+    /// *read* does not stop it being a file whose presence can be seen.
+    ///
+    /// It exists because `ProjectEntryPredicate` synthesises a `has_data=<bool>`
+    /// metadata string for every entry that does not define the key itself, so
+    /// the search box cannot answer `has_data=true` without it. Checked once
+    /// for `present`'s reason, and staler than `present` for a better one:
+    /// nothing in this application writes a `.qpdata`, so the only thing that
+    /// changes the answer is QuPath running on the same study.
+    has_data: Vec<bool>,
     /// A picture of each image, made in the background as the list is read.
     ///
     /// Owned by the project rather than by the application, which is what makes
@@ -450,6 +465,18 @@ impl Project {
     #[must_use]
     pub fn present(&self, index: usize) -> bool {
         self.present.get(index).copied().unwrap_or(true)
+    }
+
+    /// Whether entry `index` had a `data.qpdata` when the project was opened.
+    ///
+    /// Out of range reads as `false`, and the asymmetry with [`Project::present`]
+    /// is deliberate. There, the answer that invents nothing is the one that
+    /// adds no warning to a row. Here it is the opposite: `has_data=true` is a
+    /// claim that QuPath has analysed this image, and a row out of range is one
+    /// nothing is known about.
+    #[must_use]
+    pub fn has_data(&self, index: usize) -> bool {
+        self.has_data.get(index).copied().unwrap_or(false)
     }
 
     /// Whether the project is where it says it is.
@@ -943,6 +970,21 @@ impl App {
                     .iter()
                     .map(|image| image.slide.as_ref().is_ok_and(|path| path.is_file()))
                     .collect();
+                // `data/<entryID>/data.qpdata`, which is `getImageDataPath`
+                // spelled out — relative to the project *directory*, so the
+                // file's own parent, not the file.
+                let directory = path.parent().map(Path::to_path_buf).unwrap_or_default();
+                let has_data = stored
+                    .images
+                    .iter()
+                    .map(|image| {
+                        directory
+                            .join("data")
+                            .join(image.id.to_string())
+                            .join("data.qpdata")
+                            .is_file()
+                    })
+                    .collect();
                 // Taken before the new project is built, so the pictures the
                 // browser already has survive a re-read and the worker for the
                 // project being replaced is stopped. Both matter in the same
@@ -962,6 +1004,7 @@ impl App {
                     path,
                     stored,
                     present,
+                    has_data,
                     pictures: Pictures::start(&slides, &known),
                 });
                 self.show_project = true;

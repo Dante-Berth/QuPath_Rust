@@ -210,13 +210,23 @@ impl Order {
 /// The search runs first and the sort orders what it leaves, which is what
 /// QuPath does: its tree is rebuilt from the entries the predicate passes.
 ///
+/// `has_data` is a function of the row index rather than a slice, because the
+/// answer lives on `state::Project` — which owns the `stat` results — and this
+/// takes a slice of entries so that a test can build a list of rows without
+/// one. It is called only for the rows the filter reaches.
+///
 /// `sort_by` and not `sort_unstable_by`: two entries with the same name, or the
 /// same file name in two directories, compare equal, and a stable sort leaves
 /// them in the project's order rather than in an order that changes when the
 /// list is redrawn.
-fn row_order(images: &[project::Image], filter: &str, order: Order) -> Vec<usize> {
+fn row_order(
+    images: &[project::Image],
+    has_data: &dyn Fn(usize) -> bool,
+    filter: &str,
+    order: Order,
+) -> Vec<usize> {
     let mut rows: Vec<usize> = (0..images.len())
-        .filter(|&index| matches(&images[index].name, filter))
+        .filter(|&index| matches(&images[index], has_data(index), filter))
         .collect();
     if order == Order::Stored {
         return rows;
@@ -1389,7 +1399,12 @@ fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
     // Computed once and iterated below, rather than filtered twice: the count
     // in the heading and the rows under it are then the same list by
     // construction, and cannot disagree about what the search left.
-    let rows = row_order(&project.stored.images, &app.filter, app.order);
+    let rows = row_order(
+        &project.stored.images,
+        &|index| project.has_data(index),
+        &app.filter,
+        app.order,
+    );
     let shown = rows.len();
     ui.label(
         egui::RichText::new(match (images, shown, images == shown) {
@@ -1567,11 +1582,17 @@ fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
 fn search(ui: &mut egui::Ui, app: &App, command: &mut Command) {
     let mut text = app.filter.clone();
     let field = egui::TextEdit::singleline(&mut text)
-        .hint_text("Search names")
+        .hint_text("Search names and metadata")
         .desired_width(f32::INFINITY);
+    // The hover says what `|` does, because that is the one thing about this
+    // control a user can get wrong: it reads as "or" and means "and". The
+    // metadata half is spelled with an example rather than a rule — `key=value`
+    // describes the syntax and `stain=H&E` shows what to type.
     let response = ui.add(field).on_hover_text(
         "Shows the images whose name contains this. Separate several with `|` \
-         and every one of them has to match.",
+         and every one of them has to match — against the name or against the \
+         image's metadata as `key=value`, so `tif|stain=H&E` needs both. \
+         `has_data=true` finds the images QuPath has already analysed.",
     );
     ui.add_space(6.0);
     if response.changed() && *command == Command::None {
@@ -1650,33 +1671,67 @@ fn sort_by(ui: &mut egui::Ui, app: &App, command: &mut Command) {
 /// field is the class comment quoted above, and it says the same thing in the
 /// same surprising way.
 ///
-/// What is **not** ported is the other half of a token: QuPath also tests each
-/// one against the entry's metadata as `key=value`, plus a synthesised
-/// `has_data=<bool>`. `project::read` summarises an entry to an id, a name, a
-/// builder and a path — the metadata map stays in the document, unread — so a
-/// token like `has_data=true` matches nothing here where QuPath would match a
-/// row. Narrowing that would mean reading the map, which is a different change
-/// from a search box.
-fn matches(name: &str, filter: &str) -> bool {
+/// The other half of a token is the entry's metadata, flattened to `key=value`
+/// — so `tif|stain=h&e` finds the images whose name has `tif` *and* which carry
+/// that pair. The class comment quoted above is QuPath's own documentation for
+/// it.
+///
+/// # `contains`, and not an equality, on a string that looks like an equality
+///
+/// The pairs are matched with `contains` like every other token, which is what
+/// `ProjectEntryPredicate` does and is easy to write the other way round. So
+/// `stain=h` matches `stain=h&e`, `=17b` matches any key whose value is that,
+/// and a bare `stain` matches every entry that has the key at all. A port that
+/// split the token on `=` and compared the halves would be stricter than
+/// QuPath in a way that shows fewer rows than QuPath for the same text — and
+/// the rows it dropped would be the ones somebody was searching for.
+///
+/// # `has_data`, which is synthesised rather than stored
+///
+/// No entry has a `has_data` key in its file. QuPath appends
+/// `has_data=<bool>` to the flattened pairs for every entry that does *not*
+/// define one itself, so a study can be narrowed to the images somebody has
+/// already analysed. `Project::has_data` is where the bool comes from; the
+/// "unless it's already included" guard is ported with it, because an entry
+/// that defines the key means the value it typed rather than the file on disk.
+fn matches(image: &qupath_viewer::project::Image, has_data: bool, filter: &str) -> bool {
     let filter = filter.trim();
     if filter.replace('|', "").is_empty() {
         return true;
     }
     let filter = filter.to_lowercase();
-    let name = name.to_lowercase();
+    let name = image.name.to_lowercase();
     if name.contains(&filter) {
         return true;
     }
     if !filter.contains('|') {
         return false;
     }
+
+    let mut pairs: Vec<String> = image
+        .metadata
+        .iter()
+        .map(|(key, value)| format!("{key}={value}").to_lowercase())
+        .collect();
+    // Only when the entry does not define the key itself. An entry carrying
+    // `has_data=false` next to a data file on disk is a user contradicting the
+    // filesystem, and QuPath lets them: `containsKey` is checked before the
+    // synthesised string is appended.
+    if !image
+        .metadata
+        .iter()
+        .any(|(key, _)| key.eq_ignore_ascii_case("has_data"))
+    {
+        pairs.push(format!("has_data={has_data}"));
+    }
+
     // Not trimmed, which is QuPath's behaviour rather than an oversight: it
     // drops a *blank* token and matches the rest as they are, so `a | b` looks
     // for `a ` and ` b` with their spaces.
     filter
         .split('|')
         .filter(|token| !token.trim().is_empty())
-        .all(|token| name.contains(token))
+        .all(|token| name.contains(token) || pairs.iter().any(|pair| pair.contains(token)))
 }
 
 /// Whether this row's image is the slide on screen.
@@ -2199,26 +2254,108 @@ mod tests {
     /// look like a match.
     #[test]
     fn the_search_box_follows_qupaths_predicate() {
+        let named = |name: &str, filter: &str| super::matches(&image(name, &[]), false, filter);
+
         // Nothing typed, and nothing but separators, accept everything.
-        assert!(super::matches("CMU-1", ""));
-        assert!(super::matches("CMU-1", "   "));
-        assert!(super::matches("CMU-1", "|"));
-        assert!(super::matches("CMU-1", " || "));
+        assert!(named("CMU-1", ""));
+        assert!(named("CMU-1", "   "));
+        assert!(named("CMU-1", "|"));
+        assert!(named("CMU-1", " || "));
 
         // A substring, either case, anywhere in the name.
-        assert!(super::matches("CMU-1, JP2K", "jp2k"));
-        assert!(super::matches("CMU-1, JP2K", "CMU"));
-        assert!(super::matches("CMU-1, JP2K", "1, jp"));
-        assert!(!super::matches("CMU-1, JP2K", "block"));
+        assert!(named("CMU-1, JP2K", "jp2k"));
+        assert!(named("CMU-1, JP2K", "CMU"));
+        assert!(named("CMU-1, JP2K", "1, jp"));
+        assert!(!named("CMU-1, JP2K", "block"));
 
         // Every token has to be found, not any of them.
-        assert!(super::matches("CMU-1, JP2K", "cmu|jp2k"));
-        assert!(!super::matches("CMU-1, JP2K", "cmu|block"));
-        assert!(!super::matches("CMU-1, JP2K", "block|section"));
+        assert!(named("CMU-1, JP2K", "cmu|jp2k"));
+        assert!(!named("CMU-1, JP2K", "cmu|block"));
+        assert!(!named("CMU-1, JP2K", "block|section"));
 
         // And the whole text is tried against the name before it is split, so
         // a name that really does contain a `|` matches it literally.
-        assert!(super::matches("scan | second pass", "n | s"));
+        assert!(named("scan | second pass", "n | s"));
+    }
+
+    /// No entry has a data file, for the tests that are about ordering rather
+    /// than about the search.
+    ///
+    /// Named rather than written inline at each call, because a closure spelled
+    /// out six times is six places to accidentally write `true` in one of them
+    /// — and every one of these tests would still pass with the wrong answer,
+    /// since none of their filters mentions `has_data`.
+    const NO_DATA: fn(usize) -> bool = |_| false;
+
+    /// An entry with a name and a metadata map, for the predicate's tests.
+    fn image(name: &str, metadata: &[(&str, &str)]) -> qupath_viewer::project::Image {
+        qupath_viewer::project::Image {
+            id: 1,
+            name: name.to_owned(),
+            builder: String::from("uri"),
+            slide: Ok(std::path::PathBuf::from("/slides/one.svs")),
+            uri: None,
+            description: None,
+            metadata: metadata
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect(),
+            tags: Vec::new(),
+        }
+    }
+
+    /// A token is tried against the entry's metadata as `key=value`, once the
+    /// text has a `|` in it.
+    ///
+    /// The first assertion is the whole feature: `tif` is not in this name and
+    /// `stain=h&e` is not either, and the row matches because the two tokens
+    /// are found in different places. A predicate that tested tokens against
+    /// the name alone — which is what this was — fails it.
+    ///
+    /// The pairs are matched with `contains` and **not** as an equality, which
+    /// is the group after: `stain=h` matches `stain=h&e`, and a bare key
+    /// matches every entry that has it. Written down because splitting the
+    /// token on `=` is the natural way to write this and is stricter than
+    /// QuPath — it would hide rows somebody was looking for.
+    #[test]
+    fn a_token_matches_the_entrys_metadata() {
+        let slide = image("scan-3.tif", &[("stain", "H&E"), ("case", "17B")]);
+        let matches = |filter: &str| super::matches(&slide, false, filter);
+
+        assert!(matches("tif|stain=h&e"));
+        assert!(matches("case=17b|stain=h&e"));
+        assert!(!matches("tif|stain=cd8"));
+
+        // `contains`, not an equality.
+        assert!(matches("tif|stain=h"));
+        assert!(matches("tif|stain"));
+        assert!(matches("tif|=17b"));
+
+        // Still only when the text is split: a metadata pair is never tried
+        // against the whole filter text, which QuPath returns before it builds
+        // them.
+        assert!(!matches("stain=h&e"));
+    }
+
+    /// `has_data=<bool>` is synthesised for an entry that does not carry the
+    /// key, and is the entry's own value for one that does.
+    ///
+    /// The last pair is the guard worth having: an entry saying
+    /// `has_data=false` beside a data file on disk is a user contradicting the
+    /// filesystem, and `ProjectEntryPredicate` lets them — it appends the
+    /// synthesised string only when `containsKey` says no. A port that appended
+    /// it unconditionally would match a row on both values at once.
+    #[test]
+    fn has_data_is_synthesised_unless_the_entry_defines_it() {
+        let plain = image("scan-3.tif", &[]);
+        assert!(super::matches(&plain, true, "tif|has_data=true"));
+        assert!(!super::matches(&plain, true, "tif|has_data=false"));
+        assert!(super::matches(&plain, false, "tif|has_data=false"));
+        assert!(!super::matches(&plain, false, "tif|has_data=true"));
+
+        let claimed = image("scan-3.tif", &[("has_data", "false")]);
+        assert!(super::matches(&claimed, true, "tif|has_data=false"));
+        assert!(!super::matches(&claimed, true, "tif|has_data=true"));
     }
 
     /// A row is marked only when its own slide is the one on screen.
@@ -2289,7 +2426,7 @@ mod tests {
     #[test]
     fn the_rows_come_out_in_the_order_that_was_asked_for() {
         let images = entries();
-        let order = |order| super::row_order(&images, "", order);
+        let order = |order| super::row_order(&images, &NO_DATA, "", order);
 
         // The project's own order, which is the order they were added.
         assert_eq!(order(super::Order::Stored), [0, 1, 2]);
@@ -2315,7 +2452,7 @@ mod tests {
     fn a_sorted_row_still_names_its_own_entry() {
         let images = entries();
         for order in super::Order::ALL {
-            let rows = super::row_order(&images, "", order);
+            let rows = super::row_order(&images, &NO_DATA, "", order);
             assert_eq!(rows.len(), images.len(), "{order:?} dropped a row");
             // Every entry exactly once: a sort that duplicated or lost one
             // would still be in order.
@@ -2345,13 +2482,16 @@ mod tests {
         // `scan 2` and `scan 10` both contain `scan 1`? No — `scan 2` does
         // not, and `scan 10` does. So this is two rows: `scan 1` and
         // `scan 10`, in that order by name and the other way in the file.
-        let rows = super::row_order(&images, "scan 1", super::Order::Name);
+        let rows = super::row_order(&images, &NO_DATA, "scan 1", super::Order::Name);
         assert_eq!(rows, [2, 0]);
         assert_eq!(images[rows[0]].name, "scan 1");
         assert_eq!(images[rows[1]].name, "scan 10");
 
         // The same search, left in the project's order.
-        assert_eq!(super::row_order(&images, "scan 1", super::Order::Stored), [0, 2]);
+        assert_eq!(
+            super::row_order(&images, &NO_DATA, "scan 1", super::Order::Stored),
+            [0, 2]
+        );
     }
 
     /// An entry that names no file sorts by file name under the empty string.
@@ -2375,7 +2515,7 @@ mod tests {
             metadata: Vec::new(),
             tags: Vec::new(),
         });
-        let rows = super::row_order(&images, "", super::Order::Uri);
+        let rows = super::row_order(&images, &NO_DATA, "", super::Order::Uri);
         assert_eq!(rows[0], 3, "the entry with no file is not first");
 
         // By *name* it sorts where its name puts it, which is the third of
@@ -2385,7 +2525,7 @@ mod tests {
         // falling back to the other; the assumption written here first was
         // that it would be last, and the sort it is a test of is the reason
         // it is not.
-        let by_name = super::row_order(&images, "", super::Order::Name);
+        let by_name = super::row_order(&images, &NO_DATA, "", super::Order::Name);
         let names: Vec<&str> = by_name.iter().map(|&i| images[i].name.as_str()).collect();
         assert_eq!(names, ["scan 1", "scan 2", "scan 3", "scan 10"]);
     }
