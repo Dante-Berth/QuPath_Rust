@@ -91,6 +91,22 @@ impl Value {
         }
     }
 
+    /// The fields, in the order the file lists them, or `None` if this is not
+    /// an object.
+    ///
+    /// The order matters and is not incidental. Gson serialises a
+    /// `LinkedHashMap`, which is what `DefaultProjectImageEntry` holds its
+    /// metadata in, so the file's order is the order a user put the keys in —
+    /// and a browser that showed them in some other order would be reordering
+    /// something someone chose.
+    #[must_use]
+    pub fn as_object(&self) -> Option<&[(String, Self)]> {
+        match self {
+            Self::Object(fields) => Some(fields),
+            _ => None,
+        }
+    }
+
     /// The elements, or `None` if this is not an array.
     #[must_use]
     pub fn as_array(&self) -> Option<&[Self]> {

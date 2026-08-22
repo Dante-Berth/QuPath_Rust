@@ -2239,6 +2239,9 @@ mod tests {
                 .map(std::path::PathBuf::from)
                 .map_err(std::string::ToString::to_string),
             uri: None,
+            description: None,
+            metadata: Vec::new(),
+            tags: Vec::new(),
         };
         let here = std::path::Path::new("/slides/one.svs");
         let elsewhere = std::path::Path::new("/slides/two.svs");
@@ -2271,6 +2274,9 @@ mod tests {
             builder: String::from("uri"),
             slide: Ok(std::path::PathBuf::from(format!("/slides/{file}"))),
             uri: None,
+            description: None,
+            metadata: Vec::new(),
+            tags: Vec::new(),
         };
         vec![
             entry(7, "scan 10", "c.svs"),
@@ -2365,6 +2371,9 @@ mod tests {
             builder: String::from("rotated"),
             slide: Err(String::from("a `rotated` image")),
             uri: None,
+            description: None,
+            metadata: Vec::new(),
+            tags: Vec::new(),
         });
         let rows = super::row_order(&images, "", super::Order::Uri);
         assert_eq!(rows[0], 3, "the entry with no file is not first");

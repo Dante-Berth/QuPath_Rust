@@ -522,6 +522,44 @@ pub struct Image {
     /// reads both as the same URI, so a project rewritten from the decoded
     /// paths would change every line without changing anything.
     pub uri: Option<String>,
+    /// The entry's free-text `description`, which QuPath's browser shows under
+    /// the name.
+    ///
+    /// `Option` rather than an empty string, because `DefaultProjectImageEntry`
+    /// leaves the field null until someone sets one and Gson omits it — so
+    /// "nobody wrote a description" and "somebody cleared it to empty" are
+    /// different states of the file, and only the reader can still tell them
+    /// apart.
+    pub description: Option<String>,
+    /// The entry's `metadata` map, in the file's order.
+    ///
+    /// **Not the server metadata block, which is a different `metadata` at a
+    /// different depth.** The one here is `DefaultProjectImageEntry.metadata`,
+    /// a `Map<String, String>` a user fills in from the browser; the one inside
+    /// `serverBuilder` describes the pixels and is what [`server_builder`]
+    /// deliberately does not write. The two are told apart by where they are
+    /// and nothing else — the same trap [`Image::uri`] met, where the first
+    /// `"uri"` in an entry's text is not the entry's.
+    ///
+    /// A `Vec` of pairs and not a map, because Gson serialises a
+    /// `LinkedHashMap` and the order in the file is the order somebody entered
+    /// the keys in. `getMetadata` hands the browser that map directly, so its
+    /// iteration order is what QuPath's own summary lists — and a `BTreeMap`
+    /// here would silently re-alphabetise it.
+    ///
+    /// Values that are not strings are dropped rather than stringified: the
+    /// Java field is `Map<String, String>`, so a number there is a file QuPath
+    /// would itself fail to deserialise, and inventing a spelling for it would
+    /// be this reader claiming to have read something QuPath cannot.
+    pub metadata: Vec<(String, String)>,
+    /// The entry's `tags`, in the file's order.
+    ///
+    /// A `LinkedHashSet` on the Java side, so the same ordering argument as
+    /// [`Image::metadata`] applies. Read but not yet shown by anything: it is
+    /// here because [`added`] preserves the field blind, and a browser that
+    /// wants to filter on tags should not have to re-read the document to find
+    /// them.
+    pub tags: Vec<String>,
 }
 
 /// A project, as read back from `project.qpproj`.
@@ -801,12 +839,45 @@ fn image((position, value): (usize, &crate::json::Value)) -> Image {
         ))
     };
 
+    // `value.get`, and pointedly not a search: the entry's map is the one at
+    // the top level of the entry. `serverBuilder` carries a `metadata` of its
+    // own describing the pixels, and reading that one here would hand a browser
+    // `width` and `height` as though a user had typed them.
+    let metadata = value
+        .get("metadata")
+        .and_then(crate::json::Value::as_object)
+        .map(|fields| {
+            fields
+                .iter()
+                .filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_owned())))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let tags = value
+        .get("tags")
+        .and_then(crate::json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(crate::json::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+
     Image {
         id,
         name,
         builder: kind,
         slide,
         uri,
+        description: value
+            .get("description")
+            .and_then(crate::json::Value::as_str)
+            .map(str::to_owned),
+        metadata,
+        tags,
     }
 }
 
@@ -1441,6 +1512,105 @@ mod tests {
             stored.images[0].slide.as_deref(),
             Ok(Path::new("/data/right.svs"))
         );
+    }
+
+    /// The same trap one level along: an entry has a `metadata` map and its
+    /// `serverBuilder` has a `metadata` block, and they are different things.
+    ///
+    /// The entry's is `Map<String, String>` a user typed into the browser. The
+    /// builder's describes the pixels — `width`, `levels`, `isRGB` — and is the
+    /// block [`server_builder`] refuses to write. A reader that found the wrong
+    /// one would offer `width=46000` as a metadata key somebody could sort a
+    /// study by, and it would look entirely plausible.
+    #[test]
+    fn a_builders_metadata_block_is_not_the_entrys_metadata() {
+        let stored = read(
+            r#"{"createTimestamp": 1, "modifyTimestamp": 2, "images": [
+                 {"entryID": 1, "imageName": "A",
+                  "metadata": {"case": "17B"},
+                  "serverBuilder": {
+                    "builderType": "uri",
+                    "uri": "file:/data/right.svs",
+                    "metadata": {"width": 46000, "isRGB": true}}}]}"#,
+        )
+        .expect("a project");
+        assert_eq!(
+            stored.images[0].metadata,
+            vec![(String::from("case"), String::from("17B"))],
+            "the builder's block was read as the entry's map"
+        );
+    }
+
+    /// The map keeps the file's order, because Gson wrote a `LinkedHashMap`
+    /// and that order is the one somebody entered the keys in.
+    ///
+    /// Written with keys that are *not* in alphabetical order, so that a reader
+    /// which collected them into a `BTreeMap` — the obvious choice, and the
+    /// wrong one — fails here rather than passing and re-alphabetising every
+    /// study quietly.
+    #[test]
+    fn the_metadata_map_is_in_the_files_order() {
+        let stored = read(
+            r#"{"createTimestamp": 1, "modifyTimestamp": 2, "images": [
+                 {"entryID": 1, "imageName": "A",
+                  "metadata": {"stain": "H&E", "case": "17B", "block": "2"},
+                  "serverBuilder": {"builderType": "uri", "uri": "file:/x.svs"}}]}"#,
+        )
+        .expect("a project");
+        let keys: Vec<&str> = stored.images[0]
+            .metadata
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect();
+        assert_eq!(keys, ["stain", "case", "block"]);
+    }
+
+    /// A value that is not a string is dropped, and the rest of the map
+    /// survives.
+    ///
+    /// The Java field is `Map<String, String>`, so a number there is a file
+    /// QuPath's own Gson would refuse. Dropping the one pair rather than
+    /// failing the whole project is the same judgement [`read`] makes about an
+    /// entry it cannot open: the row is still worth showing, and a study is not
+    /// worth refusing over one key.
+    #[test]
+    fn a_metadata_value_that_is_not_a_string_is_dropped() {
+        let stored = read(
+            r#"{"createTimestamp": 1, "modifyTimestamp": 2, "images": [
+                 {"entryID": 1, "imageName": "A",
+                  "metadata": {"case": "17B", "count": 12, "stain": "H&E"},
+                  "serverBuilder": {"builderType": "uri", "uri": "file:/x.svs"}}]}"#,
+        )
+        .expect("a project");
+        assert_eq!(
+            stored.images[0].metadata,
+            vec![
+                (String::from("case"), String::from("17B")),
+                (String::from("stain"), String::from("H&E")),
+            ]
+        );
+    }
+
+    /// The description and the tags, which QuPath writes beside the map.
+    ///
+    /// An entry with neither reads as `None` and an empty list rather than as
+    /// an error: `DefaultProjectImageEntry` leaves `description` null until
+    /// somebody sets one, and Gson omits a null.
+    #[test]
+    fn the_description_and_tags_are_read_and_may_be_absent() {
+        let stored = read(
+            r#"{"createTimestamp": 1, "modifyTimestamp": 2, "images": [
+                 {"entryID": 1, "imageName": "A", "description": "control arm",
+                  "tags": ["control", "batch 3"],
+                  "serverBuilder": {"builderType": "uri", "uri": "file:/a.svs"}},
+                 {"entryID": 2, "imageName": "B",
+                  "serverBuilder": {"builderType": "uri", "uri": "file:/b.svs"}}]}"#,
+        )
+        .expect("a project");
+        assert_eq!(stored.images[0].description.as_deref(), Some("control arm"));
+        assert_eq!(stored.images[0].tags, ["control", "batch 3"]);
+        assert_eq!(stored.images[1].description, None);
+        assert!(stored.images[1].tags.is_empty());
     }
 
     /// An empty project reads as an empty project, and so does one whose
