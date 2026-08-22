@@ -22,9 +22,24 @@ mkdir -p "$fixtures"
 # input is a project directory written by `cargo run --example project_sample`,
 # which nothing here does, so it fell back to a relative default that does not
 # exist, emptied a committed fixture and took the run down. See
-# record-project.sh.
+# record-project.sh. ProjectExport and ProjectOpen take the same input and are
+# excluded with it.
+#
+# OpenSlideLevels needs a slide *and* qupath-extension-openslide, which is not
+# in `modules` above, so here it does not merely lack an input — it does not
+# compile. It has its own script, record-openslide-levels.sh.
+#
+# This list is the whole guard, and it is a footgun: a new recorder in java/ is
+# picked up automatically, so one that needs an input nobody passes empties its
+# own committed fixture on the next run. That is not hypothetical — adding the
+# three above without touching this line is exactly what happened, and the run
+# aborted on the first of them alphabetically, which is the only reason the
+# other two still had their fixtures afterwards.
 for src in "$root"/parity/java/*.java; do
-    case "$(basename "$src")" in Bench* | SlideRegion.java | ProjectImport.java) continue ;; esac
+    case "$(basename "$src")" in
+        Bench* | SlideRegion.java | ProjectImport.java | ProjectExport.java \
+            | ProjectOpen.java | OpenSlideLevels.java) continue ;;
+    esac
     name="$(basename "$src" .java)"
     # GeoJsonImport reads a file this project wrote rather than computing one,
     # so it takes the sample's path. Passed absolutely, because the recorder is
