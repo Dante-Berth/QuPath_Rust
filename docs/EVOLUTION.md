@@ -26,6 +26,36 @@ inside one function belongs in that function's doc comment, not here.
 
 ---
 
+## 2026-08 — A warning written down is not a warning read
+
+`0459585`
+
+The metadata editor's first render was wrong three times over, and **each of
+the three was already documented in the file being edited**:
+
+- it read as transparent, because `egui` fades a modal in as it fades a popup
+  in — the same finding, with its settling loop, thirty lines up in
+  `examples/chrome`;
+- the remove button drew as `□`, `✕` not being in the default font —
+  `row_picture` had already chosen line segments over a glyph and says why in a
+  comment in the same function's file;
+- a `TextEdit`'s `desired_width` inside a `Grid` is a desire — the third
+  member of §8.1c's width family, which has its own heading.
+
+Nothing about these was unknown. What failed is that a comment explaining why
+*this* code is the way it is does not announce itself to somebody writing new
+code beside it — it reads as history, not as a rule that still binds.
+
+**Transferable:** before adding a widget, grep the file for the trap rather
+than trusting recall of it. The three greps that would have paid here are the
+symbol characters in string literals, `desired_width` near `Grid`, and
+`predicted_dt`. A codebase with good comments still needs the search, because
+the comment is filed under the old bug and not under the new one.
+
+**Related:** `Looking at a thing is a test that assertions are not`, below —
+this is its sequel. Looking is what found all three; the cost was that looking
+had to find what reading had already recorded.
+
 ## 2026-08 — The instrument that checks appearance can itself be wrong
 
 `a34c40f`
