@@ -75,6 +75,41 @@ be picking a number to pass rather than to measure. It is a reported comparison
 until the remaining divergence is understood, per the rule below about never
 widening a tolerance.
 
+## And one that records an ordering
+
+`SmartStringSort.json` is a fourth kind: not what QuPath computes from an
+image, not what it reads, not what it writes, but **what one of its functions
+does to a list**. `GeneralTools.smartStringSort` is what `ProjectBrowser` puts
+its rows in order with, so it is the order a project browser has to reproduce —
+and it is not a string sort. A name is split on `(\d+)`, the digit runs are
+parsed to `BigDecimal` and compared by value, and the last tiebreak is the
+number of parts.
+
+```bash
+./parity/record.sh                                       # SmartStringSort
+cargo test -p qupath-viewer --test parity_smart_string_sort
+```
+
+The recorder hands the function thirty-three names chosen for the parts of that
+a reader gets wrong, prints the order it returns, and asserts on its own side
+that the printed order really is non-decreasing under the comparator — so the
+Rust test can check a list rather than every pair.
+
+It found something on the first run that no amount of reading `GeneralTools`
+would have: **Java compares UTF-16 code units and Rust compares UTF-8 bytes**.
+A character from U+10000 up is a surrogate pair in Java, both halves in
+U+D800..U+E000, below every character from U+E000 to U+FFFF — so QuPath puts an
+emoji *before* `\ue000` and `str::cmp` puts it after. One line of the fixture,
+and the only one the byte order got wrong.
+
+Two names in it compare **equal** (`0` and `000`, `slide-007` and `slide-7`,
+because `BigDecimal.compareTo` ignores scale). Their order in the fixture is
+Java's stable sort leaving them as they came, which the list alone cannot pin
+down — so the test asserts the equality directly as well, and sorts with
+`sort_by` rather than `sort_unstable_by`. A fixture that records a total order
+records the ties too, and a comparator that breaks one of them would reproduce
+the file and diverge on the next project.
+
 ## A recorder that runs the other way
 
 Every fixture above records what QuPath *computes*, so a Rust test can be
