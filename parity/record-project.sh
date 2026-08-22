@@ -40,7 +40,7 @@ echo "==> writing a project to $study" >&2
 (cd "$root" && cargo run --quiet -p qupath-viewer --example project_sample -- \
     "$study" "$slide" "$second" >/dev/null)
 
-modules=(qupath-core)
+modules=(qupath-core qupath-extension-openslide)
 # shellcheck source=parity/classpath.sh
 source "$root/parity/classpath.sh"
 
@@ -125,5 +125,34 @@ fi
 
 mv "$exported.clean" "$fixtures/ProjectExport.json"
 
+# ---------------------------------------------------------------------------
+# The pixels, which §8.8 listed as "an image opened from a project".
+#
+# ProjectImport above stops before them on purpose. This opens every entry
+# through `entry.readImageData()` -- what double-clicking a row reaches -- and
+# records what the server ended up with, including one pixel from the middle of
+# level 0. That last field is the only one a metadata block cannot make agree
+# with itself: a level table that is plausible and wrong opens fine and reads
+# the wrong pixels, which is the failure this whole area is about.
+#
+# On $study rather than the export copy, because it is the project *this*
+# project wrote that the claim is about.
+echo "==> recording ProjectOpen" >&2
+opened="$(mktemp)"
+trap 'rm -rf "$(dirname "$study")" "$recorded" "$exported" "$opened"' EXIT
+"$java_bin" -cp "$cp." "$root/parity/java/ProjectOpen.java" "$study/project.qpproj" \
+    | sed -n '/^{$/,$p' >"$opened"
+
+if [[ ! -s "$opened" ]]; then
+    echo "error: ProjectOpen produced no JSON" >&2
+    exit 1
+fi
+if grep -qF "$HOME" "$opened"; then
+    echo "error: a home directory survived into the fixture" >&2
+    exit 1
+fi
+mv "$opened" "$fixtures/ProjectOpen.json"
+
 echo "==> done; $(wc -c <"$fixtures/ProjectImport.json") bytes in fixtures/ProjectImport.json" >&2
 echo "           $(wc -c <"$fixtures/ProjectExport.json") bytes in fixtures/ProjectExport.json" >&2
+echo "           $(wc -c <"$fixtures/ProjectOpen.json") bytes in fixtures/ProjectOpen.json" >&2

@@ -3061,11 +3061,42 @@ In the order it is worth having.
   photograph is what showed `Fit` leaving slide behind the status bar.
   What is *still* unlooked-at is everything that needs a hand on the machine —
   the trackpad, hover states, resizing, and the window manager.
-- **An image opened from a project.** Both formats have now been through QuPath
-  itself — §8.6 and §8.3 — but `ProjectImport` deliberately stops before the
-  pixels: opening the image needs `qupath-extension-openslide` and a working
-  native library, and would be testing OpenSlide rather than the format. What
-  is asserted is everything QuPath can tell about an entry before the pixels.
-  The one thing that would have failed there was found by reading
-  `setMetadata`, and is now measured — `levels` is recorded, and it recorded a
-  `NullPointerException` until the metadata block went.
+- ~~**An image opened from a project.**~~ **Done, and the blocker was not
+  real.** Both formats had been through QuPath itself — §8.6 and §8.3 — but
+  `ProjectImport` stops before the pixels, and this entry recorded that as
+  needing `qupath-extension-openslide` and "a working native library, and there
+  is none on this machine". That was checked with `ldconfig` and `apt`, and
+  QuPath uses neither: the extension depends on `io.github.qupath:openslide`,
+  a jar carrying its own `libopenslide.so` that JNA extracts at load time. The
+  evidence for the blocker had been gathered about the wrong artefact, and the
+  same mistake was holding *Stored image metadata* above.
+
+  `parity/java/ProjectOpen.java` now opens every entry through
+  `entry.readImageData()` — what double-clicking a row reaches, and the path
+  that goes through `getServerBuilder()`, which is where a stored block would be
+  applied. `parity_project_open.rs` checks the result against this project's own
+  reader. Both entries open as `OpenslideImageServer`, the dimensions, level
+  counts and tile sizes agree, and — the part that is worth the JVM — **an 8×8
+  block of tissue decodes byte-for-byte identically** on the JPEG slide.
+
+  It was also not "testing OpenSlide rather than the format", which is what this
+  entry argued. Every field it checks is one a wrong project file would corrupt:
+  a `ServerBuilder` that will not build, a URI resolving to the wrong slide, or a
+  metadata block `setMetadata` lays over what OpenSlide read. The pixels are what
+  separate those from a project that merely *lists* correctly.
+
+  **The placement of that block is the whole value, and the first version got it
+  wrong** — a fourth instance of §6's recurring mistake. It clamped the large
+  slide's tissue coordinates into the 2220×2967 small region, landing on its
+  bottom-right corner: background, mean 243 against tissue's 99, where two
+  readers agree by both returning white. The uniformity check missed it because
+  background is not perfectly uniform. Both sides now name tissue per slide, the
+  recorder refuses a block spanning fewer than 24 levels, and a test asserts the
+  committed fixture still spans more.
+
+  One entry is deliberately not pixel-compared: `CMU-1-JP2K-33005.svs` is Aperio
+  JPEG 2000 and this project decodes baseline JPEG only (§3). Its metadata is
+  still checked. The fixture carries `pixelsComparable` per entry rather than
+  letting the test infer it from a file name, and a separate test asserts at
+  least one entry *is* comparable — a recording in which every entry were JP2K
+  would otherwise make the pixel check vacuous while still passing.
