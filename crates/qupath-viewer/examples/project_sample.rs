@@ -71,9 +71,37 @@ fn main() {
         std::fs::write(&path, &file.contents).expect("write a project file");
         println!("{}", path.display());
     }
+    // And then an entry's metadata edited, which is the third writer and the
+    // one whose output nothing had ever put in front of QuPath. A project
+    // recorded without this exercises `files` and `added` only, so the field a
+    // user actually types into would be checked against nothing but this
+    // project's own reader — which is the shape `docs/VIEWER.md` §8.6 calls a
+    // format tested against the code that writes it.
+    //
+    // The keys are chosen to be awkward on purpose: one holds the `=` and `&`
+    // that the browser's own `key=value` search splits on, and one holds a
+    // non-ASCII character, because what QuPath has to agree about is the bytes
+    // and not the easy cases.
+    let text = std::fs::read_to_string(&project).expect("the project just written");
+    let stored = qupath_viewer::project::read(&text).expect("it reads back");
+    let first = stored.images.first().expect("an entry").id;
+    let metadata = [
+        (String::from("stain"), String::from("H&E")),
+        (String::from("block"), String::from("A=3")),
+        (String::from("noté"), String::from("réséqué")),
+    ];
+    for file in qupath_viewer::project::edited(&stored, first, &metadata, sample::WRITTEN)
+        .expect("the entry is in the project it was read from")
+    {
+        let path = directory.join(&file.path);
+        std::fs::write(&path, &file.contents).expect("write a project file");
+        println!("{}", path.display());
+    }
+
     println!(
-        "{} entries in {}",
+        "{} entries in {}, {} metadata keys on entry {first}",
         entries.len(),
-        Path::new(&directory).display()
+        Path::new(&directory).display(),
+        metadata.len(),
     );
 }

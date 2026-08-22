@@ -76,6 +76,28 @@ public class ProjectImport {
             out.append("      \"entryDirectory\": ").append(
                     quote(entry.getEntryPath().getFileName().toString())).append(",\n");
             out.append("      \"hasImageData\": ").append(entry.hasImageData()).append(",\n");
+
+            // The entry's own metadata map -- `DefaultProjectImageEntry
+            // .metadata`, which the browser's right-click edits -- and *not*
+            // the server metadata block below, which describes the pixels.
+            // The two are different fields at different depths with the same
+            // name; recording both is what keeps a reader honest about which
+            // one it wrote. In the file's order, because Gson serialises a
+            // LinkedHashMap and the order is the order somebody typed them.
+            var entryMetadata = entry.getMetadata();
+            out.append("      \"metadataKeys\": [");
+            var keys = new java.util.ArrayList<>(entryMetadata.keySet());
+            for (int k = 0; k < keys.size(); k++) {
+                if (k > 0) out.append(", ");
+                out.append(quote(keys.get(k)));
+            }
+            out.append("],\n");
+            out.append("      \"metadataValues\": [");
+            for (int k = 0; k < keys.size(); k++) {
+                if (k > 0) out.append(", ");
+                out.append(quote(entryMetadata.get(keys.get(k))));
+            }
+            out.append("],\n");
             out.append("      \"thumbnailReadable\": ").append(readableThumbnail(entry)).append(",\n");
 
             var uris = entry.getURIs();

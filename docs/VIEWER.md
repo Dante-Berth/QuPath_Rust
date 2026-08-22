@@ -2454,6 +2454,34 @@ rule applied to a file format. The comparison now trims the ends and nothing
 else: whitespace outside the document is not a change anybody made, and
 anything inside it still is.
 
+#### And then QuPath was asked to read it
+
+The unit tests go through `project::edited` and back through `project::read`,
+which is one reader agreeing with one writer — §8.6's *a format checked against
+the code that writes it is untested*, applied to the one field a user types
+into. So `project_sample` now edits an entry before the recorder runs, and
+`ProjectImport` records `DefaultProjectImageEntry.getMetadata()` — the map the
+right-click edits, and deliberately not the server metadata block beside it,
+those being the two fields §8.3b records mistaking for each other.
+
+QuPath reads all three keys back, in the order they were written, with their
+values intact. The keys are awkward on purpose: `H&E` and `A=3` carry the
+characters the browser's own `key=value` search splits on, and `noté` /
+`réséqué` are non-ASCII, because what QuPath has to agree about is the bytes
+and a fixture of `a=1` would agree about nothing. The second entry comes back
+with an empty map, which is what says the rewrite touched one entry rather than
+all of them.
+
+Two things in the recording beyond the assertion are worth having noticed. The
+`ProjectExport.json` half is a project **QuPath wrote** after reading ours, and
+it re-serialised the map through Gson as `H\u0026E` and `A\u003d3` — so QuPath
+did not merely parse the values, it kept them. And its own entry summary, the
+line its browser puts under a name, comes back as
+`stain:	H&E | block:	A=3 | noté:	réséqué`. That is asserted too: the map is
+what QuPath *read*, and the summary is what a QuPath user would *see*, which is
+the distinction §8.6 draws between a file that parses and a file that shows
+something.
+
 #### Three things the picture found, and one of them was in this file already
 
 The editor is a modal over the browser rather than a fifth side panel. It is a

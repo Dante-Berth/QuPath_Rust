@@ -72,6 +72,31 @@ fn text<'a>(block: &'a str, key: &str) -> &'a str {
     rest[..end].trim()
 }
 
+/// The strings of one JSON array field, in order.
+///
+/// A second helper rather than a widening of [`text`], which stops at the first
+/// closing quote — correct for a scalar and wrong for a list, where it returns
+/// the first element and looks like a mismatch in the fixture rather than in
+/// the reader. That is what it did here first.
+fn list<'a>(block: &'a str, key: &str) -> Vec<&'a str> {
+    let needle = format!("\"{key}\": [");
+    let at = block
+        .find(&needle)
+        .unwrap_or_else(|| panic!("no {key} in {block}"))
+        + needle.len();
+    let body = &block[at..];
+    let end = body
+        .find(']')
+        .expect("an unterminated array in the fixture");
+    let body = &body[..end];
+    if body.trim().is_empty() {
+        return Vec::new();
+    }
+    body.split(", ")
+        .map(|item| item.trim().trim_matches('"'))
+        .collect()
+}
+
 /// QuPath opened the project, and found the entries that were written.
 #[test]
 fn qupath_reads_back_the_entries_it_was_given() {
@@ -166,4 +191,60 @@ fn qupath_reads_back_the_entries_it_was_given() {
             "QuPath's own summary should say the entry has no data"
         );
     }
+}
+
+/// **QuPath read back the metadata this project's editor wrote.**
+///
+/// The check `project.rs`'s own unit tests cannot make. Those go through
+/// `project::edited` and back through `project::read`, which is one reader
+/// agreeing with one writer — §8.6's "a format checked against the code that
+/// writes it is untested", applied to the one field a user types into.
+///
+/// What is asserted is `DefaultProjectImageEntry.getMetadata()`, the map the
+/// browser's right-click edits, and **not** the server metadata block: two
+/// different fields at two depths with the same name, which §8.3b records
+/// mistaking for each other.
+///
+/// The keys are awkward on purpose. `H&E` and `A=3` carry the characters the
+/// browser's own `key=value` search splits on, and `noté`/`réséqué` are
+/// non-ASCII — what QuPath has to agree about is the bytes, and a fixture of
+/// `a=1` would agree about nothing.
+#[test]
+fn qupath_reads_back_the_metadata_that_was_written() {
+    let entries = entries(FIXTURE);
+    let first = entries.first().expect("an entry");
+
+    assert_eq!(
+        list(first, "metadataKeys"),
+        ["stain", "block", "noté"],
+        "QuPath read different keys, or read them in a different order — the \
+         map is a LinkedHashMap and its order is the order they were written"
+    );
+    assert_eq!(
+        list(first, "metadataValues"),
+        ["H&E", "A=3", "réséqué"],
+        "QuPath read different values"
+    );
+
+    // And QuPath's *own* summary line, which is what its browser puts under
+    // an entry's name. Asserted as well as the map, because the map is what
+    // was read and this is what a QuPath user would see — the same distinction
+    // §8.6 draws between a file that parses and a file that shows something.
+    let summary = text(first, "summary");
+    for shown in ["stain:", "H&E", "block:", "A=3", "noté:", "réséqué"] {
+        assert!(
+            summary.contains(shown),
+            "QuPath's own entry summary does not show {shown}: {summary}"
+        );
+    }
+
+    // And the entry that was not edited has none, which is what says the
+    // rewrite touched one entry rather than every one of them.
+    let second = entries.get(1).expect("a second entry");
+    assert!(list(second, "metadataKeys").is_empty());
+    assert!(list(second, "metadataValues").is_empty());
+    assert!(
+        !text(second, "summary").contains("stain"),
+        "an entry nobody edited is showing another entry's metadata"
+    );
 }

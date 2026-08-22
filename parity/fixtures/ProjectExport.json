@@ -15,7 +15,11 @@
       "entryID": 1,
       "randomizedName": "randomized-name",
       "imageName": "CMU-1 small region",
-      "metadata": {},
+      "metadata": {
+        "stain": "H\u0026E",
+        "block": "A\u003d3",
+        "noté": "réséqué"
+      },
       "tags": []
     },
     {
