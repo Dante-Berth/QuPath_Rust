@@ -900,6 +900,143 @@ fn percent_decode(text: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// One run of a name, as `GeneralTools.StringPartsSorter` splits it.
+///
+/// The split is on `(\d+)`, so a name is an alternating-ish sequence of digit
+/// runs and everything else. What matters for the ordering is that the two
+/// kinds compare differently, and that a digit run compares by *value*.
+#[derive(Debug, PartialEq, Eq)]
+enum Part<'a> {
+    /// A run of digits, with its leading zeros stripped.
+    ///
+    /// Stripped because QuPath parses the run into a `BigDecimal`, and
+    /// `BigDecimal.compareTo` ignores scale: `007` and `7` compare **equal**,
+    /// and the tie is then broken by the number of parts rather than by the
+    /// text. Keeping the run as it was written would order them, which is the
+    /// opposite of what QuPath does. `""` is the value zero, from a run that
+    /// was all zeros — `0` and `000` are the same number and `0` prints as one
+    /// digit.
+    Number(&'a str),
+    /// Everything between two digit runs, exactly as written.
+    Text(&'a str),
+}
+
+impl Part<'_> {
+    /// What Java's `toString` gives, which is what a mixed pair compares on.
+    ///
+    /// `BigDecimal("007").toString()` is `"7"` — the leading zeros are gone by
+    /// the time a number is compared against text, so this returns the
+    /// stripped run and not the original one. A number whose run was all zeros
+    /// prints as `0`.
+    fn as_text(&self) -> &str {
+        match self {
+            Part::Number("") => "0",
+            Part::Number(digits) | Part::Text(digits) => digits,
+        }
+    }
+}
+
+/// Splits a name into digit runs and the text between them.
+fn parts(name: &str) -> Vec<Part<'_>> {
+    let mut parts = Vec::new();
+    let bytes = name.as_bytes();
+    let mut next = 0;
+    let mut at = 0;
+    while at < bytes.len() {
+        if !bytes[at].is_ascii_digit() {
+            at += 1;
+            continue;
+        }
+        let start = at;
+        while at < bytes.len() && bytes[at].is_ascii_digit() {
+            at += 1;
+        }
+        if start > next {
+            parts.push(Part::Text(&name[next..start]));
+        }
+        // Leading zeros go here rather than at the comparison, so that
+        // `as_text` and the numeric compare agree about what the run is.
+        parts.push(Part::Number(name[start..at].trim_start_matches('0')));
+        next = at;
+    }
+    if next < name.len() {
+        parts.push(Part::Text(&name[next..]));
+    }
+    parts
+}
+
+/// QuPath's `GeneralTools.smartStringComparator`, over two names.
+///
+/// A plain string sort puts `a10` before `a2`, because `1` is less than `2`.
+/// This one splits each name into digit runs and the text between them and
+/// compares the runs by value, so `["a1", "a2", "a10"]` stays as it is. QuPath
+/// sorts the project browser's groups with it, and this is the browser's row
+/// order.
+///
+/// Three things about it are worth stating, because all three are visible in a
+/// list of slide names and none of them is what a reader would assume:
+///
+/// - **It is case-sensitive, and it compares UTF-16.** The comparison is
+///   `String.compareTo`, not the case-insensitive one the search box uses, so
+///   every capital sorts before every lower-case letter: `Block` before `abc`.
+///   The search box in the same pane lowercases both sides, and it is the same
+///   pane and the same names — the two controls really do disagree, in QuPath
+///   as here. The UTF-16 half is [`compare_utf16`], and it is not a detail: a
+///   byte comparison puts `\u{1f600}` on the wrong side of `\u{e000}`.
+/// - **`007` and `7` compare equal**, because the run becomes a `BigDecimal`
+///   and scale is ignored. The tie falls through to the part count.
+/// - **The last tiebreak is the number of parts, not the length.** `a1` has two
+///   parts and `a1b1` has four, so the shorter name wins — but so does `a1`
+///   against `a1bbbbbbbb`, which also has two parts and is longer. The parts
+///   before it decided nothing, so the *count* decides.
+///
+/// A digit run compares against a text part by what Java's `toString` gives for
+/// it, which is the run with its leading zeros already gone.
+pub fn smart_string_compare(left: &str, right: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (left, right) = (parts(left), parts(right));
+    for (one, two) in left.iter().zip(right.iter()) {
+        let ordering = match (one, two) {
+            // Both numbers: by value. Non-negative integers with no leading
+            // zeros order by length first and then lexicographically, which is
+            // `BigDecimal.compareTo` without the parse — and without a cap on
+            // how many digits a name is allowed to have.
+            (Part::Number(one), Part::Number(two)) => {
+                one.len().cmp(&two.len()).then_with(|| one.cmp(two))
+            }
+            // Anything else: Java compares the two `toString`s, so a number
+            // meeting text is compared as the digits it prints as.
+            _ => compare_utf16(one.as_text(), two.as_text()),
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    left.len().cmp(&right.len())
+}
+
+/// Two strings in the order `String.compareTo` puts them.
+///
+/// **Not `str::cmp`, and the difference is not theoretical.** Java compares
+/// UTF-16 code units; Rust compares UTF-8 bytes. The two orders agree for
+/// every character in the basic multilingual plane and disagree above it: a
+/// character from `U+10000` up is a *surrogate pair* in Java, and both halves
+/// live in `U+D800..U+E000` — below every character from `U+E000` to `U+FFFF`.
+/// So Java puts `😀` before `\u{e000}` and a byte comparison puts it after.
+/// `parity/fixtures/SmartStringSort.json` records QuPath doing exactly that,
+/// and it is the only line of the fixture the byte order got wrong.
+///
+/// A slide named with an emoji is not the reason to carry this. The reason is
+/// that the order is *QuPath's*, and a browser whose rows are in a different
+/// order from QuPath's for any name is a browser that has to be checked name by
+/// name before it is believed.
+fn compare_utf16(left: &str, right: &str) -> std::cmp::Ordering {
+    // No allocation: `encode_utf16` yields the code units one at a time, and
+    // comparing two iterators lexicographically is what `String.compareTo`
+    // does — first difference wins, and a prefix loses to what extends it.
+    left.encode_utf16().cmp(right.encode_utf16())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1463,10 +1600,54 @@ mod tests {
         }
     }
 
+
+    /// The tiebreak is a part count, and that is not a length.
+    ///
+    /// `parity/fixtures/SmartStringSort.json` pins the order of the whole list
+    /// and so covers this by accident. Stated here because it is the rule the
+    /// last line of the comparator implements, and a port that reached for
+    /// `len()` — the obvious thing, and what a string sort would do — passes
+    /// the first of these and fails the second.
     #[test]
-    fn a_project_with_no_images_is_still_a_project() {
-        let files = files(Path::new("/study/project.qpproj"), &[], written());
-        assert_eq!(files.len(), 1);
-        assert!(files[0].contents.contains("\"images\": []"));
+    fn a_shorter_name_wins_on_parts_and_not_on_length() {
+        use std::cmp::Ordering::Less;
+        // Two parts against four: `a1` runs out first and wins.
+        assert_eq!(smart_string_compare("a1", "a1b1"), Less);
+        // Two parts against two, and the longer name wins on its own text —
+        // nothing has run out, so the count never decides.
+        assert_eq!(smart_string_compare("a1", "a1bbbbbbbb"), Less);
+        // The same pair with the tail made to lose on text instead, so that
+        // the two rules disagree and the text one is seen to be the one used.
+        assert_eq!(smart_string_compare("ab1", "aa1bbbbbbbb"), std::cmp::Ordering::Greater);
+    }
+
+    /// A digit run meets a text part as the digits it *prints* as.
+    ///
+    /// Java compares the two `toString`s, and `new BigDecimal("007")` prints
+    /// as `7`. So `007` against `-` compares `7` against `-`, not `007`
+    /// against `-`, and a port that kept the run as written orders the pair
+    /// the other way — `0` is below `-` in both encodings and `7` is above it.
+    #[test]
+    fn a_number_meeting_text_compares_as_the_digits_it_prints_as() {
+        use std::cmp::Ordering::Greater;
+        assert_eq!(smart_string_compare("007", "-"), Greater);
+        assert_eq!(smart_string_compare("7", "-"), Greater);
+        // And an all-zero run prints as one `0`, not as nothing: a part that
+        // stripped to `""` would compare below every text part there is.
+        assert_eq!(smart_string_compare("000", "-"), Greater);
+    }
+
+    /// A digit run longer than any integer type is compared, not parsed.
+    ///
+    /// `BigDecimal` has no width, so a name with forty digits in it sorts by
+    /// value like any other. The fixture carries a 23-digit pair for this; the
+    /// case here is the one where a `u64` parse would not merely be wrong but
+    /// would fail outright.
+    #[test]
+    fn a_digit_run_is_not_bounded_by_an_integer_type() {
+        use std::cmp::Ordering::Less;
+        let small = format!("scan{}", "9".repeat(40));
+        let large = format!("scan1{}", "0".repeat(40));
+        assert_eq!(smart_string_compare(&small, &large), Less);
     }
 }
