@@ -1636,11 +1636,14 @@ having.
   it would: zoomed in past a few hundred microns there was **nothing on screen
   that said where on the slide you are**, the status bar's level-0 coordinates
   being a number rather than a position.
-- **Brightness/contrast and stain vectors — the transform is done, §8.5; the
-  controls are not.** `display.rs` is the per-pixel operation and
-  `Framebuffer::draw_tile_with` applies it. What remains is the *dialog*: there
-  is no way to move the range or pick a channel from the interface yet, so the
-  transform is reachable from the library and from `examples/panes` only.
+- **Brightness/contrast and stain vectors — done, §8.5 and §8.7.** `display.rs`
+  is the per-pixel operation and `Framebuffer::draw_tile_with` applies it; the
+  controls are in the slide panel, which is where §8.7 records what building
+  them found. This bullet said for several sessions that the dialog was
+  missing and the transform reachable from `examples/panes` only, which had
+  stopped being true — the same class of error as the GeoJSON writer
+  documented as done with no caller, in the other direction: done, and
+  documented as missing.
 - **A scalebar — done, §8.1d.** Listed here because it is part of QuPath's viewer
   rather than a pane, and because it was the first item that was a genuine
   translation of the Java rather than a port of the design. It is no longer the
@@ -1665,7 +1668,8 @@ having.
 
 The tutorial that prompted this is QuPath's *Projects* page, and its figures are
 `ProjectBrowser.java`: a pane of image thumbnails, right-click to add metadata,
-sort by name or URI, mask names for blinded studies.
+sort by name or URI, mask names for blinded studies. All four are here now —
+the thumbnails and the sort below, masking in §8.3b, the right-click in §8.3c.
 
 The **format is a real specification and worth following exactly**, because a
 project written here that QuPath can open is worth far more than one that is
@@ -2383,6 +2387,109 @@ recover the order. Every other assertion about a shuffle still passes. The test
 therefore checks that two shuffles of the same list *differ*, which is the only
 one of the three that would catch it.
 
+### 8.3c Editing that metadata — the first time a user's typing reaches someone else's file
+
+§8.8 said what was left of `ProjectBrowser` was **right-click to edit an
+entry's metadata**, and that it was no longer a reader problem: `added`
+rewrites the document it read, so the mechanism was there. What it also said
+was that nothing answered **what happens when the file has changed underneath
+since it was opened**, and that question turned out to be the whole design.
+
+`project::edited` is the third writer. `files` writes a project from nothing
+and `added` appends to one; this reaches into an entry another program wrote
+and changes one field of it. It takes `added`'s shape — the document `Stored`
+kept, cloned and edited at one key — for the reason `added`'s own
+documentation gives: a rewrite built from `Image` would drop every entry's
+`serverBuilder`, which is how the image opens at all, and drop it silently.
+
+Three decisions in it are worth the lines they cost.
+
+- **The field keeps its place.** QuPath writes `metadata` between `imageName`
+  and `tags`. Removing the key and pushing a new one is the obvious spelling
+  and moves it to the end of the entry, so the file reads identically and
+  *diffs* as the whole entry rewritten. Someone reading that diff to see what
+  changed would be reading the wrong thing.
+- **Clearing the last key returns the entry to the shape it had**, rather than
+  leaving `"metadata": {}` behind. Both read back the same, so this is not
+  about correctness — it is that opening an editor and closing it again should
+  not change the file.
+- **`lastID` does not move**, which is the difference from `added` worth
+  naming: no entry was created, so no id was issued. Advancing it leaves a
+  `data/` directory nothing points at.
+
+Entries are found by `entryID` and not by position, because the caller's list
+is the *browser's* order — sorted, and filtered — and an index into that is an
+index into a different list. The same reasoning the pictures already used.
+
+#### The stale check, and the bug in it that only a real write could find
+
+The answer to §8.8's question is **refuse, and say so**. Before writing,
+`App::set_metadata` re-reads the index and compares it against what was read
+when the project was opened; if the two differ, somebody else has written the
+file since and the document held here is no longer the one their change is in.
+Rewriting it would silently undo their work — `added`'s "worst shape a bug of
+this kind can take", where the file still opens, still lists the same images,
+and has lost what was recorded against them.
+
+Merging is the friendlier answer and was rejected for one reason: it never
+tells anybody the file moved under them, so an edit made against a stale list
+lands looking as though it had been made against the current one. What
+refusing costs is one reopen, and the typing is not discarded — the editor
+stays open with it in, which is what makes the refusal a delay rather than a
+loss.
+
+The comparison is the *text*, not an mtime and not a length, because
+`Stored::rewritten` reproduces a Gson-written file byte for byte. That is
+exact in both directions: it cannot miss a change made inside a timestamp's
+resolution, and it cannot report one for a file rewritten identically.
+
+**And it was wrong, in the direction that makes a feature useless rather than
+dangerous.** `project_file` ends the index with a newline and `json::write`
+does not, so a project *this application created* differs from its own rewrite
+by one trailing byte — and the check refused every edit to one, having found a
+change nobody had made. Every unit test passed while this was true, because
+they all go through `project::edited` directly. What found it was writing a
+project to a real directory and editing it, which is §8.8's *Run the binary*
+rule applied to a file format. The comparison now trims the ends and nothing
+else: whitespace outside the document is not a change anybody made, and
+anything inside it still is.
+
+#### Three things the picture found, and one of them was in this file already
+
+The editor is a modal over the browser rather than a fifth side panel. It is a
+task with an end — type, then Save or Cancel — which is what QuPath does with
+it, and `panel_cap` divides one budget between the panels that are open, so a
+fifth would narrow the four beside it every time somebody edited a key. §8.1c
+records what that arithmetic costs when it is got wrong.
+
+`examples/chrome` renders it, and the first picture was wrong three times over:
+
+- **It read as transparent**, the browser's rows showing through the dialog's
+  own text. Not a frame colour — `egui` *fades a modal in* exactly as it fades
+  a popup in, so the second frame is the dialog at 44% opacity. This is the
+  same finding §8.3 records for the sort combo's dropdown, written down in the
+  same example file, and walked into anyway. The settling loop that was built
+  for the popup now runs for a modal too.
+- **The remove button drew as `□`.** `✕` is not in the default font. This is
+  the second time — `row_picture` chose two line segments over a glyph for the
+  same reason and says so in a comment three hundred lines above. A button's
+  label cannot be segments, so it is an ASCII `x`.
+- **The key box was narrower than the word `value` beside it.** A `TextEdit`'s
+  `desired_width` inside a `Grid` is a desire; the grid sizes columns to their
+  content. `min_col_width` is what binds.
+
+None of the three is visible to a test that asserts on values, and all three
+are obvious in a 1100×760 PNG. The one that matters most is the second
+picture, of the **refusal** — a state reached only by two programs writing one
+study, which nobody sees while building the feature and which is the entire
+reason the write path is shaped the way it is.
+
+What is still not looked at is the right-click itself: the menu is attached to
+every row — metadata belongs to the entry and not to the pixels, so an entry
+whose slide has been moved away still takes a note — but nothing has pressed a
+mouse button on one. It is in §8.8's *hand on the machine* hole with the row
+click and the add button.
+
 ### 8.4 The overview — the invariant is that the two mappings agree
 
 `overview.rs` is `ImageOverview.java`'s arithmetic: slide to overview, which
@@ -2862,12 +2969,15 @@ In the order it is worth having.
   four things with it — see §8.3b.** The entry below this one predicted that:
   the metadata map, the `key=value` search and `has_data`, the metadata sort
   keys and name masking were one reader change underneath, and they were.
-  What is left of QuPath's pane is **right-click to edit an entry's
-  metadata**, which is now a *writer* problem rather than a reader one and is
-  the first thing in this file that would put a user's typing into somebody
-  else's project file. `added` rewrites the document it read, so the mechanism
-  is there; what is not there is any answer to what happens when the file has
-  changed underneath since it was opened.
+  ~~What is left of QuPath's pane is **right-click to edit an entry's
+  metadata**.~~ **Done, §8.3c, and the unanswered question in it was the
+  design.** It was right that the mechanism was there — `edited` is `added`'s
+  shape — and right that what was missing was an answer to the file having
+  changed underneath. That answer is *refuse and say so*: a merge never tells
+  anybody the file moved under them. The check was then wrong in the direction
+  that makes a feature useless rather than dangerous, refusing every edit to a
+  project this application had itself written, and only writing one to a real
+  directory found it.
 - **`data.qpdata`, which should stay missing.** Java serialisation tied to
   Java's object graph. A guessed version is how a project becomes corrupt in a
   way someone discovers much later, having trusted it. The detections belong

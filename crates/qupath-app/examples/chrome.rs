@@ -99,6 +99,39 @@ fn main() {
     render("chrome-project-search-metadata.png", &mut app);
     app.filter.clear();
 
+    // And the metadata editor, which is the first thing in this application
+    // that writes a user's typing into somebody else's file and so the one
+    // most worth looking at before anyone does. Two pictures, because the
+    // second is a state no ordinary run reaches on purpose: the refusal.
+    //
+    // Set directly for `mask_names`'s reason — the editor is opened by a
+    // right-click, and a synthesised context menu would be a picture of
+    // `egui`'s menu rather than of this.
+    app.editing = Some(qupath_app::state::MetadataEditor {
+        id: 1,
+        name: String::from("CMU-1-Small-Region.svs"),
+        rows: vec![
+            (String::from("stain"), String::from("H&E")),
+            (String::from("block"), String::from("A3")),
+            (String::new(), String::new()),
+        ],
+        problem: None,
+    });
+    render("chrome-project-metadata.png", &mut app);
+
+    // The refusal. This is the state the whole design of the write path is
+    // about — the project changed underneath — and it is the one a picture is
+    // worth most for, because it is reached only by two programs writing one
+    // study and nobody sees it while building the feature.
+    if let Some(editor) = &mut app.editing {
+        editor.problem = Some(String::from(
+            "The project changed on disk since it was opened, so this was not \
+             written. Reopen the project and try again.",
+        ));
+    }
+    render("chrome-project-metadata-refused.png", &mut app);
+    app.editing = None;
+
     // And the list the combo drops down, which is the one part of the control
     // a still picture of it cannot show. The position is the closed box, read
     // off `chrome-project.png`.
@@ -392,10 +425,23 @@ fn render_clicking(path: &str, app: &mut App, click: Option<egui::Pos2>) {
     // the state the click was meant to leave behind.
     // The pressed frame's own deltas are kept whether or not a third frame
     // follows it, which is what `pressed` holds.
-    let (output, pressed) = match click {
+    // The settling path is taken for a click *or* for a modal, and the second
+    // is not a special case of the first. `egui` fades a modal in exactly as it
+    // fades a popup in, so the frame after one opens is a picture of it at 44%
+    // opacity with the rows behind showing through — which reads as a
+    // transparent dialog and is an animation a fifth of the way through. Found
+    // in the first picture of the metadata editor, having already been found
+    // once for the sort combo's dropdown and written down right here.
+    let settling = click.or_else(|| app.editing.as_ref().map(|_| egui::pos2(-1.0, -1.0)));
+    let (output, pressed) = match settling {
         Some(at) => {
             input.events.clear();
-            input.events.push(egui::Event::PointerMoved(at));
+            // Only for a real click. The modal's settle uses a position off
+            // the window, and moving the pointer there would take the hover
+            // off whatever the picture is of.
+            if click.is_some() {
+                input.events.push(egui::Event::PointerMoved(at));
+            }
             // Several frames, and time passing between them, because `egui`
             // **fades a popup in**: the frame after the click has it at 44%
             // opacity, which composites the rows behind it *through* it and

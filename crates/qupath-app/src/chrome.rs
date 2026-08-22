@@ -67,6 +67,23 @@ pub enum Command {
     /// checkbox is drawn twice cannot turn masking back off — and so that the
     /// shuffle drawn when it is switched on is drawn once.
     MaskNames(bool),
+    /// Open the metadata editor on this entry, by `entryID`.
+    ///
+    /// Carries the id and not the row's position, for `project::edited`'s
+    /// reason: the position is an index into the browser's order, and the
+    /// search box and the sort control both change that while the editor is
+    /// open.
+    EditMetadata(u64),
+    /// Replace the editor's working rows.
+    ///
+    /// The whole list rather than one field, for [`Command::SetTuning`]'s
+    /// reason — one value per frame — and because adding and removing a row
+    /// change the list's length, which a per-field command cannot express.
+    SetMetadataRows(Vec<(String, String)>),
+    /// Write the editor's rows to the project and close it.
+    WriteMetadata,
+    /// Close the metadata editor, discarding what was typed.
+    CancelMetadata,
     /// Show or hide the project browser.
     ToggleProject,
     Fit,
@@ -460,7 +477,7 @@ fn row_order(
 /// `entry-<id>` in the field, which is the entry order spelled out. That is
 /// checked where masking is offered, not here — this function is asked for a
 /// name and gives the one it was told to.
-fn shown_name(image: &project::Image, masked: bool) -> &str {
+pub(crate) fn shown_name(image: &project::Image, masked: bool) -> &str {
     if let Some(name) = image.randomized_name.as_deref().filter(|_| masked) {
         return name;
     }
@@ -484,7 +501,7 @@ fn shown_name(image: &project::Image, masked: bool) -> &str {
 /// entry; one this wrote fails at every one. A hand-mixed project passes, which
 /// is right — the entries that carry a real random name are masked by it, and
 /// the ones that do not are the caller's own doing.
-fn maskable(images: &[project::Image]) -> bool {
+pub(crate) fn maskable(images: &[project::Image]) -> bool {
     images.iter().any(|image| {
         image
             .randomized_name
@@ -968,6 +985,11 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
                 scrolled("project", ui, |ui| project_pane(ui, app, &mut command));
             });
     }
+    // After the panels and before the central one: a modal is drawn over
+    // everything and takes no strip, so it does not enter `panel_cap`'s
+    // arithmetic and does not move the slide's rectangle.
+    metadata_editor(context, app, &mut command);
+
     if app.show_help {
         egui::SidePanel::left("help")
             .default_width(280.0_f32.min(cap))
@@ -1766,6 +1788,26 @@ fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
             background
         });
 
+        // **Attached to every row, not only the openable ones, and that is
+        // the point.** Metadata belongs to the *entry* and not to the pixels:
+        // an entry built by a transform this cannot open, or one whose slide
+        // has been moved away, is still an entry somebody wants to record
+        // something against — and QuPath's own browser offers the same menu on
+        // the same rows. Hanging it off the `slide` arm below would have made
+        // the rows that most need a note the ones that cannot take one.
+        laid.response.context_menu(|ui| {
+            ui.label(
+                egui::RichText::new(shown_name(image, masking))
+                    .strong()
+                    .small(),
+            );
+            ui.separator();
+            if ui.button("Edit metadata…").clicked() {
+                *command = Command::EditMetadata(image.id);
+                ui.close();
+            }
+        });
+
         // The slide on screen keeps a filled row for as long as it is on
         // screen; hovering fills one while the pointer is over it. Both say the
         // same thing in the same way, which is what makes the first read as a
@@ -1832,6 +1874,184 @@ fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
             }
         }
         ui.add_space(2.0);
+    }
+}
+
+/// How wide the metadata editor's key and value boxes are, in points.
+///
+/// Named constants because the modal's own width is derived from them: the
+/// grid is bounded by `set_width`, so a width picked independently of the boxes
+/// is one the boxes are silently squeezed into.
+const ROW_KEY: f32 = 120.0;
+/// The value box, wider than the key because values are the longer text: a
+/// stain is `H&E` and a note is a sentence.
+const ROW_VALUE: f32 = 150.0;
+
+/// The metadata editor, as a modal window over the browser.
+///
+/// # A window and not a fifth side panel
+///
+/// Two reasons, and the second is the one that decided it. It is a *task* with
+/// an end — type, then OK or Cancel — rather than a view that stays open, which
+/// is what QuPath does with the same thing. And `panel_cap` divides one budget
+/// between the panels that are open: a fifth panel would narrow the four
+/// beside it every time somebody edited a key, and §8.1c is a record of what
+/// that arithmetic costs when it is got wrong. A window is laid out over the
+/// central panel and takes no strip, so `cursor_over_slide` is untouched.
+///
+/// Modal, because the thing being edited is a row of the list underneath, and a
+/// list that can be re-sorted and re-filtered while an editor is open on one of
+/// its rows is a list whose row can move out from under the editor. The id
+/// [`MetadataEditor`] holds would survive that, but nothing on screen would
+/// explain it.
+///
+/// # The rows are read out and handed back whole
+///
+/// [`Command::SetMetadataRows`] carries the entire list, for
+/// [`Command::Filter`]'s reason: this function takes `&App` and every change to
+/// the application is a command. A working copy is edited here and sent if it
+/// differs, so a frame in which nothing was typed sends nothing.
+fn metadata_editor(context: &egui::Context, app: &App, command: &mut Command) {
+    let Some(editor) = &app.editing else {
+        return;
+    };
+    let mut rows = editor.rows.clone();
+    let mut changed = false;
+    // Not `&mut open` on the window: a close through the title bar's X and a
+    // close through Cancel are the same act, and two paths to it is how one of
+    // them ends up not clearing the editor.
+    let mut close = false;
+
+    // An explicit opaque frame, and not the default. A `Modal` dims what is
+    // behind it with a translucent layer and otherwise takes the window fill,
+    // which over a *panel* is not opaque enough to read against: the first
+    // picture of this had the browser's rows showing through the editor's own
+    // text. Found by looking, which is the only thing that was ever going to
+    // find it — every test here asserts on values and none of them can see a
+    // dialog you cannot read.
+    let frame = egui::Frame::window(&context.style()).fill(context.style().visuals.panel_fill);
+    egui::Modal::new(egui::Id::new("metadata-editor"))
+        .frame(frame)
+        .show(context, |ui| {
+            // Wide enough for the two boxes, the remove button and the
+            // spacing between them, which is what the grid below asks for and
+            // does not get if the modal is narrower: `set_width` bounds the
+            // grid, and a `desired_width` inside a bound narrower than the sum
+            // is silently ignored. The first picture of this had a `key` box
+            // half the width of the word `value` beside it.
+            ui.set_width(ROW_KEY + ROW_VALUE + 90.0);
+            ui.heading("Edit metadata");
+            ui.label(egui::RichText::new(&editor.name).strong().small());
+            ui.separator();
+
+            if let Some(problem) = &editor.problem {
+                // Beside the editor and not only in the status bar, because the
+                // refusal that matters — the project changed underneath — is about
+                // the thing the user is looking at.
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(problem)
+                            .color(ui.visuals().warn_fg_color)
+                            .small(),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(6.0);
+            }
+
+            // Collected and applied after the loop, because removing inside it
+            // would shift every row after the one removed while its widget is
+            // still to be drawn.
+            let mut remove = None;
+            // The column widths are the grid's to set, not the boxes'. A
+            // `TextEdit`'s `desired_width` inside a `Grid` is a *desire*, and
+            // the grid sizes its columns to their content instead — so the
+            // first picture of this had a `key` box narrower than the word
+            // `value` beside it, inside a modal wide enough for both.
+            // `min_col_width` is what actually binds.
+            egui::Grid::new("metadata-rows")
+                .num_columns(3)
+                .spacing([6.0, 4.0])
+                .min_col_width(ROW_KEY)
+                .show(ui, |ui| {
+                    for (index, (key, value)) in rows.iter_mut().enumerate() {
+                        changed |= ui
+                            .add(
+                                egui::TextEdit::singleline(key)
+                                    .hint_text("key")
+                                    .desired_width(120.0),
+                            )
+                            .changed();
+                        changed |= ui
+                            .add(
+                                egui::TextEdit::singleline(value)
+                                    .hint_text("value")
+                                    .desired_width(150.0),
+                            )
+                            .changed();
+                        // An ASCII cross, and that is not a stylistic choice. The
+                        // first picture of this drew `✕` as `□`: the glyph is not
+                        // in `egui`'s default font, exactly as `row_picture`'s
+                        // comment records happening the last time this interface
+                        // reached into the font for a symbol. Two line segments are
+                        // what that one settled on; a button's label cannot be
+                        // segments, so this is the letter that is certainly there.
+                        // A cross rather than the word because the column is as
+                        // wide as its widest label, and "Remove" three times over
+                        // is a column wider than the values beside it.
+                        if ui.button("x").on_hover_text("Remove this key").clicked() {
+                            remove = Some(index);
+                        }
+                        ui.end_row();
+                    }
+                });
+            if let Some(index) = remove {
+                rows.remove(index);
+                changed = true;
+            }
+
+            if ui.button("Add a key").clicked() {
+                rows.push((String::new(), String::new()));
+                changed = true;
+            }
+
+            ui.add_space(4.0);
+            // What will actually be written, which is not always what is on screen:
+            // a blank key is a space to type in rather than a pair, and a repeated
+            // key keeps its last value. Said here rather than left to be discovered
+            // in the file afterwards.
+            let keys = crate::state::written_rows(&rows).len();
+            ui.label(
+                egui::RichText::new(match (keys, rows.len()) {
+                    (0, 0) => "Nothing recorded against this image.".to_owned(),
+                    (0, _) => {
+                        "Nothing will be written: a key with no name is not a key.".to_owned()
+                    }
+                    (1, _) => "1 key will be written.".to_owned(),
+                    (many, _) => format!("{many} keys will be written."),
+                })
+                .weak()
+                .small(),
+            );
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    *command = Command::WriteMetadata;
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+            });
+        });
+
+    // After the window, so a click on Save is not overwritten by the rows it
+    // was clicked with — `Command` is one value per frame, and the rows have
+    // already been sent on the frame they were typed.
+    if close {
+        *command = Command::CancelMetadata;
+    } else if changed && *command == Command::None {
+        *command = Command::SetMetadataRows(rows);
     }
 }
 

@@ -720,6 +720,96 @@ pub struct App {
     /// re-read — adding a slide rewrites the index and reopens it, and a
     /// shuffle stored as positions would silently become a different shuffle.
     pub masked_order: Vec<u64>,
+    /// The metadata editor, when one is open.
+    ///
+    /// On [`App`] and not on [`Project`] because it survives a re-read: writing
+    /// the file reopens the project, and an editor stored beside the document
+    /// would be dropped by its own success — or, on the refusal path, by
+    /// nothing at all, which is worse, since that is the path where the typing
+    /// has to still be there.
+    pub editing: Option<MetadataEditor>,
+}
+
+/// An entry's metadata, while somebody is changing it.
+///
+/// The working copy is a `Vec` of pairs like [`project::Image::metadata`] and
+/// for the same reason: the order is the order somebody entered the keys in,
+/// and a map here would re-alphabetise a study's fields the first time anyone
+/// opened the editor on it.
+///
+/// # Why the rows are here rather than read from the entry each frame
+///
+/// Because a half-typed key is not a key. `rows` is what the user has in front
+/// of them, including a row whose name is empty because they have just added it
+/// and a row whose name duplicates another because they are in the middle of
+/// retyping it. The entry only ever sees the result of [`MetadataEditor::map`],
+/// which is what makes those intermediate states unable to reach the file.
+pub struct MetadataEditor {
+    /// Which entry, by `entryID`.
+    ///
+    /// The id and not the row's position, for `project::edited`'s reason: the
+    /// position is an index into the browser's order, which the search box and
+    /// the sort control both change while the editor is open.
+    pub id: u64,
+    /// The name shown in the editor's heading, taken when it was opened.
+    ///
+    /// Copied rather than looked up, so that the editor can name its entry on
+    /// the frame after a re-read has replaced every `Image` in the project —
+    /// and so that a masked pane's editor is headed with the masked name it was
+    /// opened from.
+    pub name: String,
+    /// The keys and values being edited.
+    pub rows: Vec<(String, String)>,
+    /// What went wrong with the last attempt to write, if it did.
+    ///
+    /// Kept on the editor rather than put in the status bar alone, because the
+    /// message that matters most — the project changed underneath — is about
+    /// the thing the user is looking at, and a status bar at the other end of
+    /// the window is not where they are looking.
+    pub problem: Option<String>,
+}
+
+impl MetadataEditor {
+    /// The rows as they would be written; see [`written_rows`].
+    #[must_use]
+    pub fn map(&self) -> Vec<(String, String)> {
+        written_rows(&self.rows)
+    }
+}
+
+/// The rows as they would be written.
+///
+/// A row whose key is blank is dropped: an empty key is not something QuPath's
+/// own editor can produce and not something a search can match, so the blank
+/// row an editor always has at the bottom is a *space to type in* rather than a
+/// pair. Values are kept as typed, including empty ones — `stain=` is a key
+/// somebody has recorded as having no value, which is different from not having
+/// recorded it.
+///
+/// The last of a repeated key wins, which is Gson's own behaviour reading one
+/// back and the only choice that makes the editor agree with what the file
+/// would say. Trimmed keys, because a key with a trailing space is invisible in
+/// the editor and unmatchable in the search.
+///
+/// Free rather than a method on [`MetadataEditor`], because the editor's
+/// *preview* — the line saying how many keys will be written — has rows in hand
+/// that are not yet the editor's: they are this frame's edit, on its way to
+/// becoming them. One definition, so the count shown and the map written cannot
+/// disagree about what a blank key means.
+#[must_use]
+pub fn written_rows(rows: &[(String, String)]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (key, value) in rows {
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        match out.iter_mut().find(|(existing, _)| existing == key) {
+            Some((_, slot)) => slot.clone_from(value),
+            None => out.push((key.to_owned(), value.clone())),
+        }
+    }
+    out
 }
 
 impl App {
@@ -785,6 +875,7 @@ impl App {
             order: crate::chrome::Order::default(),
             mask_names: false,
             masked_order: Vec::new(),
+            editing: None,
             filter: String::new(),
         }
     }
@@ -969,6 +1060,77 @@ impl App {
         }
         self.open_project(path);
         self.message = format!("Added {name} to the project.");
+    }
+
+    /// Writes entry `id`'s metadata back to the project on disk.
+    ///
+    /// The first thing in this application that puts a user's typing into a
+    /// file another program wrote, and the whole of the care here is about
+    /// that. `add_to_project` appends an entry and re-reads; this changes one
+    /// that was already there.
+    ///
+    /// # What happens when the file changed underneath
+    ///
+    /// It is refused, and nothing is written. The index is re-read and compared
+    /// against what was read when the project was opened; if the two differ,
+    /// somebody else — QuPath, a second copy of this, a script — has written
+    /// the file since, and the document held here is no longer the document
+    /// their change is in. Rewriting it would silently undo whatever they did,
+    /// which is the failure mode `project::added`'s documentation calls the
+    /// worst shape a bug of this kind can take: the file still opens, still
+    /// lists the same images, and has lost what someone recorded against them.
+    ///
+    /// Refusing rather than merging is deliberate. A merge is the friendlier
+    /// answer and it is also the one that never tells anybody the file moved
+    /// under them, so an edit made against a stale list would land looking as
+    /// though it had been made against the current one. The edit is not
+    /// discarded — the caller keeps the editor open with the typing in it — so
+    /// what is lost by refusing is one reopen, and what is bought is that no
+    /// concurrent change is ever overwritten without being noticed.
+    ///
+    /// # The comparison is the text, and it is trimmed
+    ///
+    /// Not an mtime and not a length: `Stored::rewritten` reproduces a
+    /// Gson-written file byte for byte, so comparing the text on disk against
+    /// the text this read is exact in both directions — it cannot miss a change
+    /// made inside a timestamp's resolution, and it cannot report one for a
+    /// file rewritten identically.
+    ///
+    /// **Trimmed at the ends, and that is not a slackening.** `project_file`
+    /// ends the index with a newline and `json::write` does not, so a project
+    /// this application *created* differs from its own rewrite by one trailing
+    /// byte — and an untrimmed comparison refuses every edit to such a project,
+    /// having found a change nobody made. Found by editing one. Only the outer
+    /// whitespace is ignored; any difference inside the document is still a
+    /// difference, because that is where a change somebody made would be.
+    pub fn set_metadata(&mut self, id: u64, metadata: &[(String, String)]) -> Result<(), String> {
+        let Some(project) = &self.project else {
+            return Err(String::from("No project is open."));
+        };
+        let path = project.path.clone();
+
+        let on_disk = std::fs::read_to_string(&path)
+            .map_err(|error| format!("Could not re-read the project: {error}"))?;
+        // Against what was *read*, rewritten through the same writer, rather
+        // than against the raw text kept from then. The two are the same file
+        // for a project Gson wrote, and for one this application wrote the
+        // rewrite is what the comparison has to be against, because that is
+        // what is on disk.
+        if on_disk.trim_end() != project.stored.rewritten().trim_end() {
+            return Err(String::from(
+                "The project changed on disk since it was opened, so this was \
+                 not written. Reopen the project and try again.",
+            ));
+        }
+
+        let files = project::edited(&project.stored, id, metadata, project::Timestamps::now())?;
+        let directory = path.parent().unwrap_or(&path).to_path_buf();
+        write_project(&directory, &files)?;
+        // Re-read for `add_to_project`'s reason: the file on disk is now the
+        // truth, and reading it back is what makes the pane show what was
+        // written rather than what was meant to be. The pictures survive it.
+        self.open_project(path);
+        Ok(())
     }
 
     /// Opens a project, replacing whatever project was open.
@@ -1648,6 +1810,65 @@ impl App {
                     Vec::new()
                 };
             }
+            Command::EditMetadata(id) => {
+                // Opened from the project's own entry rather than from the row
+                // the click was on, so the editor starts from what the file
+                // says and not from whatever the pane had drawn.
+                if let Some(image) = self
+                    .project
+                    .as_ref()
+                    .and_then(|project| project.stored.images.iter().find(|image| image.id == id))
+                {
+                    // The same two-part test the pane makes, and made the
+                    // same way: the flag alone is not enough, because a project
+                    // that cannot be masked does not mask.
+                    let masking = self.mask_names
+                        && self
+                            .project
+                            .as_ref()
+                            .is_some_and(|project| crate::chrome::maskable(&project.stored.images));
+                    self.editing = Some(MetadataEditor {
+                        id,
+                        name: crate::chrome::shown_name(image, masking).to_owned(),
+                        rows: image.metadata.clone(),
+                        problem: None,
+                    });
+                }
+            }
+            Command::SetMetadataRows(rows) => {
+                if let Some(editor) = &mut self.editing {
+                    editor.rows = rows;
+                    // Cleared as soon as anything is typed: a refusal is about
+                    // the attempt that was made, and leaving it up beside an
+                    // edited list says it is about the list now on screen.
+                    editor.problem = None;
+                }
+            }
+            Command::WriteMetadata => {
+                if let Some(editor) = &self.editing {
+                    let (id, map) = (editor.id, editor.map());
+                    match self.set_metadata(id, &map) {
+                        Ok(()) => {
+                            // Closed only on success. The refusal path is the
+                            // one where the typing must survive, and closing
+                            // the editor is how it would be lost.
+                            self.editing = None;
+                            self.message = match map.len() {
+                                0 => String::from("Cleared the entry's metadata."),
+                                1 => String::from("Wrote 1 metadata key."),
+                                many => format!("Wrote {many} metadata keys."),
+                            };
+                        }
+                        Err(problem) => {
+                            self.message.clone_from(&problem);
+                            if let Some(editor) = &mut self.editing {
+                                editor.problem = Some(problem);
+                            }
+                        }
+                    }
+                }
+            }
+            Command::CancelMetadata => self.editing = None,
             Command::Close => {
                 self.open = None;
                 self.uploaded_overview = false;
@@ -2496,6 +2717,247 @@ mod tests {
     use qupath_viewer::overview::Overview;
 
     use super::*;
+
+    /// A scratch directory that removes itself.
+    ///
+    /// Hand-rolled rather than a dependency: the workspace has no test-only
+    /// crates and one directory under `TMPDIR` is not reason to acquire the
+    /// first. Named from the process id *and* the test's own name, because
+    /// `cargo test` runs these on threads of one process and two tests sharing
+    /// a directory would be two tests writing one `project.qpproj`.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("qupath-rust-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("a scratch directory");
+            Self(path)
+        }
+
+        /// A project of one entry, written through the module that writes
+        /// projects — not a literal, so the fixture cannot drift from the
+        /// format.
+        fn project(&self) -> PathBuf {
+            let path = self.0.join(App::PROJECT_FILE);
+            let slide = self.0.join("CMU-1.svs");
+            let entry = project::Entry {
+                path: &slide,
+                name: "CMU-1.svs",
+                width: 46000,
+                height: 32914,
+            };
+            let written = project::Timestamps {
+                created: 1_700_000_000_000,
+                modified: 1_700_000_000_000,
+            };
+            for file in project::files(&path, &[entry], written) {
+                let at = self.0.join(&file.path);
+                if let Some(parent) = at.parent() {
+                    std::fs::create_dir_all(parent).expect("a directory");
+                }
+                std::fs::write(&at, &file.contents).expect("a file");
+            }
+            path
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// An application with a project open and no window.
+    fn opened(path: PathBuf) -> App {
+        let mut app = App::new(Vec::<String>::new());
+        app.open_project(path);
+        assert!(app.project.is_some(), "the scratch project opened");
+        app
+    }
+
+    fn pairs(from: &[(&str, &str)]) -> Vec<(String, String)> {
+        from.iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    /// The gesture, end to end: type a key, save, and find it in the file.
+    ///
+    /// Through `set_metadata` rather than through `project::edited`, because
+    /// what this is testing is the part the unit tests cannot see — that the
+    /// bytes reach the disk and that the pane is showing them afterwards.
+    #[test]
+    fn an_edit_reaches_the_file_and_the_pane() {
+        let scratch = Scratch::new("edit-reaches-file");
+        let path = scratch.project();
+        let mut app = opened(path.clone());
+        let id = app.project.as_ref().expect("a project").stored.images[0].id;
+
+        app.set_metadata(id, &pairs(&[("stain", "H&E")]))
+            .expect("the file is as it was opened");
+
+        // On disk.
+        let text = std::fs::read_to_string(&path).expect("the project");
+        let stored = project::read(&text).expect("it reads back");
+        assert_eq!(stored.images[0].metadata, pairs(&[("stain", "H&E")]));
+        // And in the application, which re-read it rather than assuming.
+        assert_eq!(
+            app.project.expect("still open").stored.images[0].metadata,
+            pairs(&[("stain", "H&E")])
+        );
+    }
+
+    /// The staleness check must not fire on a project this application wrote.
+    ///
+    /// A regression, and the bug it pins made the feature useless on exactly
+    /// the projects this creates: `project_file` ends the index with a newline
+    /// and `json::write` does not, so such a project differs from its own
+    /// rewrite by one trailing byte and every edit to it was refused for a
+    /// change nobody had made. Asserted as the *first* edit succeeding, which
+    /// is the gesture that was broken, rather than by comparing the two
+    /// spellings — a test of the spelling would pass again the moment the
+    /// comparison moved somewhere else.
+    #[test]
+    fn a_project_this_wrote_is_not_reported_as_changed() {
+        let scratch = Scratch::new("own-project-not-stale");
+        let path = scratch.project();
+        let mut app = opened(path);
+        let id = app.project.as_ref().expect("a project").stored.images[0].id;
+
+        app.set_metadata(id, &pairs(&[("k", "v")]))
+            .expect("a project this application created is not stale on its first edit");
+    }
+
+    /// **The reason this feature has a check at all.** A project written by
+    /// somebody else since it was opened is not overwritten, and the edit is
+    /// refused with a message that says why.
+    #[test]
+    fn an_edit_against_a_changed_file_is_refused() {
+        let scratch = Scratch::new("changed-underneath");
+        let path = scratch.project();
+        let mut app = opened(path.clone());
+        let id = app.project.as_ref().expect("a project").stored.images[0].id;
+
+        // Somebody else writes the project: QuPath, a script, a second copy of
+        // this. Through the same writer, so what lands is a real project and
+        // not a corrupted one — the check is about the file having *changed*,
+        // not about it having become unreadable.
+        let theirs = project::read(&std::fs::read_to_string(&path).expect("the project"))
+            .expect("reads back");
+        let elsewhere = project::edited(
+            &theirs,
+            id,
+            &pairs(&[("theirs", "keep me")]),
+            project::Timestamps {
+                created: 1_700_000_000_000,
+                modified: 1_700_000_999_000,
+            },
+        )
+        .expect("their edit");
+        std::fs::write(&path, &elsewhere[0].contents).expect("their write");
+
+        let refused = app
+            .set_metadata(id, &pairs(&[("mine", "overwrite")]))
+            .expect_err("the file changed underneath");
+        assert!(
+            refused.contains("changed on disk"),
+            "the message says what happened: {refused}"
+        );
+
+        // Their edit is still there, and mine is not.
+        let after = project::read(&std::fs::read_to_string(&path).expect("the project"))
+            .expect("reads back");
+        assert_eq!(
+            after.images[0].metadata,
+            pairs(&[("theirs", "keep me")]),
+            "a refused edit overwrote the change it was refused for"
+        );
+    }
+
+    /// Repeating the gesture leaves one key, not two. The invariant is over
+    /// where the state ends up rather than over what one call returned.
+    #[test]
+    fn editing_the_same_entry_twice_leaves_one_key() {
+        let scratch = Scratch::new("edit-twice");
+        let path = scratch.project();
+        let mut app = opened(path.clone());
+        let id = app.project.as_ref().expect("a project").stored.images[0].id;
+
+        app.set_metadata(id, &pairs(&[("stain", "H&E")]))
+            .expect("first");
+        // The second edit is against the project the first one re-read, which
+        // is the case that would fail if `set_metadata` compared against a
+        // snapshot taken when the project was first opened.
+        app.set_metadata(id, &pairs(&[("stain", "PAS")]))
+            .expect("second, against the file the first one wrote");
+
+        let after = project::read(&std::fs::read_to_string(&path).expect("the project"))
+            .expect("reads back");
+        assert_eq!(after.images[0].metadata, pairs(&[("stain", "PAS")]));
+    }
+
+    /// Clearing every key writes an entry with none, rather than refusing or
+    /// leaving the last one behind.
+    #[test]
+    fn clearing_every_key_writes_an_entry_with_none() {
+        let scratch = Scratch::new("clear-keys");
+        let path = scratch.project();
+        let mut app = opened(path.clone());
+        let id = app.project.as_ref().expect("a project").stored.images[0].id;
+
+        app.set_metadata(id, &pairs(&[("a", "1"), ("b", "2")]))
+            .expect("filled");
+        app.set_metadata(id, &[]).expect("cleared");
+
+        let after = project::read(&std::fs::read_to_string(&path).expect("the project"))
+            .expect("reads back");
+        assert!(after.images[0].metadata.is_empty());
+    }
+
+    /// What the editor would write, given what is in its boxes. The blank row
+    /// at the bottom is a space to type in and not a key.
+    #[test]
+    fn the_editor_drops_blank_keys_and_keeps_blank_values() {
+        let rows = pairs(&[("stain", "H&E"), ("", ""), ("  ", "orphan"), ("note", "")]);
+        assert_eq!(
+            written_rows(&rows),
+            pairs(&[("stain", "H&E"), ("note", "")]),
+            "a key with no name is not a key; a key with no value is"
+        );
+    }
+
+    /// A repeated key keeps its last value, which is what the file would say
+    /// if both were written.
+    #[test]
+    fn the_editor_resolves_a_repeated_key_the_way_the_file_would() {
+        let rows = pairs(&[("stain", "H&E"), ("stain", "PAS")]);
+        assert_eq!(written_rows(&rows), pairs(&[("stain", "PAS")]));
+    }
+
+    /// A key typed with a trailing space is the same key. Untrimmed, it is
+    /// invisible in the editor and unmatchable in the search box.
+    #[test]
+    fn the_editor_trims_keys() {
+        assert_eq!(
+            written_rows(&pairs(&[(" stain ", "H&E")])),
+            pairs(&[("stain", "H&E")])
+        );
+    }
+
+    /// An id no entry has is refused rather than written somewhere else — the
+    /// case a caller holding an id across a re-read can reach.
+    #[test]
+    fn an_edit_to_an_entry_that_is_gone_is_refused() {
+        let scratch = Scratch::new("absent-entry");
+        let path = scratch.project();
+        let mut app = opened(path);
+        let error = app
+            .set_metadata(9999, &pairs(&[("k", "v")]))
+            .expect_err("no entry 9999");
+        assert!(error.contains("9999"), "the message names it: {error}");
+    }
 
     /// The shuffle is a permutation, and it is not the same one twice.
     ///
