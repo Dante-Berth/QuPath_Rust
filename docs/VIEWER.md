@@ -2962,31 +2962,53 @@ exactly what the supersede did to them.
 
 In the order it is worth having.
 
-- **Stored image metadata, and the blocker is not the one this entry named.**
+- **Stored image metadata — the comparison is made, and the two agree.**
   `ProjectExport.json` holds QuPath's own block, so "nobody knows what to write"
-  is answered — `levels`, `preferredTileWidth` and `preferredTileHeight`,
-  `isRGB`, `channels` as objects, `pixelCalibration` in microns. And "carry it
-  from an open `Slide`" is no longer an obstacle either: `App::add_to_project`
-  holds one, `Slide::levels` is the table, and `Level` has the tile sizes.
+  was already answered — `levels`, `preferredTileWidth` and
+  `preferredTileHeight`, `isRGB`, `channels` as objects, `pixelCalibration` in
+  microns. And carrying it from an open `Slide` was never an obstacle either:
+  `App::add_to_project` holds one, `Slide::levels` is the table, and `Level` has
+  the tile sizes.
 
-  **What stops it is that the block replaces what QuPath would otherwise have
-  read.** `AbstractServerBuilder.build` calls `setMetadata` with it when the
+  What stopped it was that the block **replaces** what QuPath would otherwise
+  have read. `AbstractServerBuilder.build` calls `setMetadata` with it when the
   image is opened, so a level table that disagrees with OpenSlide's is not a
   worse description of the slide — it is QuPath reading the wrong pixels,
   silently, for as long as the project exists. `Slide::open` keeps the tiled
-  directories and drops the label, macro and thumbnail; OpenSlide's Aperio
-  driver makes its own choice, and **the two have never been compared**.
-  Nothing here can compare them: `parity/record-project.sh` stops before the
-  pixels because opening the image needs `qupath-extension-openslide` and a
-  native library, and there is none on this machine.
+  directories and drops the label, macro and thumbnail; OpenSlide's Aperio driver
+  makes its own choice, and the two had never been compared.
 
-  So the entry is not "write the block" but "record what OpenSlide reports".
-  What would close it is a recorder that opens the slide through the extension
-  and prints `getPreferredDownsamples()` and the preferred tile size, checked
-  against `Slide::levels` on the same file — the same shape as every other
-  fixture here, and blocked on the same native library as *An image opened from
-  a project* below. Until then §8.3's judgement stands: QuPath reading the slide
-  itself is better information than anything written here.
+  **They have now, and they agree in every field.** `parity/java/OpenSlideLevels
+  .java` opens the slide through `qupath-extension-openslide` and records what
+  QuPath ends up with; `parity_openslide_levels.rs` checks it against
+  `Slide::levels` on the same file. Level count, every width and height, every
+  downsample, the preferred tile size and the pixel size all match, on a
+  three-level slide and a single-level one. So the block is now *safe* to write
+  rather than merely tempting, and §8.3's judgement — that QuPath reading the
+  slide itself is better information — stands as a preference rather than as a
+  precaution.
+
+  **The blocker this entry named for a long time was not real, and the mistake
+  is worth keeping.** It read as blocked on "a native library, and there is none
+  on this machine", which was checked with `ldconfig` and `apt` — and QuPath does
+  not use the system library at all. The extension depends on
+  `io.github.qupath:openslide:<version>:<platform>`, a jar carrying its own
+  `libopenslide.so` that JNA extracts at load time
+  (`OpenSlideLoader.tryToLoadJnaInstance` → `Native.extractFromResourcePath`).
+  Nothing needed installing, and no password was needed; the evidence for the
+  blocker was gathered about the wrong artefact. *An image opened from a project*
+  below was blocked on the same non-blocker.
+
+  Two things about the recorder are deliberate, and both would be easy to get
+  wrong. It records the **server**, not `openslide_get_level_downsample`:
+  `OpenslideImageServer` explicitly declines that value — OpenSlide averages the
+  width and height ratios, which is inexact whenever the true downsample is an
+  integer — and rebuilds the table from the level dimensions, so the native call
+  answers a question QuPath never asks. And it records **two** slides, because
+  OpenSlide's fallback tile size is 256: on CMU-1 alone "the tile sizes agree"
+  would be two defaults coinciding, and CMU-1-Small-Region's **240** is the only
+  reason that comparison is a measurement. A test asserts the 240 is still there,
+  so a re-recording cannot quietly turn it back into a default.
 - ~~**A thumbnail.**~~ **Done, and the entry was wrong about what it needed.**
   It read as blocked on a JPEG encoder because it assumed a row's picture is
   `data/<id>/thumbnail.jpg`. QuPath's own browser opens the image when that file

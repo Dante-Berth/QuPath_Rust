@@ -1,0 +1,20 @@
+{
+  "slide": "CMU-1.svs",
+  "libraryVersion": "4.0.1",
+  "vendor": "aperio",
+  "width": 46000,
+  "height": 32914,
+  "rgb": true,
+  "channels": 3,
+  "preferredTileWidth": 256,
+  "preferredTileHeight": 256,
+  "pixelSizeKnown": true,
+  "pixelWidthMicrons": 0.499,
+  "pixelHeightMicrons": 0.499,
+  "levelCount": 3,
+  "levels": [
+    {"index": 0, "width": 46000, "height": 32914, "downsample": 1.0},
+    {"index": 1, "width": 11500, "height": 8228, "downsample": 4.0},
+    {"index": 2, "width": 2875, "height": 2057, "downsample": 16.0}
+  ]
+}

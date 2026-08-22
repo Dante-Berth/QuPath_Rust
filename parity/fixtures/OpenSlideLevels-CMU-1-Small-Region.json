@@ -1,0 +1,18 @@
+{
+  "slide": "CMU-1-Small-Region.svs",
+  "libraryVersion": "4.0.1",
+  "vendor": "aperio",
+  "width": 2220,
+  "height": 2967,
+  "rgb": true,
+  "channels": 3,
+  "preferredTileWidth": 240,
+  "preferredTileHeight": 240,
+  "pixelSizeKnown": true,
+  "pixelWidthMicrons": 0.499,
+  "pixelHeightMicrons": 0.499,
+  "levelCount": 1,
+  "levels": [
+    {"index": 0, "width": 2220, "height": 2967, "downsample": 1.0}
+  ]
+}
