@@ -59,6 +59,14 @@ fn main() {
     render("chrome-project-search.png", &mut app);
     app.filter.clear();
 
+    // And in an order other than the file's. The picture is of the control as
+    // much as of the rows: a `ComboBox` sizes itself from its widest choice,
+    // which inside a content-sized panel is §8.1c's trap, and a pane clipped
+    // by it clips three widgets away from the change.
+    app.order = chrome::Order::Name;
+    render("chrome-project-sorted.png", &mut app);
+    app.order = chrome::Order::default();
+
     // And with a slide, which is the state the controls exist for: the empty
     // panels above are what a first-time user meets, and these are what
     // everyone else does. The path is optional so the example still runs on a
@@ -116,6 +124,13 @@ fn sample_project() -> std::path::PathBuf {
     };
     let gone = directory.join("CMU-1, JP2K.svs");
     let rotated = directory.join("CMU-1 rotated.svs");
+    // A fourth row, and it is here for the *sort* rather than for a row state:
+    // the other three are already in name order, so a picture of the browser
+    // sorted by name was identical to one of it unsorted and said nothing
+    // about either. This one is written third and sorts first, which is what
+    // makes the two pictures differ.
+    let block = directory.join("CMU-1 block 10.svs");
+    std::fs::write(&block, b"").expect("a stand-in slide");
 
     let entries = [
         Entry {
@@ -129,6 +144,18 @@ fn sample_project() -> std::path::PathBuf {
             name: "CMU-1, JP2K",
             width: 46_000,
             height: 32_914,
+        },
+        // Before the `rotated` row and not after it. The rewrite below finds
+        // the *last* `"builderType": "uri"` in the file, so the entry it turns
+        // into a transform is whichever one is written last — adding this
+        // fourth entry after `rotated` silently moved the greyed row onto it,
+        // and both rows went on looking like rows. Nothing in the browser
+        // could have said so; the picture did.
+        Entry {
+            path: &block,
+            name: "CMU-1 block 10",
+            width: 2220,
+            height: 2967,
         },
         Entry {
             path: &rotated,

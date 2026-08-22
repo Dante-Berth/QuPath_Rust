@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use qupath_pipeline::Micron;
-use qupath_viewer::{ScreenPoint, SlidePoint};
+use qupath_viewer::{ScreenPoint, SlidePoint, project};
 
 use crate::state::{App, Appearance, Channel, cursor_slide_position, describe, display_name};
 use crate::thumbnails::Pictures;
@@ -56,6 +56,11 @@ pub enum Command {
     /// and a command per character would make the list a function of how many
     /// frames the typing was spread across.
     Filter(String),
+    /// Put the browser's rows in this order.
+    ///
+    /// Carries the whole choice rather than "the next one", for
+    /// [`Command::Filter`]'s reason: the order is picked, not stepped through.
+    SortBy(Order),
     /// Show or hide the project browser.
     ToggleProject,
     Fit,
@@ -134,6 +139,126 @@ pub fn style(context: &egui::Context) {
         style.spacing.button_padding = egui::vec2(8.0, 4.0);
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
     });
+}
+
+/// What the project browser's rows are put in order by.
+///
+/// QuPath's browser has a **Sort by...** menu offering the same choices: the
+/// three keys every entry has, any key in the project's metadata, and *None*.
+/// The metadata keys are not here — `project::read` summarises an entry to an
+/// id, a name, a builder and a path, so the map is in the document and unread,
+/// and `docs/VIEWER.md` §8.8 has reading it as its own change.
+///
+/// # It is a *grouping* there and a sort here, and that is a divergence
+///
+/// QuPath's tree puts a `METADATA` node per distinct value and hangs the
+/// entries off it, except when the key is the name — which it special-cases
+/// back to a flat list, because "the name effectively being repeated twice ...
+/// looks weird". So sorting by name is a flat sorted list in QuPath too, and
+/// that is the case this pane reproduces exactly. The other two would be
+/// groups there and are flat lists here, ordered by the same value the groups
+/// would have been ordered by. A pane of flat rows has nowhere to hang a
+/// group; the alternative is a tree, and a tree is a different pane.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Order {
+    /// The order the project file lists its images in.
+    ///
+    /// QuPath's *None*, and the default, because it is the order a project has
+    /// when nobody has asked for another one: entries are appended as images
+    /// are added, so it is also the order they were added in.
+    #[default]
+    Stored,
+    /// By name, with `GeneralTools.smartStringSort`'s arithmetic.
+    Name,
+    /// By `entryID`, which is also the name of the entry's directory.
+    Id,
+    /// By the file name at the end of the entry's URI.
+    ///
+    /// QuPath's `getDefaultValue` for its URI key takes `uri.getPath()` and
+    /// keeps what follows the last `/` — the file name, not the whole path —
+    /// unless the URI names a host, which this reader rejects before a row
+    /// exists. So it sorts slides by file name where [`Order::Name`] sorts them
+    /// by the name the project gave them, and the two differ exactly when
+    /// somebody has renamed an entry.
+    Uri,
+}
+
+impl Order {
+    /// Every choice, in the order the menu offers them.
+    pub const ALL: [Self; 4] = [Self::Stored, Self::Name, Self::Id, Self::Uri];
+
+    /// What the menu calls this.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stored => "Project order",
+            Self::Name => "Name",
+            Self::Id => "Entry ID",
+            Self::Uri => "File name",
+        }
+    }
+}
+
+/// The rows the browser draws, in the order it draws them.
+///
+/// **Indices, not entries, and that is the whole point of the return type.** A
+/// row's picture is [`PROJECT_TEXTURE`] `+ index` and `Pictures` is indexed the
+/// same way, so a sorted *copy of the entries* would hand row 3's picture to
+/// whatever ended up first. §8.3 met this once already with the search — a row
+/// is skipped and its index is not — and sorting is the same trap with the rows
+/// moved instead of removed.
+///
+/// The search runs first and the sort orders what it leaves, which is what
+/// QuPath does: its tree is rebuilt from the entries the predicate passes.
+///
+/// `sort_by` and not `sort_unstable_by`: two entries with the same name, or the
+/// same file name in two directories, compare equal, and a stable sort leaves
+/// them in the project's order rather than in an order that changes when the
+/// list is redrawn.
+fn row_order(images: &[project::Image], filter: &str, order: Order) -> Vec<usize> {
+    let mut rows: Vec<usize> = (0..images.len())
+        .filter(|&index| matches(&images[index].name, filter))
+        .collect();
+    if order == Order::Stored {
+        return rows;
+    }
+    rows.sort_by(|&one, &two| {
+        let (one, two) = (&images[one], &images[two]);
+        match order {
+            // Unreachable: returned above. Written out rather than left to a
+            // wildcard so that adding a variant fails here.
+            Order::Stored => std::cmp::Ordering::Equal,
+            Order::Name => project::smart_string_compare(&one.name, &two.name),
+            // By value and not by the text of it, because QuPath's key is the
+            // entry's `getID()` and the ids are numbers. Smart-sorting their
+            // decimal spellings would give the same answer; comparing the
+            // numbers says so without depending on it.
+            Order::Id => one.id.cmp(&two.id),
+            Order::Uri => project::smart_string_compare(&file_name(one), &file_name(two)),
+        }
+    });
+    rows
+}
+
+/// The part of an entry's URI QuPath sorts it by: the file name.
+///
+/// `getDefaultValue` takes `uri.getPath()` and keeps what follows the last
+/// `/`. Taken from [`project::Image::slide`] when the entry has one, because
+/// that is the URI already decoded — a `%20` in the URI is a space in the name
+/// and would otherwise sort under `%`.
+///
+/// An entry that names no file sorts under QuPath's `UNDEFINED_VALUE`, which
+/// is a word in its resource bundle rather than something to match on. The
+/// empty string is used instead, which puts those rows first: they are the
+/// ones that will not open, and a list that hides them at the bottom is one
+/// where the rows worth noticing are the ones scrolled past.
+fn file_name(image: &project::Image) -> String {
+    image
+        .slide
+        .as_ref()
+        .ok()
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// The `egui` user-texture id the overview picture is registered under.
@@ -1261,12 +1386,11 @@ fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
     ui.add(egui::Label::new(egui::RichText::new(&project.name).strong()).wrap());
 
     let images = project.stored.images.len();
-    let shown = project
-        .stored
-        .images
-        .iter()
-        .filter(|image| matches(&image.name, &app.filter))
-        .count();
+    // Computed once and iterated below, rather than filtered twice: the count
+    // in the heading and the rows under it are then the same list by
+    // construction, and cannot disagree about what the search left.
+    let rows = row_order(&project.stored.images, &app.filter, app.order);
+    let shown = rows.len();
     ui.label(
         egui::RichText::new(match (images, shown, images == shown) {
             (0, ..) => "No images".to_owned(),
@@ -1300,6 +1424,7 @@ fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
     ui.add_space(8.0);
     add_slide(ui, app, command);
     search(ui, app, command);
+    sort_by(ui, app, command);
 
     if project.stored.images.is_empty() {
         ui.add(
@@ -1329,13 +1454,12 @@ fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
     }
 
     let showing = app.open.as_ref().map(|open| open.path.as_path());
-    for (index, image) in project.stored.images.iter().enumerate() {
-        // The row is skipped and the *index* is not: a picture belongs to the
-        // entry it was read for, and renumbering the rows a search leaves
-        // showing would hand row 3's picture to row 1.
-        if !matches(&image.name, &app.filter) {
-            continue;
-        }
+    // `index` is the entry's position in the project and **not** its position
+    // in this list: it is what `Pictures` and `PROJECT_TEXTURE` are keyed by,
+    // and `row_order` returns indices precisely so that a sort moves the rows
+    // without moving what each one is a picture of.
+    for &index in &rows {
+        let image = &project.stored.images[index];
         let current = is_showing(image, showing);
         let present = project.present(index);
         let openable = image.slide.is_ok();
@@ -1453,6 +1577,49 @@ fn search(ui: &mut egui::Ui, app: &App, command: &mut Command) {
     if response.changed() && *command == Command::None {
         *command = Command::Filter(text);
     }
+}
+
+/// The control that puts the rows in order.
+///
+/// QuPath's **Sort by...** submenu, in the pane rather than in a menu for the
+/// reason the search box is: the thing it acts on is the list directly under
+/// it. It sits below the search because the search decides *which* rows and
+/// this decides what order they are in, and reading them the other way round
+/// asks what order a list has before knowing what is in it.
+///
+/// # The width is set and not left to the labels
+///
+/// A `ComboBox` sizes itself from its widest choice, which inside a
+/// content-sized `SidePanel` is §8.1c's trap for the fourth time: the widget
+/// that will not be narrow is the one that decides how wide every other widget
+/// in the panel is laid out against, and the panel then clips at its cap. The
+/// width is therefore whatever the row has left after the label, floored so
+/// that a very narrow panel truncates the choice rather than pushing the
+/// panel wider.
+fn sort_by(ui: &mut egui::Ui, app: &App, command: &mut Command) {
+    ui.horizontal(|ui| {
+        ui.add(egui::Label::new(egui::RichText::new("Sort by").small()).wrap());
+        let width = (ui.available_width() - 4.0).max(72.0);
+        let mut chosen = app.order;
+        egui::ComboBox::from_id_salt("project sort")
+            .width(width)
+            .selected_text(egui::RichText::new(app.order.label()).small())
+            .show_ui(ui, |ui| {
+                for order in Order::ALL {
+                    ui.selectable_value(&mut chosen, order, order.label());
+                }
+            })
+            .response
+            .on_hover_text(
+                "The order the rows are listed in. `Project order` is the \
+                 order the project file has them in, which is the order they \
+                 were added.",
+            );
+        if chosen != app.order && *command == Command::None {
+            *command = Command::SortBy(chosen);
+        }
+    });
+    ui.add_space(6.0);
 }
 
 /// Whether `name` passes the browser's search box.
@@ -2077,6 +2244,131 @@ mod tests {
             Some(here)
         ));
         assert!(!super::is_showing(&entry(Err("a `rotated` image")), None));
+    }
+
+    /// Entries whose names and files are chosen to separate the four orders.
+    ///
+    /// Every column disagrees with every other: the ids are not the project's
+    /// order, the names smart-sort differently from a plain sort, and each
+    /// file name sorts differently from the name of the entry that owns it.
+    /// A `row_order` that ignored its `order` argument would still pass a
+    /// fixture where two of the columns agreed.
+    fn entries() -> Vec<qupath_viewer::project::Image> {
+        use qupath_viewer::project::Image;
+        let entry = |id: u64, name: &str, file: &str| Image {
+            id,
+            name: name.to_owned(),
+            builder: String::from("uri"),
+            slide: Ok(std::path::PathBuf::from(format!("/slides/{file}"))),
+            uri: None,
+        };
+        vec![
+            entry(7, "scan 10", "c.svs"),
+            entry(3, "scan 2", "a.svs"),
+            entry(9, "scan 1", "b.svs"),
+        ]
+    }
+
+    /// Each order is the one it names, and none of them is the file's order.
+    #[test]
+    fn the_rows_come_out_in_the_order_that_was_asked_for() {
+        let images = entries();
+        let order = |order| super::row_order(&images, "", order);
+
+        // The project's own order, which is the order they were added.
+        assert_eq!(order(super::Order::Stored), [0, 1, 2]);
+        // `scan 1`, `scan 2`, `scan 10` — the smart sort's whole point. A
+        // plain string sort would give `scan 1`, `scan 10`, `scan 2`.
+        assert_eq!(order(super::Order::Name), [2, 1, 0]);
+        // 3, 7, 9.
+        assert_eq!(order(super::Order::Id), [1, 0, 2]);
+        // a.svs, b.svs, c.svs.
+        assert_eq!(order(super::Order::Uri), [1, 2, 0]);
+    }
+
+    /// **The index a row carries is the entry's, in every order.**
+    ///
+    /// This is the property the return type exists for, and the one a bug here
+    /// would be invisible in: a row's picture is `PROJECT_TEXTURE + index` and
+    /// `Pictures` is indexed the same way, so a sort that renumbered the rows
+    /// would draw the right names over the wrong slides. Every row would look
+    /// like a row. §8.3 met the same trap with the search and the memory
+    /// `test-where-state-ends-up` is about exactly this shape — assert where
+    /// the state ends up, not that the gesture happened.
+    #[test]
+    fn a_sorted_row_still_names_its_own_entry() {
+        let images = entries();
+        for order in super::Order::ALL {
+            let rows = super::row_order(&images, "", order);
+            assert_eq!(rows.len(), images.len(), "{order:?} dropped a row");
+            // Every entry exactly once: a sort that duplicated or lost one
+            // would still be in order.
+            let mut seen = rows.clone();
+            seen.sort_unstable();
+            assert_eq!(seen, [0, 1, 2], "{order:?} is not a permutation");
+            // And the index really does address the entry the row is of.
+            for &index in &rows {
+                assert_eq!(
+                    images[index].id,
+                    entries()[index].id,
+                    "{order:?} moved what index {index} names"
+                );
+            }
+        }
+    }
+
+    /// The search runs first and the sort orders what it leaves.
+    ///
+    /// Both at once is the case worth having, because each control is easy to
+    /// get right alone: a sort applied before the filter would order rows that
+    /// are not shown, and a filter applied to the sorted *positions* rather
+    /// than to the entries would drop the wrong ones.
+    #[test]
+    fn the_search_narrows_and_the_sort_orders_what_is_left() {
+        let images = entries();
+        // `scan 2` and `scan 10` both contain `scan 1`? No — `scan 2` does
+        // not, and `scan 10` does. So this is two rows: `scan 1` and
+        // `scan 10`, in that order by name and the other way in the file.
+        let rows = super::row_order(&images, "scan 1", super::Order::Name);
+        assert_eq!(rows, [2, 0]);
+        assert_eq!(images[rows[0]].name, "scan 1");
+        assert_eq!(images[rows[1]].name, "scan 10");
+
+        // The same search, left in the project's order.
+        assert_eq!(super::row_order(&images, "scan 1", super::Order::Stored), [0, 2]);
+    }
+
+    /// An entry that names no file sorts by file name under the empty string.
+    ///
+    /// It has no file name to sort by, and QuPath's `getDefaultValue` puts it
+    /// under a word from its resource bundle — not something to match on. The
+    /// empty string puts it first, which is where a row that will not open is
+    /// worth being: the alternative hides the rows worth noticing at the
+    /// bottom of a list nobody scrolls to the end of.
+    #[test]
+    fn an_entry_with_no_file_sorts_first_by_file_name() {
+        use qupath_viewer::project::Image;
+        let mut images = entries();
+        images.push(Image {
+            id: 1,
+            name: String::from("scan 3"),
+            builder: String::from("rotated"),
+            slide: Err(String::from("a `rotated` image")),
+            uri: None,
+        });
+        let rows = super::row_order(&images, "", super::Order::Uri);
+        assert_eq!(rows[0], 3, "the entry with no file is not first");
+
+        // By *name* it sorts where its name puts it, which is the third of
+        // four — `scan 1`, `scan 2`, `scan 3`, `scan 10`, because the digit
+        // runs are compared as numbers. That it is third and not first is
+        // what says the two orders read different fields rather than one
+        // falling back to the other; the assumption written here first was
+        // that it would be last, and the sort it is a test of is the reason
+        // it is not.
+        let by_name = super::row_order(&images, "", super::Order::Name);
+        let names: Vec<&str> = by_name.iter().map(|&i| images[i].name.as_str()).collect();
+        assert_eq!(names, ["scan 1", "scan 2", "scan 3", "scan 10"]);
     }
 
     /// The scalebar measures what its label says, on a scaled display too.

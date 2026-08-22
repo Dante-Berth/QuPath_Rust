@@ -650,6 +650,24 @@ pub struct App {
     /// looks like a reason — the box holds the text, but a pane scrolled past
     /// it does not.
     pub filter: String,
+    /// What order the browser's rows are in.
+    ///
+    /// On [`App`] rather than on [`Project`] for [`App::filter`]'s reason —
+    /// it is a state of the interface — but **unlike the filter it survives a
+    /// project being opened**, and the difference is worth stating because the
+    /// two controls sit one above the other.
+    ///
+    /// A filter left over from another study hides rows and shows nothing that
+    /// says why. An order left over hides nothing: every row is there, and the
+    /// user asked for names in alphabetical order because that is how they
+    /// want to read a list of slides, which is a preference about lists rather
+    /// than about one project. QuPath keeps it on the *project* — it writes
+    /// `_SORT_KEY` into the project's metadata, so a study reopens in the
+    /// order it was left in — and this cannot, because writing a key
+    /// `project::read` does not read back is how a rewrite quietly drops it.
+    /// So it is per-session here, which is the half of QuPath's behaviour that
+    /// can be honoured without the other half being a lie.
+    pub order: crate::chrome::Order,
 }
 
 impl App {
@@ -712,6 +730,7 @@ impl App {
             unreported: false,
             project: None,
             show_project: false,
+            order: crate::chrome::Order::default(),
             filter: String::new(),
         }
     }
@@ -1540,6 +1559,9 @@ impl App {
             }
             Command::ToggleProject => self.show_project = !self.show_project,
             Command::Filter(text) => self.filter = text,
+            // Not cleared when a project is opened, unlike the filter above:
+            // see [`App::order`] for why the two differ.
+            Command::SortBy(order) => self.order = order,
             Command::Close => {
                 self.open = None;
                 self.uploaded_overview = false;
