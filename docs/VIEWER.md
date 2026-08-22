@@ -2101,6 +2101,166 @@ a picture. Same family as the clipped slider labels and the same fix: the
 content has to be able to be narrower than the panel. This is the third
 occurrence, which is what `docs/EVOLUTION.md` asks for an entry at.
 
+#### Ordering it, and the sort that is not a string sort
+
+QuPath's browser has a **Sort by...** menu above its tree; this has the same
+four choices in a combo under the search box, because §8.8 named sorting as the
+cheapest of the three things the pane was still missing — the other two want
+the entry's metadata map, which `project::read` summarises away.
+
+**The ordering is `GeneralTools.smartStringSort` and it is not a string sort.**
+A name is split on `(\d+)` into digit runs and the text between them, the runs
+are parsed to `BigDecimal` and compared by *value*, and the last tiebreak is
+the number of parts. `["a1", "a2", "a10"]` stays as it is where a plain sort
+puts `a10` second. It is ported as `project::smart_string_compare` and pinned
+by `parity/fixtures/SmartStringSort.json`, which is QuPath's own function
+handed thirty-three names chosen for the parts a reader gets wrong.
+
+**The recording earned its keep on the first run, on the one thing no reading
+would have caught.** Java compares UTF-16 code units and Rust compares UTF-8
+bytes. A character from U+10000 up is a *surrogate pair* in Java, both halves
+in U+D800..U+E000 — below every character from U+E000 to U+FFFF — so QuPath
+puts an emoji **before** `\u{e000}` and `str::cmp` puts it after. It was the
+only line of the fixture the byte comparison got wrong, and the fix is
+`left.encode_utf16().cmp(right.encode_utf16())`, which allocates nothing. A
+slide named with an emoji is not the reason to carry it; the reason is that a
+browser whose rows are in a different order from QuPath's for *any* name is one
+that has to be checked name by name before it is believed.
+
+Three more the fixture pinned and a reading would have got wrong:
+
+- **`007` and `7` compare equal.** `BigDecimal.compareTo` ignores scale, so the
+  tie falls through to the part count, which is also equal. Their order in the
+  fixture is nothing but the input order Java's stable sort left them in —
+  which is why the equality is asserted *directly* as well as through the list:
+  a comparator that ranked them would reproduce the recorded order here and
+  diverge on the next project. Same reason the sort in `row_order` is
+  `sort_by` and not `sort_unstable_by`.
+- **A digit run meets a text part as the digits it prints as.** Java compares
+  the two `toString`s and `new BigDecimal("007").toString()` is `7`, so the
+  leading zeros come off when the run is *built*, not when it is compared.
+- **The tiebreak is a part count, not a length.** `a1` beats `a1b1` on it, and
+  beats `a1bbbbbbbb` on text without ever reaching it.
+
+**The sort is case-sensitive and the search box three lines above it is not.**
+`Block` sorts before `abc`; `block` matches `BLOCK`. Both are QuPath's
+behaviour and they really do disagree, in the same pane about the same names.
+
+##### The order is over indices, which is the whole design
+
+A row's picture is `PROJECT_TEXTURE + index` and `Pictures` is indexed the same
+way, so `row_order` returns `Vec<usize>` and never a sorted copy of the
+entries. Sorting the entries would hand row 3's picture to whatever ended up
+first — the same index-identity trap the search met one heading up, where a row
+is skipped and its index is not, with the rows *moved* instead of removed. And
+it would have been invisible: every row would still look like a row, with a
+real name over a real thumbnail of the wrong slide.
+
+Which is what `chrome-project-sorted.png` is for. It shows the rows in a
+different order with the one tissue thumbnail still on the slide it is of, and
+that is an assertion no count could make.
+
+##### Three of the four choices are a divergence
+
+QuPath's sort is a **grouping**: a `METADATA` tree node per distinct value with
+the entries hung off it. Except when the key is the name, which it
+special-cases straight back to a flat list, because "the name effectively being
+repeated twice ... looks weird". So *Name* is the same thing on both sides and
+is the case this reproduces exactly.
+
+*Entry ID* and *File name* would be groups there and are flat lists here,
+ordered by the value the groups would have been ordered by. A pane of flat rows
+has nowhere to hang a group; the alternative is a tree, and a tree is a
+different pane. **Project order** is QuPath's *None*, and the default, because
+it is the order a project has when nobody has asked for another — entries are
+appended as images are added, so it is also the order they were added in.
+
+*File name* follows `getDefaultValue`: `uri.getPath()` with everything up to
+the last `/` dropped. So it sorts by **file** name where *Name* sorts by the
+name the project gave the entry, and the two differ exactly when somebody has
+renamed one. An entry naming no file sorts first, rather than under QuPath's
+`UNDEFINED_VALUE` — a word in a resource bundle is not something to match on,
+and those are the rows that will not open. The bottom of a list is where a row
+goes to be scrolled past.
+
+**The order survives a project being opened; the search does not**, and the
+asymmetry is the point. A filter left over from another study hides rows and
+shows nothing that says why. An order left over hides nothing — every row is
+there, and somebody who wants names alphabetical wants that about *lists*, not
+about one project. QuPath keeps it on the project, writing `_SORT_KEY` into the
+project metadata so a study reopens as it was left; this cannot, because
+writing a key `project::read` does not read back is how a rewrite quietly drops
+it (§8.3's rewrite is byte-exact precisely so that it does not). Per-session is
+the half of QuPath's behaviour that can be honoured without the other half
+being a lie.
+
+#### Two more things the picture found
+
+**The sample project's names were already in alphabetical order.** So the first
+render of the browser sorted by name was byte-identical to the render of it
+unsorted, and neither picture said anything about either. A picture that cannot
+distinguish the thing it is of from its absence is §6's "check appearance by
+looking" failing in the way §6 warns about — the instrument was pointed at the
+right pane and had nothing to show. A fourth entry fixes it: written third,
+sorts first.
+
+**And adding that entry moved the greyed transform row onto the wrong slide.**
+`examples/chrome` writes a project with `project::files` and then rewrites the
+*last* `"builderType": "uri"` in the file, because writing a transform builder
+is exactly what `project.rs` refuses to do. The rewrite is positional, so the
+new fourth entry inherited it and the row labelled "built by a `rotated`
+transform" was no longer the one named `CMU-1, rotated 90°`. Two rows swapped
+their states, both went on looking like rows, and nothing in the browser could
+have said so. Fixed by writing the new entry *before* the rotated one, with the
+reason in a comment at the site rather than in this file, because the next
+person to add a row will be reading the array and not §8.3.
+
+**§8.1c's width trap was expected for a fourth time and did not fire.** A
+`ComboBox` sizes itself from its widest choice, so inside a content-sized
+`SidePanel` it is exactly the widget that cannot be narrow — the shared
+resource `EVOLUTION.md`'s entry is about. It is given the width the row has
+left instead, floored so a very narrow panel truncates the choice rather than
+pushing the panel out, and the list inside it is set to `Truncate` rather than
+the `Extend` `ComboBox` uses, so that a fifth choice added later cannot widen
+the menu either. Predicted, avoided, and the picture is what says so rather
+than the reasoning.
+
+#### Pressing the combo, and two bugs in the instrument rather than in the pane
+
+A closed combo says nothing about its list, so `examples/chrome` now delivers a
+**synthesised click** — a press and a release at a position read off the
+picture — and photographs what opens. The popup came out with `Project order`
+reading `roject order` and `Entry ID` reading `ntry ID`, every other glyph
+present, the rows behind it showing through, and an hour went into the widget's
+width before either had anything to do with the widget.
+
+**Neither was a bug in the pane. Both were bugs in the instrument, and that is
+worse**, because §6's whole argument is that these pictures are what assertions
+cannot be. A picture that lies is worth less than no picture.
+
+- **A partial texture delta, dropped in silence.** `egui` sends the font atlas
+  whole the first time and *patches* it afterwards, appending the glyphs a
+  later frame first asks for. The example skipped every patch, with a comment
+  explaining that a render from scratch has nothing for one to apply to — and
+  the whole-image set from the first frame is exactly what it applies to. `P`
+  and `E` are the only capitals on that pane no earlier frame had asked for, so
+  those two words lost their first letter and nothing else did. One 35x11
+  patch. It is applied now, and `paste` clips at the edges rather than wrapping,
+  because a wrapped row puts one glyph's right-hand column inside a different
+  letter.
+- **A popup photographed a fifth of the way through its fade-in.** The rows
+  were not showing *through* the menu; the menu was at 44% opacity, one frame
+  after the click, and `egui` was compositing it correctly. The frame count and
+  a `predicted_dt` fix it — an animation needs time to pass, not just frames to
+  be drawn.
+
+Both were found the same way, and it is the way `MEMO.md` §4 keeps recommending:
+stop reading the widget and read what the *pixels* say. A dump of the vertex
+alphas said `{0, 112}` and the transparency stopped being a mystery in one line;
+a dump of the texture deltas said `PARTIAL at [1499, 0] size [35, 11]` and so
+did the missing glyphs. Both diagnostics took a minute and neither was reached
+for until the reasoning had run out.
+
 ### 8.4 The overview — the invariant is that the two mappings agree
 
 `overview.rs` is `ImageOverview.java`'s arithmetic: slide to overview, which
@@ -2576,14 +2736,19 @@ In the order it is worth having.
   is absent, so the picture comes from the pixels on both sides; §8.3 has the
   call site and what it cost to find out. The encoder is still owed — see below
   — but nothing about the *browser* was ever waiting on it.
-- **The rest of `ProjectBrowser`, which is now what the browser is missing
-  rather than a picture.** §8.3's opening listed what QuPath's pane has: the
-  thumbnails (done), the search (done), **sorting by name or by a metadata
-  key**, **right-click to edit an entry's metadata**, and **masking names for
-  blinded studies**. The last two need the entry's metadata map, which
-  `project::read` summarises away and `added` preserves without reading — so
-  both are the same change underneath, and it is a change to the reader rather
-  than to the pane. Sorting needs neither and is the cheapest of the three.
+- **The rest of `ProjectBrowser`, and what is left of it is all one change.**
+  §8.3's opening listed what QuPath's pane has: the thumbnails (done), the
+  search (done), sorting (**done** — §8.3, and the ordering is QuPath's own
+  `smartStringSort` with a fixture), **right-click to edit an entry's
+  metadata**, and **masking names for blinded studies**. Both of the two left
+  need the entry's metadata map, which `project::read` summarises away and
+  `added` preserves without reading — so they are the same change underneath,
+  and it is a change to the **reader** rather than to the pane. Sorting was the
+  cheapest of the three and it is gone; what remains is that one reader change,
+  which also unblocks the metadata half of the search box (`key=value` tokens
+  and the synthesised `has_data=<bool>`, §8.3) and QuPath's own sort keys,
+  which are metadata keys. Four things behind one change is what makes it the
+  next one worth doing.
 - **`data.qpdata`, which should stay missing.** Java serialisation tied to
   Java's object graph. A guessed version is how a project becomes corrupt in a
   way someone discovers much later, having trusted it. The detections belong
@@ -2604,7 +2769,11 @@ In the order it is worth having.
   through `App` instead. The same hole as the overview's click-to-jump and
   escape during a run: reachable only with a hand on the machine. The hover
   states of the browser's rows are in that hole now too — the fill under a
-  hovered row has been reasoned about and drawn, and never seen.
+  hovered row has been reasoned about and drawn, and never seen. **The sort
+  combo's dropdown was in it for about an hour and is not any more**: a popup
+  only exists once its box has been pressed, so `examples/chrome` now presses
+  it — a synthesised click, and then frames until the fade-in finishes. §8.3
+  has what that cost and what it found.
 - **A look at the interface in a real window — started, and it paid at once.**
   The application has now been run and photographed on X11 at
   `WINIT_X11_SCALE_FACTOR=2`, which is what an offscreen render cannot be: a

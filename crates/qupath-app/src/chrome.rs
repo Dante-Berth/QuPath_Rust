@@ -1605,6 +1605,16 @@ fn sort_by(ui: &mut egui::Ui, app: &App, command: &mut Command) {
             .width(width)
             .selected_text(egui::RichText::new(app.order.label()).small())
             .show_ui(ui, |ui| {
+                // Truncate and not `Extend`, which is what `ComboBox` sets for
+                // its list. `Extend` lets an item wider than the box expand the
+                // *popup*, which is §8.1c's rule one layer further in — the
+                // content has to be able to be narrower than what holds it —
+                // and the popup is laid out against the screen rather than
+                // against the panel, so the width given to the closed box does
+                // not bound it. None of the four labels is long enough to
+                // reach that today; this is here so that a fifth one added
+                // later truncates instead of widening the menu.
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                 for order in Order::ALL {
                     ui.selectable_value(&mut chosen, order, order.label());
                 }

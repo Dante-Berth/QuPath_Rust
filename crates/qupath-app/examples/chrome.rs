@@ -67,6 +67,15 @@ fn main() {
     render("chrome-project-sorted.png", &mut app);
     app.order = chrome::Order::default();
 
+    // And the list the combo drops down, which is the one part of the control
+    // a still picture of it cannot show. The position is the closed box, read
+    // off `chrome-project.png`.
+    render_clicking(
+        "chrome-project-sort-open.png",
+        &mut app,
+        Some(egui::pos2(380.0, 204.0)),
+    );
+
     // And with a slide, which is the state the controls exist for: the empty
     // panels above are what a first-time user meets, and these are what
     // everyone else does. The path is optional so the example still runs on a
@@ -187,8 +196,43 @@ fn sample_project() -> std::path::PathBuf {
     project
 }
 
+/// Writes `patch` into `texture` with its top-left corner at `(x, y)`.
+///
+/// `egui`'s partial texture update, which is how the font atlas grows: the
+/// glyphs asked for on a later frame are appended and only their rectangle is
+/// sent. Rows are copied whole, and a patch that would run past an edge is
+/// clipped rather than wrapping — a wrapped row would put a glyph's right-hand
+/// column at the left edge of the next line of the atlas, which draws as a
+/// stray mark in a completely different letter.
+fn paste(texture: &mut Texture, patch: &Texture, x: usize, y: usize) {
+    let (stride, rows) = (texture.width as usize, texture.height as usize);
+    let (patch_stride, patch_rows) = (patch.width as usize, patch.height as usize);
+    let width = patch_stride.min(stride.saturating_sub(x));
+    for row in 0..patch_rows.min(rows.saturating_sub(y)) {
+        let from = row * patch_stride;
+        let to = (y + row) * stride + x;
+        texture.pixels[to..to + width].copy_from_slice(&patch.pixels[from..from + width]);
+    }
+}
+
 /// Lays the interface out and rasterises it.
 fn render(path: &str, app: &mut App) {
+    render_clicking(path, app, None);
+}
+
+/// The same, with a click delivered at `click` before the frame is drawn.
+///
+/// For the one part of a control an offscreen render cannot otherwise reach: a
+/// `ComboBox`'s list only exists once the box has been pressed, so a picture of
+/// the closed box says nothing about the popup — which is laid out against the
+/// *screen* rather than against the panel, so the width the closed box was
+/// given does not obviously bound it.
+///
+/// A press and a release in one frame, which is what `egui` reads as a click.
+/// The position is in points and is read off the picture; a click that lands on
+/// nothing renders the same frame as no click, so a wrong one shows up as a
+/// picture with no popup in it rather than as a silent pass.
+fn render_clicking(path: &str, app: &mut App, click: Option<egui::Pos2>) {
     // The browser's row pictures are made on a thread and arrive over a
     // channel, so an offscreen render has to wait for them the way the window
     // does — by asking again. The application asks once per frame and fills the
@@ -226,13 +270,82 @@ fn render(path: &str, app: &mut App) {
     let first = context.run(input.clone(), |context| {
         chrome::draw(context, app);
     });
-    let output = context.run(input, |context| {
+    // The click goes on the *second* frame, because a press has to land on a
+    // widget that already has a rectangle — the first frame is `egui` still
+    // deciding where things are.
+    let mut input = input;
+    if let Some(at) = click {
+        input.events.push(egui::Event::PointerMoved(at));
+        input.events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        input.events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    let output = context.run(input.clone(), |context| {
         chrome::draw(context, app);
     });
+    // And a third frame when something was clicked, because the popup a click
+    // opens is drawn on the frame *after* the one that opened it. Without this
+    // the picture is of the box being pressed and of no list at all, which is
+    // the state the click was meant to leave behind.
+    // The pressed frame's own deltas are kept whether or not a third frame
+    // follows it, which is what `pressed` holds.
+    let (output, pressed) = match click {
+        Some(at) => {
+            input.events.clear();
+            input.events.push(egui::Event::PointerMoved(at));
+            // Several frames, and time passing between them, because `egui`
+            // **fades a popup in**: the frame after the click has it at 44%
+            // opacity, which composites the rows behind it *through* it and
+            // reads as a transparent menu. It is not one — it is a picture of
+            // an animation a fifth of the way through. `predicted_dt` is what
+            // the animation clock advances on, so the frames have to claim
+            // time as well as be drawn.
+            input.predicted_dt = 1.0 / 20.0;
+            let mut opened = None;
+            let mut deltas = Vec::new();
+            for _ in 0..6 {
+                let frame = context.run(input.clone(), |context| {
+                    chrome::draw(context, app);
+                });
+                if let Some(previous) = opened.replace(frame) {
+                    deltas.push(previous);
+                }
+                input.events.clear();
+            }
+            (opened.expect("a settled frame"), Some((output, deltas)))
+        }
+        None => (output, None),
+    };
+    // **Every** frame's texture deltas, and the third one is not optional.
+    //
+    // The font atlas is built as glyphs are first asked for, so a widget that
+    // only exists on the third frame contributes glyphs that only that frame's
+    // delta carries. Dropping it drew the popup with `P` and `E` missing from
+    // two of its four choices — the two words no other widget on screen starts
+    // with — and every other letter present, which reads as a clipped label
+    // rather than as a missing texture. The module comment above records the
+    // same failure for the *second* frame; this is its third instance and the
+    // reason the chain is now over all of them rather than over two.
     let deltas: Vec<_> = first
         .textures_delta
         .set
         .into_iter()
+        .chain(pressed.into_iter().flat_map(|(frame, rest)| {
+            frame
+                .textures_delta
+                .set
+                .into_iter()
+                .chain(rest.into_iter().flat_map(|frame| frame.textures_delta.set))
+        }))
         .chain(output.textures_delta.set)
         .collect();
 
@@ -241,16 +354,31 @@ fn render(path: &str, app: &mut App) {
 
     let mut textures: Vec<(egui::TextureId, Texture)> = Vec::new();
     for (id, delta) in &deltas {
-        // Whole-image sets only. `egui` sends partial updates when the font
-        // atlas grows, and this renders one frame from scratch, so there is
-        // nothing for a patch to be applied to.
-        if delta.pos.is_some() {
-            continue;
-        }
-        let texture = to_texture(&delta.image);
-        match textures.iter().position(|(existing, _)| existing == id) {
-            Some(at) => textures[at].1 = texture,
-            None => textures.push((*id, texture)),
+        let patch = to_texture(&delta.image);
+        let at = textures.iter().position(|(existing, _)| existing == id);
+        match (delta.pos, at) {
+            // A **partial** update, which `egui` sends when the font atlas
+            // grows: new glyphs are appended and only the new rectangle is
+            // sent. This used to be skipped, on the reasoning that a render
+            // from scratch has nothing for a patch to be applied to — and that
+            // is wrong, because the whole-image set from the first frame is
+            // exactly what it applies to.
+            //
+            // It cost the sort combo's popup two letters. `P` and `E` are the
+            // only capitals on that pane that no *earlier* frame had asked for,
+            // so `Project order` and `Entry ID` drew as `roject order` and
+            // `ntry ID` with every other glyph present — which reads as a
+            // clipped label, and sent a diagnosis after the widget's width for
+            // an hour. One 35x11 patch, dropped in silence.
+            (Some([x, y]), Some(at)) => paste(&mut textures[at].1, &patch, x, y),
+            // A patch with nothing under it is the one case the old comment
+            // was right about, and it is not reachable from here: `egui` sets
+            // the whole atlas before it ever patches one. Skipped rather than
+            // panicking, because a picture missing some glyphs is a better
+            // failure for scratch tooling than no picture at all.
+            (Some(_), None) => continue,
+            (None, Some(at)) => textures[at].1 = patch,
+            (None, None) => textures.push((*id, patch)),
         }
     }
 
