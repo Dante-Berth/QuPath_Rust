@@ -139,6 +139,7 @@ input **cannot** be committed:
 ./parity/record-project.sh                          # needs the slides in data/
 cargo test -p qupath-viewer --test parity_project_import
 cargo test -p qupath-viewer --test parity_project_export
+cargo test -p qupath-viewer --test parity_project_open
 ```
 
 Every path QuPath stores in a project is an absolute `file:` URI, so a
@@ -150,6 +151,77 @@ and the test both read the entries from.
 Both recorders answer a question the other fixtures cannot: whether QuPath can
 read what this project writes. The project one came back with four reasons it
 could not.
+
+`record-project.sh` also writes the entries' `thumbnail.jpg` before recording,
+through `qupath-app`'s `project_thumbnails` example — the encoder lives in that
+crate, because `qupath-viewer` depends on `qupath-slide` alone. Until it did,
+`ProjectImport`'s `thumbnailReadable` had only ever read `false`, which measured
+that QuPath tolerates the file's absence and could say nothing about whether a
+JPEG written here is one `ImageIO.read` accepts. It now reads `true` for the
+slide whose pixels can be decoded and `false` for the JPEG 2000 one, which gets
+no thumbnail — both answers from one recording.
+
+## And one that opens the pixels
+
+`ProjectOpen.json` goes past the format to the image. Every other project
+fixture stops before the pixels; this opens each entry through
+`entry.readImageData()` — what double-clicking a row reaches, and the path that
+runs `getServerBuilder()`, which is where a stored metadata block would be
+applied. Recorded by the same script.
+
+It answers a different question from `ProjectImport`'s: not whether QuPath can
+*list* a project written here, but whether it can **work in** one. Those fail
+differently — a project whose entries all read correctly can still carry a
+builder that will not build, a URI resolving to the wrong slide, or a metadata
+block laid over what OpenSlide read, so the image opens and every pixel after
+that is wrong. The recorded fields are the ones that would expose exactly that,
+ending in a block of pixels read from tissue.
+
+**Where that block is read is the whole value.** Not the slide's centre and not
+its origin: both are background here, and two readers both returning white agree
+without either being right. The first version of this recorder clamped one
+slide's tissue coordinates into a smaller one and landed on its corner — mean
+243 against tissue's 99 — and a uniformity check missed it, because background
+is not perfectly uniform. Tissue is now named per slide, and the recorder
+refuses a block spanning fewer than 24 levels.
+
+`CMU-1-JP2K-33005.svs` is recorded but not pixel-compared: it is Aperio JPEG
+2000, which this project refuses by name. The fixture carries `pixelsComparable`
+per entry rather than letting the test infer it from a file name, and a test
+asserts some entry still is — an all-JP2K recording would otherwise make the
+pixel check vacuous while passing.
+
+## One that has nothing to do with a project
+
+`OpenSlideLevels-*.json` compares pyramids, not formats, and has its own script:
+
+```bash
+./parity/record-openslide-levels.sh                 # needs the slides in data/
+cargo test -p qupath-viewer --test parity_openslide_levels
+```
+
+`Slide::open` keeps the tiled TIFF directories and drops the label, macro and
+thumbnail; OpenSlide's Aperio driver makes its own choice about what counts as a
+level. Nothing had compared them, and it matters because a project's stored
+metadata block *replaces* what QuPath would otherwise read — a level table that
+disagrees is QuPath reading the wrong pixels, silently, for as long as the
+project exists. They agree in every field.
+
+Two things about it are deliberate. It records the **server**, not
+`openslide_get_level_downsample`: `OpenslideImageServer` explicitly declines that
+value — OpenSlide averages the width and height ratios, which is inexact whenever
+the true downsample is an integer — and rebuilds the table from the level
+dimensions, so the native call answers a question QuPath never asks. And it
+records **two** slides, because OpenSlide's fallback tile size is 256: on CMU-1
+alone "the tile sizes agree" would be two defaults coinciding, and
+CMU-1-Small-Region's **240** is the only reason that comparison is a
+measurement.
+
+Both this and `ProjectOpen` need `qupath-extension-openslide` on the classpath,
+which needs **no system package**: the extension depends on a jar carrying its
+own `libopenslide.so`, extracted at load time by JNA. `ldconfig` having no
+`libopenslide` says nothing about whether these run — an error made here, which
+kept both of these marked blocked for several sessions.
 
 ## And one that records QuPath's writing
 

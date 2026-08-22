@@ -26,6 +26,50 @@ inside one function belongs in that function's doc comment, not here.
 
 ---
 
+## 2026-08 — A blocker is a claim about a test that was run
+
+`875dd7d`, `94cfdc4`
+
+Two items in `VIEWER.md` §8.8 — the stored image metadata block, and opening an
+image from a project — sat marked blocked for several sessions on "a native
+library, and there is none on this machine". The check behind that sentence was
+`ldconfig` and `apt`. **QuPath uses neither.** `qupath-extension-openslide`
+depends on `io.github.qupath:openslide:<version>:<platform>`, a jar carrying its
+own `libopenslide.so` that JNA extracts at load time. Nothing needed installing.
+OpenSlide 4.0.1 loaded on the first try and read the Aperio slides, and both
+items were done in an afternoon.
+
+The mistake is not that the wrong command was run. It is that the note recorded
+a **conclusion** — "there is none on this machine" — where the evidence
+supported only "no *system* library". A system package and a bundled native have
+the same file name and are different artefacts. Written the other way round, "no
+`libopenslide` in `ldconfig`" would have been re-checkable by anyone who
+wondered, and the gap between that and what QuPath loads is one grep of a
+`build.gradle`.
+
+It cost more than the two items. §8.8 had also reasoned *forward* from the
+blocker to a second claim — that opening the image "would be testing OpenSlide
+rather than the format" — and that was wrong too: every field the recorder now
+checks is one a bad project file would corrupt, and the pixels are what separate
+a project QuPath can *work in* from one it can merely list. A blocker left
+standing grows justifications.
+
+**Transferable:** a blocker is a claim about a specific test, so write down which
+test. Before believing one, find the line of code that does the loading and check
+*that* artefact — not the system's version of something with the same name. The
+same suspicion is worth spending on the blockers that survive: driving the real
+window was re-checked in the same session and is genuinely blocked (no
+`xdotool`, and installing needs a password), which is now a stronger statement
+than it was.
+
+**Related:** the entry below, which is the same shape one level over — there the
+capability existed next door, here the artefact existed inside a jar. And
+`read-the-layer-below`, where the work had already been done underneath. Three
+instances now of *the thing you are blocked on already exists somewhere you did
+not look*.
+
+---
+
 ## 2026-08 — A warning written down is not a warning read
 
 `0459585`
@@ -116,6 +160,17 @@ done underneath, here it had already been done next door.
 **Cost of the mistake:** nothing was built wrong — the browser simply listed
 names for four sessions while the answer sat in `ProjectBrowser.java`, thirty
 lines from the class the format was ported from.
+
+**The encoder itself has since landed** (`e0d9fb8`), which does not change the
+lesson: it was never what the browser was waiting on, and writing it is a debt to
+*QuPath* — the file is a cache, so a study opened there need not re-read every
+slide. It brought its own version of the §6 trap. `Thumbnail::pixels` is RGBA
+because a texture upload wants it and JPEG has no alpha, and handing four
+channels to an encoder expecting three does not fail: it reads each pixel's
+fourth byte as the next one's first, producing a valid JPEG of the right size in
+false colour. The size-only test passes on that. Only decoding and comparing
+against the source pixels catches it — confirmed by reintroducing the bug and
+watching one test go red while the other stayed green.
 
 **The sharper half:** §8.3's own first paragraph had planned it correctly —
 "thumbnails from a `TileCache` ... the thumbnail generator is already written".

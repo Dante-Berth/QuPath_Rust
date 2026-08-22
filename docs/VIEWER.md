@@ -33,8 +33,11 @@ what was found, `o` to open.
 The **View** menu opens the side panels — the slide panel holds the overview
 map and the brightness and contrast controls.
 The project panel lists a study's images and searches them by name or by
-metadata (`tif|stain=H&E`), orders them by any key the project carries, and
-masks the names for a blinded read — §8.3 and §8.3b.
+metadata (`tif|stain=H&E`), orders them by any key the project carries, masks
+the names for a blinded read, and right-clicks a row to edit its metadata back
+into the file — §8.3, §8.3b and §8.3c. Projects can be created and slides added
+to them, thumbnail and all; QuPath opens the result, reads the entries and the
+edited metadata back, and opens the images.
 
 ## How to read this file
 
@@ -65,8 +68,17 @@ selection, §6 is why appearance is checked by looking rather than asserting,
 - **Not a performance lever.** The two remaining levers are in `ROADMAP.md` §4:
   pyramid-level selection on whole slides, and touching less memory per tile.
   This project *uses* the first one but does not deliver it.
-- **Not on the parity path.** No fixture recorded from QuPath governs any of
-  this, because QuPath's viewer is not what is being ported.
+- **Not on the parity path — the *viewer* is not, and that is now a narrower
+  claim than this bullet used to make.** No fixture governs the drawing, the
+  viewport math or the level selection, because QuPath's viewer is not what is
+  being ported. But the **formats and the reader** this crate carries are
+  governed by six recorded fixtures — `parity_geojson_import`,
+  `parity_project_import`, `parity_project_export`, `parity_project_open`,
+  `parity_openslide_levels` and `parity_smart_string_sort` — and that arrived
+  the same way §8.2's export bullet did: by the file saying "no fixture governs
+  any of this" for several sessions after it had stopped being true. Following
+  a specification is exactly the thing a fixture can check, so every item §0
+  revises above brings one with it.
 
 The one real connection is §3: viewport-driven level selection is the same
 `Slide::level_for_width` the whole-slide speedup needs, and a viewer is a
@@ -2978,7 +2990,9 @@ In the order it is worth having.
   directories and drops the label, macro and thumbnail; OpenSlide's Aperio driver
   makes its own choice, and the two had never been compared.
 
-  **They have now, and they agree in every field.** `parity/java/OpenSlideLevels
+  **They have now, and they agree in every field — but the block is still not
+  written**, and that is the one item in this section that is genuinely open
+  rather than done or refused. `parity/java/OpenSlideLevels
   .java` opens the slide through `qupath-extension-openslide` and records what
   QuPath ends up with; `parity_openslide_levels.rs` checks it against
   `Slide::levels` on the same file. Level count, every width and height, every
@@ -2987,6 +3001,16 @@ In the order it is worth having.
   rather than merely tempting, and §8.3's judgement — that QuPath reading the
   slide itself is better information — stands as a preference rather than as a
   precaution.
+
+  **Which leaves a decision, not a blocker.** Writing it buys QuPath not opening
+  the slide to learn what it could have been told, at the cost of a second copy
+  of a truth that can go stale — a block written today against a file somebody
+  later replaces is `setMetadata` applying the wrong level table to the right
+  path, and no reader would flag it. The comparison here does not settle that;
+  it only removes the reason not to. Both slides on this machine are Aperio, and
+  the agreement is evidence about the pair `Slide::open` and OpenSlide's Aperio
+  driver, not about every driver OpenSlide has. Whoever writes the block should
+  record a fixture for whatever vendor they write it for first.
 
   **The blocker this entry named for a long time was not real, and the mistake
   is worth keeping.** It read as blocked on "a native library, and there is none

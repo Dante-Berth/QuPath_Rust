@@ -30,7 +30,7 @@ real QuPath build:
 | `qupath-objects` | Columnar detection/measurement table | recorded |
 | `qupath-watershed` | Marker-controlled flood, bucket queue, 4/8-connected labelling, filled-region tracing | recorded, 3 + 13 + 17 cases |
 | `qupath-filters` | MIN/MAX rank filter, ImageJ Gaussian blur, convolution, morphological reconstruction | recorded, 42 + 22 + 22 + 24 cases |
-| `qupath-slide` | Aperio SVS / tiled TIFF reader, pure Rust | recorded, 5 regions |
+| `qupath-slide` | Aperio SVS / tiled TIFF reader, pure Rust | recorded, 5 regions + the level table and a tissue block against OpenSlide |
 | `qupath-pipeline` | Tiles a region QuPath's way and runs every detection stage over it | colour deconvolution; object filters, 17 images; merge and split; boundary refinement |
 
 And one that is not on it: `qupath-viewer`, a slide viewer with pan, zoom and
@@ -228,15 +228,23 @@ emerged is that **arithmetic and file formats port cleanly and drawing does
 not** — the overview's two mappings, the brightness/contrast transform, GeoJSON
 and `.qpproj` all came across the same way.
 
-Since then: the **overview thumbnail** is in, the **display transform** and the
-deconvolved stain channels exist but have no controls yet, **GeoJSON export**
-writes the dialect QuPath reads, and the **project format**'s JSON files are
-written. The last two revise [docs/VIEWER.md](docs/VIEWER.md) §0's stated
-non-goals, deliberately and on the record rather than by drift. `data.qpdata` is
-Java serialisation and is deliberately still not attempted: a guessed version is
-how a project becomes corrupt in a way someone finds out much later. Neither
-file has yet been opened *by QuPath* — both were checked against a JSON parser
-and against the Java that writes them, which is not the same claim.
+Since then: the **overview thumbnail** is in, the **brightness/contrast
+controls** drive the display transform over the deconvolved stain channels,
+**GeoJSON export** writes the dialect QuPath reads, and the **project format** is
+written — JSON files, a browser that searches and sorts and edits entry metadata,
+and `thumbnail.jpg`. The last two revise [docs/VIEWER.md](docs/VIEWER.md) §0's
+stated non-goals, deliberately and on the record rather than by drift.
+`data.qpdata` is Java serialisation and is deliberately still not attempted: a
+guessed version is how a project becomes corrupt in a way someone finds out much
+later.
+
+**Both formats have since been opened by QuPath itself**, which is a different
+claim from the one this paragraph used to make. A project written here is loaded
+by `ProjectIO.loadProject`, its entries and their edited metadata read back, its
+images opened through OpenSlide, and its thumbnails read by `ImageIO`; the
+GeoJSON goes through `PathIO.readObjects`. A format checked only against the code
+that writes it is untested, and that gap is now closed in both directions —
+QuPath also writes a project here for this reader to be checked against.
 
 Level selection is the whole point, and it is worth one number: a 1024x768 view
 of the whole slide picks level 2 and reads **108 tiles against level 0's
@@ -271,6 +279,13 @@ every frame still looked correct.
 Rust: `cargo test` — no system dependencies. Reading JPEG 2000 slides would
 need OpenSlide through FFI and is not implemented; those files are refused by
 name rather than mis-decoded.
+
+The parity recorders that open a slide *through QuPath* do use OpenSlide, and it
+needs no system package either: `qupath-extension-openslide` depends on a jar
+carrying its own `libopenslide.so`, which JNA extracts at load time. `ldconfig`
+having no `libopenslide` says nothing about whether those recorders run — an
+error this repository made, and kept two items marked blocked on for several
+sessions.
 
 Tests that need a slide skip themselves when `data/` is empty — see
 [docs/test-data.md](docs/test-data.md).

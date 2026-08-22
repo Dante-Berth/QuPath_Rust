@@ -21,7 +21,7 @@ build.
 | `qupath-objects` | Columnar detection/measurement table | `MeasurementPrecision.json` | ~100x on scan/filter |
 | `qupath-watershed` | Marker-controlled flood, bucket queue, 4/8-connected labelling, filled-region tracing | `WatershedFlood.json`, 3 cases; `RegionalMaxima.json` labels, 13 surfaces; `ObjectFilters.json` regions, 17 images | queue 20-32x vs heap; flood 1.40x vs previous; labelling and tracing identical |
 | `qupath-filters` | MIN/MAX rank filter, Gaussian blur, convolution, morphological reconstruction | `RankFilterMinMax.json` 42 cases; `GaussianBlur.json` 10 kernels + 12 images; `LaplacianConvolution.json` 5 scales + 17 images; `RegionalMaxima.json` 11 reconstructions + 13 surfaces | rank 3.1-9.7x vs ImageJ; blur, convolution and reconstruction bit-identical |
-| `qupath-slide` | Aperio SVS / tiled TIFF reader | `SlideRegion.json`, 5 regions | 4000x4000 region in 0.09 s |
+| `qupath-slide` | Aperio SVS / tiled TIFF reader | `SlideRegion.json`, 5 regions; `OpenSlideLevels-*.json`, the level table and tile size on 2 slides; `ProjectOpen.json`, a tissue block byte-identical to OpenSlide's decode | 4000x4000 region in 0.09 s |
 | `qupath-pipeline` | Tiles a region QuPath's way and streams each tile through every stage from the deconvolution to the area filter | `ColourDeconvolution*.json`; `ObjectFilters.json` statistics and decisions, 17 images; `MergeAndSplit.json`; `RefineBoundary.json` | 70.1 Mpx/s on a saturated grid; 1.065x QuPath's cell count pooled over ten regions (1.012-1.129 by region) |
 
 **The detection chain is closed.** Every stage `WatershedCellDetection` runs from
@@ -691,8 +691,20 @@ is exactly that case and cannot be opened today.
 built with `cc`, never shelling out to a Makefile. `M-FFI-NAMING`,
 `M-FFI-TRANSLATES`, `M-OOBE` and `M-SYS-CRATES` all apply.
 
-Note OpenSlide is not installed on the current machine (no headers, no
-pkg-config), so this starts with vendoring rather than linking.
+Note there is no OpenSlide *development* install on the current machine — no
+headers, no pkg-config — so this starts with vendoring rather than linking.
+
+That is a narrower statement than it used to be, and the difference matters.
+There **is** a working OpenSlide here, inside a jar:
+`qupath-extension-openslide` depends on `io.github.qupath:openslide`, which
+carries its own `libopenslide.so` for JNA to extract at load time. It is what
+`parity/record-openslide-levels.sh` and `ProjectOpen` run against, and it is
+enough to *record* what OpenSlide reports about a slide — which is how
+`VIEWER.md` §8.8's level-table comparison was made. What it is not is something
+this Rust code can link, so §9's answer for the JP2K reader stands unchanged.
+Writing it the old way cost two items in §8.8, marked blocked for several
+sessions on a library that was present; `EVOLUTION.md`'s "A blocker is a claim
+about a test that was run" has that account.
 
 **Licensing, from §9, decide before the first commit:** OpenSlide is LGPL and
 QuPath is GPLv3. This code is derived from reading QuPath source and is already
