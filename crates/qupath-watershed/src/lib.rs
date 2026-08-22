@@ -39,12 +39,14 @@
 
 mod edm;
 mod label;
+mod outline;
 mod queue;
 mod regions;
 mod segment;
 
 pub use edm::DistanceMap;
 pub use label::{Labeller, label_image};
+pub use outline::{Outline, outline_from, outline_mask};
 pub use queue::{HierarchicalQueue, LEVELS, PixelIndex};
 pub use regions::{RegionTracer, filled_regions};
 pub use segment::Segmenter;

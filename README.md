@@ -46,8 +46,10 @@ pinned against output recorded from QuPath itself, and running on QuPath's own
 tile grid: background subtraction by reconstruction, the Laplacian of Gaussian,
 the regional maxima, the labelling, the flood, the region tracing, the
 mean-intensity filter, the merge, the shape split, `refineBoundary` and the area
-filter. What is missing is the tail — ROI vertices, cell expansion, the
-measurements — none of which changes how many objects there are.
+filter. What is missing is the tail — boundary smoothing, cell expansion, the
+measurements — none of which changes how many objects there are. The ROI
+**vertices** were part of that tail and are now ported, pinned against ImageJ's
+own Wand over nine cases; what is left of that step is the smoothing over them.
 
 **The count is 26,647 objects against QuPath's 25,757 cells on the same region**,
 1.035x, from 1.86x. It is not clean, and where it is not is documented: QuPath
@@ -104,7 +106,7 @@ On the region QuPath itself was profiled on — 4000x4000 at (27776, 5952) of
 when the question is whether the port is faster, because QuPath's 15.87 s was
 measured single-threaded and QuPath parallelises across tiles in real use. And
 read both as an *upper bound*: QuPath's time includes the tail this pipeline has
-not written — ROI vertices, cell expansion, the measurements — so some of that
+not written — boundary smoothing, cell expansion, the measurements — so some of that
 gap is work not yet done rather than work done faster. The gap is decisive
 either way; its exact size is not yet measurable.
 

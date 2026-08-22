@@ -44,7 +44,8 @@ overlap resolution, the merge, the Euclidean distance map, `MaximumFinder`'s
 segmentation, `refineBoundary`, and the area filter.
 
 **What is missing is the tail**, and none of it changes how many objects there
-are: ROI vertices, cell expansion, the measurements.
+are: boundary smoothing, cell expansion, the measurements. The ROI vertices
+were on that list and are now ported, pinned against ImageJ's Wand.
 
 **The count.** This was quoted for several sessions as 26,647 objects against
 QuPath's 25,757 cells — **1.035x** — on the profiled 4000x4000 region. That
@@ -395,7 +396,7 @@ plans that were wrong.
   failing; and D-008 says it is comparing the wrong objects anyway. It is still
   the weakest thing in the tree and now it is also load-bearing for the headline
   number. A recorded fixture would pay more here than anywhere else.
-- **`ROADMAP.md`'s remaining plans** — the tail, ROI vertices and cell expansion
+- **`ROADMAP.md`'s remaining plans** — the tail, boundary smoothing and cell expansion
   and measurements. Written from a summary of the source, same as the five that
   turned out wrong. Every stage that has since been ported found something the
   plan did not have.

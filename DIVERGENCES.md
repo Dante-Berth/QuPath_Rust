@@ -253,9 +253,16 @@ neither is visible from the rule itself:
 counts. Same grid, same keep-the-larger rule, same strict 10% threshold, on
 different objects.
 
-**Why it is here:** cell expansion is not ported, and neither is the vertex list
-that smoothing operates on. Nothing in `overlaps.rs` can be made to match until
-both are, and stubbing either would be §10's plausible wrong value.
+**Why it is here:** cell expansion is not ported, and neither is the smoothing
+that runs over the vertex list. Nothing in `overlaps.rs` can be made to match
+until both are, and stubbing either would be §10's plausible wrong value.
+
+**One of the two is now half-answered.** The vertex list itself exists —
+`qupath-watershed`'s `outline` traces it, pinned against ImageJ's Wand by
+`WandOutline.json`, and `ROADMAP.md` §1.5b step 4 has what that cost. What is
+still missing is `smoothBoundaries`, the interpolate/smooth/interpolate chain
+this entry turns on, and cell expansion. So the polygon exists to be smoothed;
+nothing smooths it yet, and this entry stands unchanged until something does.
 
 **Direction of the error, and it is not neutral.** A cell is strictly larger than
 its nucleus, so two copies of the same object across a 60 px band intersect more
@@ -288,7 +295,7 @@ QuPath on 17 images and they pass, which puts the suspicion on what reaches
 them — the background estimate and its threshold — rather than on the tests.
 
 **Status:** known, quantified in direction, contributes but does not dominate.
-Unfixable before cell expansion and ROI vertices land (`docs/ROADMAP.md` §1.5b
+Unfixable before cell expansion and boundary smoothing land (`docs/ROADMAP.md` §1.5b
 steps 4 and 5). The density-dependent remainder is a separate and currently
 unexplained divergence; see `docs/MEMO.md` §2.
 

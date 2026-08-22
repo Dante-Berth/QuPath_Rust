@@ -19,7 +19,7 @@ build.
 | Crate | Does | Parity | Measured |
 | --- | --- | --- | --- |
 | `qupath-objects` | Columnar detection/measurement table | `MeasurementPrecision.json` | ~100x on scan/filter |
-| `qupath-watershed` | Marker-controlled flood, bucket queue, 4/8-connected labelling, filled-region tracing | `WatershedFlood.json`, 3 cases; `RegionalMaxima.json` labels, 13 surfaces; `ObjectFilters.json` regions, 17 images | queue 20-32x vs heap; flood 1.40x vs previous; labelling and tracing identical |
+| `qupath-watershed` | Marker-controlled flood, bucket queue, 4/8-connected labelling, filled-region tracing, object outlines | `WatershedFlood.json`, 3 cases; `RegionalMaxima.json` labels, 13 surfaces; `ObjectFilters.json` regions, 17 images; `WandOutline.json` vertices, 9 cases | queue 20-32x vs heap; flood 1.40x vs previous; labelling, tracing and outlines identical |
 | `qupath-filters` | MIN/MAX rank filter, Gaussian blur, convolution, morphological reconstruction | `RankFilterMinMax.json` 42 cases; `GaussianBlur.json` 10 kernels + 12 images; `LaplacianConvolution.json` 5 scales + 17 images; `RegionalMaxima.json` 11 reconstructions + 13 surfaces | rank 3.1-9.7x vs ImageJ; blur, convolution and reconstruction bit-identical |
 | `qupath-slide` | Aperio SVS / tiled TIFF reader | `SlideRegion.json`, 5 regions; `OpenSlideLevels-*.json`, the level table and tile size on 2 slides; `ProjectOpen.json`, a tissue block byte-identical to OpenSlide's decode | 4000x4000 region in 0.09 s |
 | `qupath-pipeline` | Tiles a region QuPath's way and streams each tile through every stage from the deconvolution to the area filter | `ColourDeconvolution*.json`; `ObjectFilters.json` statistics and decisions, 17 images; `MergeAndSplit.json`; `RefineBoundary.json` | 70.1 Mpx/s on a saturated grid; 1.065x QuPath's cell count pooled over ten regions (1.012-1.129 by region) |
@@ -58,7 +58,7 @@ magnitude as the 1,712 resolved away here. That is the first place to look for
 the remainder, not the last.
 
 **The end-to-end time is still not comparable to QuPath's 15.87 s.** What
-separates the two is now the tail — ROI vertices, cell expansion, the
+separates the two is now the tail — boundary smoothing, cell expansion, the
 measurements — none of which changes how many objects there are, and all of
 which QuPath spends time on.
 
@@ -524,11 +524,36 @@ ratio measured on a synthetic input is not that ratio on a real one**, which is
 What remains — the old list's steps 4 and 5, with one added — none of which
 changes how many objects the pipeline finds:
 
-- **Step 4, ROI vertices.** The masks match; the polygons do not exist. QuPath's
-  `PathObject` geometry is the Wand's vertex list, so exporting objects needs
-  the contour itself and not just what it encloses. This is also what D-008
-  needs: `smoothBoundaries` defaults on, and the seam resolution compares the
-  *smoothed* polygon's area.
+- **Step 4, ROI vertices — the contour is done; smoothing is not.**
+  `qupath-watershed`'s `outline` traces the vertex list QuPath's `PathObject`
+  carries, pinned against ImageJ's own Wand by `WandOutline.json` over nine
+  cases. What is left of this step is `smoothBoundaries`, which D-008 needs and
+  which is the interpolate/smooth/interpolate chain at
+  `WatershedCellDetection`'s line 925.
+
+  Four things the fixture settled, and three would have been guessed wrong:
+  vertices sit on pixel **corners**, not centres; collinear runs emit **only
+  corners**, so a four-pixel bar is four points; a **hole is filled**, not
+  traced; and the walk keeps the **interior on its right**, which winds
+  clockwise on screen and gives a *positive* shoelace sum with `y` downwards.
+
+  `FOUR_CONNECTED` turned out not to live where it looks like it should. The
+  obvious place is a turn table with the diagonal arm flipped, and that is
+  wrong: a concave corner and a corner shared by two regions reach the *same*
+  arm, so the turn cannot tell them apart. What can is whether the region
+  continues around the corner — filled at a concave one, empty at a shared one.
+  Without that test, seeding `diagonal_touch`'s lower pixel traced the **upper**
+  one, and the mask-side test could not have caught it: the scan had already
+  completed the upper region, so the two outlines came out merely duplicated.
+
+  The listing **offset** is not ported, and that is a named gap rather than a
+  widened tolerance. `single_pixel` and `square` are listed from the region's
+  bottom-right corner, which looks like a rule until `ell` is listed from
+  `(2, 3)` — not a corner of its seed pixel at all. The offset falls out of
+  where `Wand`'s own scan begins and is not determined by anything recorded.
+  The test compares up to rotation while pinning every vertex, the length and
+  the winding; what consumes these lists is smoothing and an area, and neither
+  depends on which vertex is written first.
 - **Step 4b, cell expansion**, which D-008 shows is not optional for the count
   claim even though it adds no objects — the seam resolution runs on cells.
 - **Step 5, measurements**, into the columnar table `qupath-objects` already
@@ -1404,7 +1429,7 @@ the third stage running.
   region, same default parameters, `region` against the 15.87 s in
   `docs/profiles/README.md`: **3.359 s on one thread, 1.019 s on twenty.** That
   is 4.7x and 15.6x. The comparison is generous to us — QuPath's 15.87 s
-  includes the tail this pipeline has not ported (ROI vertices, cell expansion,
+  includes the tail this pipeline has not ported (boundary smoothing, cell expansion,
   the measurements) — so the honest claim is "decisively faster, by a factor
   this measurement puts at most at 4.7x single-threaded". It is not close, and
   no session needs to open by asking whether we are ahead.
