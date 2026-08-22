@@ -26,6 +26,41 @@ inside one function belongs in that function's doc comment, not here.
 
 ---
 
+## 2026-08 — The instrument that checks appearance can itself be wrong
+
+`a34c40f`
+
+`examples/chrome` is what "check appearance by looking" runs on: no window, no
+GPU, `egui` laid out and rasterised through the software compositor. It has
+found four real interface bugs and the entry below is about that.
+
+Pressing the sort combo produced a picture with two symptoms — two labels
+missing their first letter, and the rows behind the menu showing through it —
+and **both were the example's, not the interface's**:
+
+- it **skipped every partial texture delta**. `egui` sends the font atlas whole
+  once and patches it afterwards; the comment said a render from scratch has
+  nothing for a patch to apply to, and the first frame's whole-image set is
+  exactly what it applies to. The two glyphs that arrived in one 35x11 patch
+  were `P` and `E`, so exactly two words lost exactly their first letter;
+- and it **photographed a popup mid-fade**. Not transparent — 44% opaque, one
+  frame after the click, composited correctly.
+
+**Transferable, and it is the sharper half of "render it and look":** an
+offscreen render is a reimplementation of the host's renderer, and it fails in
+ways that look like layout bugs rather than like missing pixels. A missing
+glyph reads as a clipped label; an unfinished animation reads as a wrong
+colour. So when a picture shows something wrong, **ask whether the picture is
+wrong before changing the widget** — and answer it by reading the pixels rather
+than the widget. Dumping the vertex alphas took a minute and said `{0, 112}`;
+dumping the texture deltas took a minute and said `PARTIAL`. Neither was
+reached for until an hour of reasoning about `ComboBox::width` had run out.
+
+**Cost:** an hour, and a corrected diagnosis committed in `VIEWER.md` §8.3
+before it went any further. **Related:** `MEMO.md` §4's second variant, where a
+profile share was read as though it said *why* and the ten-minute experiment
+that answered it was never run. Same shape, and the interface has it too.
+
 ## 2026-08 — A missing file is not a missing capability
 
 `86d74e7`
