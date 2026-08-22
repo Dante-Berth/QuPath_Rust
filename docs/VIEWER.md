@@ -32,6 +32,9 @@ Drag to pan, scroll to zoom, `f` to fit the slide, `d` to detect, `s` to save
 what was found, `o` to open.
 The **View** menu opens the side panels — the slide panel holds the overview
 map and the brightness and contrast controls.
+The project panel lists a study's images and searches them by name or by
+metadata (`tif|stain=H&E`), orders them by any key the project carries, and
+masks the names for a blinded read — §8.3 and §8.3b.
 
 ## How to read this file
 
@@ -2261,6 +2264,109 @@ a dump of the texture deltas said `PARTIAL at [1499, 0] size [35, 11]` and so
 did the missing glyphs. Both diagnostics took a minute and neither was reached
 for until the reasoning had run out.
 
+### 8.3b The entry metadata — one reader change, and the leaks it opened
+
+§8.8 predicted that four things were behind one change: the `key=value` half of
+the search box, the synthesised `has_data`, QuPath's metadata sort keys, and
+name masking. They were, and the change is small — `project::read` reads the
+entry's `metadata`, `tags`, `description` and `randomizedName` instead of
+leaving them in the document. What was not small is what the last of the four
+turned out to require.
+
+**Two things called `metadata`, at two depths.** An entry has a `metadata` map
+a user types into, and its `serverBuilder` has a `metadata` block describing the
+pixels. Reading the wrong one offers `width=46000` as a key a study could be
+sorted by, and it looks entirely plausible in a menu. This is the `"uri"` trap
+one level along — §8.3 already had a test for a `uri` *inside* a metadata block
+not being the entry's — and it has its own test now for the same reason: the
+two are told apart by where they are and by nothing else.
+
+The map is a `Vec` of pairs rather than a map. Gson serialises a
+`LinkedHashMap`, so the file's order is the order somebody entered the keys in,
+and `getMetadata` hands the browser that map directly. A `BTreeMap` is the
+obvious choice and would re-alphabetise every study silently, so the test uses
+keys that are not in alphabetical order.
+
+`ProjectEntryPredicate` flattens the map to `key=value` and matches each token
+with **`contains`**, not with an equality. So `stain=h` matches `stain=h&e` and
+a bare `stain` matches every entry that has the key. Splitting the token on `=`
+and comparing the halves is the natural way to write it, is stricter than
+QuPath, and the rows it drops are the ones somebody was searching for.
+
+#### Masking, and why it is not just showing a different string
+
+`getImageName()` returns `randomizedName` under `maskImageNames`, and
+`getAllImageRows` shuffles the list "for less biased analyses". Copying those
+two lines gets a pane that is not masked, because a browser has more than one
+place a name comes out:
+
+- the **search box** still matched the real names, so typing `tumour` answers
+  "which row is that?" with a list of one — the row still wearing its masked
+  name while being the only one on screen;
+- the **hover** showed the slide's full path, and a study's file names are its
+  names;
+- **sorting by file name** or by a metadata key puts the rows in a ranking of
+  the thing being hidden. The rows stay anonymous and their *sequence* does
+  not, which is exactly what shuffling them was for.
+
+The first two are closed. The third is a **divergence and the one place this
+pane is stricter than QuPath**: its menu offers every key whether or not names
+are masked, and `getDefaultValue` hands back the file name and the metadata
+value unmasked. Copied faithfully, the checkbox would be a mask that a single
+menu choice lifts. Masking is offered as a blinding control, so either it is
+one or it should not be there — `Order::offered` drops those choices while the
+tick is on, and `row_order` drops them *again* because the order outlives the
+checkbox and `File name` picked a moment before ticking would go on quietly
+ordering the rows by the names being hidden.
+
+What is deliberately **not** masked is the **thumbnail**, which is the strongest
+cue on the row. QuPath does not mask it either, and a pane of grey squares is
+one nothing can be done with — so the mask is against recognising a *name*, not
+against recognising a slide, and the hover says so rather than letting a tick
+imply more than it does.
+
+#### The instrument was wrong again, and this time it was ours
+
+`project::files` writes `entry-<id>` into `randomizedName`, so that the same
+project written twice is the same bytes — see `placeholder_name`, and it is the
+right trade for a field nothing was reading. It is the wrong one the moment
+something reads it: masking a project **this** application wrote replaces every
+name with a spelling of its entry id, which is the entry order in longhand.
+A blinded study is a claim somebody makes in a paper, and the pane would be the
+evidence for it.
+
+So the checkbox is *disabled* for a project whose randomized names are its ids,
+with a hover saying which of the two kinds of project this is — disabled rather
+than hidden, because a missing control cannot be told apart from a feature that
+does not exist. `maskable` is the check, `row_order` re-checks it so that a
+project opened while the flag is already set is refused too, and
+`the_randomized_name_is_read_and_this_modules_own_is_not_random` in `project.rs`
+asserts the placeholder still names the id — so that anything offering to mask
+names has to meet this first rather than discovering it later.
+
+The same shape as the memory `run-the-binary-not-only-the-tests` keeps
+recording, with the twist that the thing that was wrong was written here. It was
+found by asking what the mask would actually *show*, which is a question a test
+of `shown_name` does not ask.
+
+#### The shuffle, and the one thing its seed must not be
+
+QuPath reshuffles inside `getAllImageRows` on every `refreshTree` — which
+includes every keystroke in its search box. That cannot be copied directly:
+`row_order` runs once per **frame** here, so a shuffle computed there would
+reorder the list sixty times a second. It is drawn once, when masking is
+switched on, and held by entry id so it survives the project being re-read —
+adding a slide rewrites the index and reopens it, and a shuffle stored as
+positions would silently become a different shuffle.
+
+The seed is the wall clock, and the one thing it must not be is derivable from
+the list. A seed taken from the entries — their count, their ids, a hash of
+their names — makes the permutation a function of the project, so the same
+study masked twice is masked the same way and two readers comparing notes
+recover the order. Every other assertion about a shuffle still passes. The test
+therefore checks that two shuffles of the same list *differ*, which is the only
+one of the three that would catch it.
+
 ### 8.4 The overview — the invariant is that the two mappings agree
 
 `overview.rs` is `ImageOverview.java`'s arithmetic: slide to overview, which
@@ -2736,19 +2842,16 @@ In the order it is worth having.
   is absent, so the picture comes from the pixels on both sides; §8.3 has the
   call site and what it cost to find out. The encoder is still owed — see below
   — but nothing about the *browser* was ever waiting on it.
-- **The rest of `ProjectBrowser`, and what is left of it is all one change.**
-  §8.3's opening listed what QuPath's pane has: the thumbnails (done), the
-  search (done), sorting (**done** — §8.3, and the ordering is QuPath's own
-  `smartStringSort` with a fixture), **right-click to edit an entry's
-  metadata**, and **masking names for blinded studies**. Both of the two left
-  need the entry's metadata map, which `project::read` summarises away and
-  `added` preserves without reading — so they are the same change underneath,
-  and it is a change to the **reader** rather than to the pane. Sorting was the
-  cheapest of the three and it is gone; what remains is that one reader change,
-  which also unblocks the metadata half of the search box (`key=value` tokens
-  and the synthesised `has_data=<bool>`, §8.3) and QuPath's own sort keys,
-  which are metadata keys. Four things behind one change is what makes it the
-  next one worth doing.
+- ~~**The rest of `ProjectBrowser`.**~~ **The reader change landed and took
+  four things with it — see §8.3b.** The entry below this one predicted that:
+  the metadata map, the `key=value` search and `has_data`, the metadata sort
+  keys and name masking were one reader change underneath, and they were.
+  What is left of QuPath's pane is **right-click to edit an entry's
+  metadata**, which is now a *writer* problem rather than a reader one and is
+  the first thing in this file that would put a user's typing into somebody
+  else's project file. `added` rewrites the document it read, so the mechanism
+  is there; what is not there is any answer to what happens when the file has
+  changed underneath since it was opened.
 - **`data.qpdata`, which should stay missing.** Java serialisation tied to
   Java's object graph. A guessed version is how a project becomes corrupt in a
   way someone discovers much later, having trusted it. The detections belong
