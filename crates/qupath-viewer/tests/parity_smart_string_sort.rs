@@ -39,15 +39,60 @@ const FIXTURE: &str = include_str!("../../../parity/fixtures/SmartStringSort.jso
 /// of one string per line. The one thing a scrape must not skip is the `\u`
 /// escapes — `SmartStringSort.java` writes every non-ASCII character as one,
 /// and the names that carry them are exactly the ones this test exists for.
+///
+/// # Why the array's end is not `find(']')`
+///
+/// Because a **name** may contain `]`, and the first version of this did
+/// exactly that: `rest.find(']')` cut the array at the first bracket anywhere
+/// in the remaining text. None of today's thirty-three names has one, so it
+/// passed — and the failure it was hiding is the quiet kind. Both arrays are
+/// scraped the same way, so both would be truncated at the same name, and
+/// `matches_qupaths_smart_string_sort` would go on comparing two equally short
+/// lists and reporting success. A test that stops covering the case somebody
+/// just added a name for is worse than one that fails.
+///
+/// So the end is found by walking the array and tracking whether the cursor is
+/// inside a string literal, which is the smallest amount of JSON that has to be
+/// understood to know what a `]` means. `\\` skips the character after it, so
+/// an escaped quote does not end a literal.
 fn names(key: &str) -> Vec<String> {
+    names_in(FIXTURE, key)
+}
+
+/// The same, over any text, so the scan itself can be tested on the case the
+/// fixture does not carry — see `an_array_ends_at_its_own_bracket`.
+fn names_in(text: &str, key: &str) -> Vec<String> {
     let heading = format!("\"{key}\": [");
-    let at = FIXTURE.find(&heading).unwrap_or_else(|| panic!("a `{key}` array"));
-    let rest = &FIXTURE[at + heading.len()..];
-    let end = rest.find(']').expect("the array's end");
+    let at = text.find(&heading).unwrap_or_else(|| panic!("a `{key}` array"));
+    let rest = &text[at + heading.len()..];
+
+    let mut end = None;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, c) in rest.char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            ']' if !in_string => {
+                end = Some(offset);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let end = end.unwrap_or_else(|| panic!("the `{key}` array is never closed"));
+
     rest[..end]
         .lines()
         .map(str::trim)
-        .map(|line| line.trim_end_matches(','))
+        // One trailing separator, not every one: `trim_end_matches` is plural
+        // and would eat a comma that is part of the last name's own text.
+        .map(|line| line.strip_suffix(',').unwrap_or(line))
+        // Blank *lines*, which the array's own layout has around it. The empty
+        // *name* survives this, because after trimming it is `""` — two quote
+        // characters — and not an empty line. That distinction is the whole
+        // reason the fixture carries an empty name.
         .filter(|line| !line.is_empty())
         .map(unescape)
         .collect()
@@ -97,12 +142,26 @@ fn hex(chars: &mut std::str::Chars<'_>) -> u32 {
     u32::from_str_radix(&digits, 16).expect("four hex digits")
 }
 
+/// How many names `SmartStringSort.java` records, in each of its two arrays.
+///
+/// A literal, and it is the thing that makes every other assertion here mean
+/// something. The scrape reads the fixture rather than parsing it, so the
+/// failure it is prone to is reading *fewer* names than the file holds — and
+/// two arrays scraped the same way truncate at the same place, which leaves
+/// `matches_qupaths_smart_string_sort` comparing two short lists and passing.
+/// Pinning the count is what turns that into a failure.
+///
+/// Raise it when a name is added to the recorder, which is also the moment to
+/// re-run `parity/record.sh`.
+const RECORDED: usize = 33;
+
 /// Sorting QuPath's input with this comparator gives QuPath's output.
 #[test]
 fn matches_qupaths_smart_string_sort() {
     let input = names("input");
     let expected = names("sorted");
     assert_eq!(input.len(), expected.len(), "the fixture lists the same names twice");
+    assert_eq!(input.len(), RECORDED, "the scrape did not read the whole fixture");
 
     // `sort_by` and not `sort_unstable_by`, for the reason the doc comment on
     // the test module gives: the fixture holds pairs the comparator calls
@@ -146,4 +205,31 @@ fn leading_zeros_do_not_order_a_name() {
     assert_eq!(project::smart_string_compare("0", "000"), Equal);
     assert_eq!(project::smart_string_compare("slide-007", "slide-7"), Equal);
     assert_eq!(project::smart_string_compare("00a", "0a"), Equal);
+}
+
+/// A `]` inside a name does not end the array.
+///
+/// The case the fixture cannot make, because none of its thirty-three names
+/// has a bracket in it — which is exactly why the first version of `names_in`
+/// cut the array at `find(']')` and passed anyway. Both arrays truncate
+/// identically, so the comparison between them survives and stops covering
+/// anything.
+///
+/// The escaped quote is here for the other half of the same scan: a `\"`
+/// inside a literal must not be read as its end, or everything after it is
+/// treated as being outside a string and the next `]` ends the array early.
+#[test]
+fn an_array_ends_at_its_own_bracket() {
+    let text = concat!(
+        "{\n  \"input\": [\n",
+        "    \"a]b\",\n",
+        "    \"quote \\\" and ] together\",\n",
+        "    \"\",\n",
+        "    \"z\"\n",
+        "  ],\n  \"after\": []\n}\n",
+    );
+    assert_eq!(
+        names_in(text, "input"),
+        ["a]b", "quote \" and ] together", "", "z"],
+    );
 }
