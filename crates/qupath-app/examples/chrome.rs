@@ -65,7 +65,22 @@ fn main() {
     // by it clips three widgets away from the change.
     app.order = chrome::Order::Name;
     render("chrome-project-sorted.png", &mut app);
+
+    // And in an order that is one of the *project's* keys rather than one of
+    // the four. The rows this key cannot speak for come first, which is the
+    // half of the rule a study where every entry has the key never shows.
+    app.order = chrome::Order::Metadata(String::from("block"));
+    render("chrome-project-sorted-metadata.png", &mut app);
     app.order = chrome::Order::default();
+
+    // And with a search narrowing on metadata rather than on a name, which is
+    // the state the `|` is for: neither token is in a name, and the rows that
+    // are left are the ones carrying both. A picture of it is the only thing
+    // that says the count line and the rows agree about what a `key=value`
+    // token left — the search tests assert on the predicate, not on the pane.
+    app.filter = String::from("stain=h&e|block");
+    render("chrome-project-search-metadata.png", &mut app);
+    app.filter.clear();
 
     // And the list the combo drops down, which is the one part of the control
     // a still picture of it cannot show. The position is the closed box, read
@@ -184,16 +199,57 @@ fn sample_project() -> std::path::PathBuf {
         // `project.rs` will not write. `rsplit_once` so it lands on the last
         // occurrence and the two above it are untouched.
         let contents = if file.path == "project.qpproj" {
-            match file.contents.rsplit_once("\"builderType\": \"uri\"") {
+            let contents = match file.contents.rsplit_once("\"builderType\": \"uri\"") {
                 Some((before, after)) => format!("{before}\"builderType\": \"rotated\"{after}"),
                 None => file.contents.clone(),
-            }
+            };
+            with_metadata(&contents)
         } else {
             file.contents.clone()
         };
         std::fs::write(&path, contents).expect("write a project file");
     }
     project
+}
+
+/// Gives each entry a `metadata` map, which `project.rs` does not write.
+///
+/// Same shape as the `rotated` rewrite above and for the same reason: the state
+/// being photographed is one only a project **QuPath** wrote can be in, and the
+/// module that writes projects here deliberately writes no metadata against an
+/// entry it has just created — there is nothing yet to record.
+///
+/// Two keys and not one, because the sort combo's popup is what these are for
+/// and a menu with a single extra item does not show that the keys are sorted
+/// and deduplicated. `stain` is on every entry and `block` on two, so the
+/// popup also shows a key that not every row can answer — the `(Unassigned)`
+/// case, which sorts those rows first.
+///
+/// Inserted after `"entryID"`, which every entry has exactly one of, rather
+/// than at the end of an entry: the closing brace of an entry object is not
+/// distinguishable from any other closing brace by text alone, and this is a
+/// string edit rather than a parse.
+fn with_metadata(project: &str) -> String {
+    // In the order `project::files` writes the entries, which is the order the
+    // ids are issued in.
+    let maps = [
+        r#"{"stain": "H&E", "block": "2"}"#,
+        r#"{"stain": "CD8"}"#,
+        r#"{"stain": "H&E", "block": "10"}"#,
+        r#"{"stain": "CD8"}"#,
+    ];
+    let mut out = String::with_capacity(project.len() + 256);
+    let mut rest = project;
+    let mut written = 0;
+    while let Some((before, after)) = rest.split_once("\"entryID\": ") {
+        let Some(map) = maps.get(written) else { break };
+        out.push_str(before);
+        out.push_str(&format!("\"metadata\": {map},\n      \"entryID\": "));
+        rest = after;
+        written += 1;
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Writes `patch` into `texture` with its top-left corner at `(x, y)`.

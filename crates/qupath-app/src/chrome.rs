@@ -144,10 +144,8 @@ pub fn style(context: &egui::Context) {
 /// What the project browser's rows are put in order by.
 ///
 /// QuPath's browser has a **Sort by...** menu offering the same choices: the
-/// three keys every entry has, any key in the project's metadata, and *None*.
-/// The metadata keys are not here — `project::read` summarises an entry to an
-/// id, a name, a builder and a path, so the map is in the document and unread,
-/// and `docs/VIEWER.md` §8.8 has reading it as its own change.
+/// three keys every entry has, any key any entry's metadata carries, and
+/// *None*.
 ///
 /// # It is a *grouping* there and a sort here, and that is a divergence
 ///
@@ -155,11 +153,24 @@ pub fn style(context: &egui::Context) {
 /// entries off it, except when the key is the name — which it special-cases
 /// back to a flat list, because "the name effectively being repeated twice ...
 /// looks weird". So sorting by name is a flat sorted list in QuPath too, and
-/// that is the case this pane reproduces exactly. The other two would be
-/// groups there and are flat lists here, ordered by the same value the groups
-/// would have been ordered by. A pane of flat rows has nowhere to hang a
-/// group; the alternative is a tree, and a tree is a different pane.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// that is the case this pane reproduces exactly. The rest would be groups
+/// there and are flat lists here, ordered by the same value the groups would
+/// have been ordered by. A pane of flat rows has nowhere to hang a group; the
+/// alternative is a tree, and a tree is a different pane.
+///
+/// The divergence is widest at [`Order::Metadata`], which is the case QuPath's
+/// grouping was built for: a study keyed by `stain` is a handful of nodes
+/// there and fifty ordered rows here. The rows are in the same order the
+/// groups would have been in, so the same slides are adjacent — what is missing
+/// is the heading over each run of them, and the ability to collapse one.
+///
+/// # Not `Copy`, because one variant names a key
+///
+/// [`Order::Metadata`] carries the key it sorts by, which is a `String` — the
+/// keys come from the project being looked at and there is no list of them to
+/// index into. `Command::Filter` already carries a `String` for the same kind
+/// of reason, so nothing downstream wanted `Copy` from this.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Order {
     /// The order the project file lists its images in.
     ///
@@ -181,21 +192,95 @@ pub enum Order {
     /// by the name the project gave them, and the two differ exactly when
     /// somebody has renamed an entry.
     Uri,
+    /// By the value of one of the entries' metadata keys.
+    ///
+    /// The key is whatever a project has. `populateSortByMenu` walks every
+    /// entry, collects the union of their metadata keys into a `TreeMap`, and
+    /// offers one item per key — so the choices depend on the study being
+    /// looked at rather than on anything this code knows in advance, and
+    /// [`Order::ALL`] cannot list them.
+    ///
+    /// An entry that does not carry the key sorts under QuPath's
+    /// `UNASSIGNED_NODE`, which is `(Unassigned)` in its resource bundle. The
+    /// empty string is used instead, for the reason [`file_name`] gives: those
+    /// are the rows the sort has nothing to say about, and a list that puts
+    /// them last is one where they are scrolled past.
+    Metadata(String),
 }
 
 impl Order {
-    /// Every choice, in the order the menu offers them.
-    pub const ALL: [Self; 4] = [Self::Stored, Self::Name, Self::Id, Self::Uri];
+    /// The choices that exist whatever the project is.
+    ///
+    /// The metadata keys are **not** here and cannot be: they come from the
+    /// entries. [`Order::all`] is the whole menu for a given project; this is
+    /// the part of it that does not depend on one.
+    pub const BASE: [Self; 4] = [Self::Stored, Self::Name, Self::Id, Self::Uri];
+
+    /// Every choice the menu offers for `images`, in the order it offers them.
+    ///
+    /// QuPath puts *None* first, then a separator, then the metadata keys
+    /// alphabetically — its `TreeMap` — then the base keys it has not already
+    /// listed. The order here is the base keys and then the metadata keys,
+    /// which is the same information in a combo box that has no separators: the
+    /// four that are always there stay in the four places a user has learned
+    /// them in, rather than moving down the list as a study gains keys.
+    ///
+    /// A key that collides with a base one is *not* dropped, where QuPath drops
+    /// the base item instead — `if (!newItems.containsKey(key.getKey()))`. Its
+    /// base keys are internal strings a metadata key could shadow; there is no
+    /// such collision to have here, because these are variants and those are
+    /// text, so the two are listed side by side and say which is which.
+    #[must_use]
+    pub fn all(images: &[project::Image]) -> Vec<Self> {
+        let mut keys: Vec<&str> = images
+            .iter()
+            .flat_map(|image| image.metadata.iter().map(|(key, _)| key.as_str()))
+            .collect();
+        // `TreeMap`, which is sorted and deduplicated — and sorted by Java's
+        // `String.compareTo` rather than by `smartStringSort`, so this is a
+        // plain sort and not the browser's own. The keys are labels in a menu;
+        // the arithmetic that reads digit runs as numbers is for the values.
+        keys.sort_unstable();
+        keys.dedup();
+
+        let mut out = Vec::with_capacity(Self::BASE.len() + keys.len());
+        out.extend(Self::BASE);
+        out.extend(keys.into_iter().map(|key| Self::Metadata(key.to_owned())));
+        out
+    }
 
     /// What the menu calls this.
-    pub fn label(self) -> &'static str {
+    ///
+    /// A metadata choice is called by its key, with no decoration: QuPath's
+    /// menu item is `createSortByKeyAction(key, key)`, the key as both label
+    /// and value.
+    #[must_use]
+    pub fn label(&self) -> &str {
         match self {
             Self::Stored => "Project order",
             Self::Name => "Name",
             Self::Id => "Entry ID",
             Self::Uri => "File name",
+            Self::Metadata(key) => key,
         }
     }
+}
+
+/// What one entry's `key` metadata says, for sorting.
+///
+/// `getDefaultValue`'s last two lines, with `UNASSIGNED_NODE` spelled as the
+/// empty string — see [`Order::Metadata`].
+///
+/// The lookup is case-sensitive, because `getMetadata().get(key)` is: the key
+/// came out of the same maps this is searching, so a case-insensitive match
+/// here could only ever find a *different* entry's key that differs in case,
+/// and report a value under a heading nobody chose.
+fn metadata_value<'a>(image: &'a project::Image, key: &str) -> &'a str {
+    image
+        .metadata
+        .iter()
+        .find(|(name, _)| name == key)
+        .map_or("", |(_, value)| value.as_str())
 }
 
 /// The rows the browser draws, in the order it draws them.
@@ -223,12 +308,12 @@ fn row_order(
     images: &[project::Image],
     has_data: &dyn Fn(usize) -> bool,
     filter: &str,
-    order: Order,
+    order: &Order,
 ) -> Vec<usize> {
     let mut rows: Vec<usize> = (0..images.len())
         .filter(|&index| matches(&images[index], has_data(index), filter))
         .collect();
-    if order == Order::Stored {
+    if *order == Order::Stored {
         return rows;
     }
     rows.sort_by(|&one, &two| {
@@ -244,6 +329,12 @@ fn row_order(
             // numbers says so without depending on it.
             Order::Id => one.id.cmp(&two.id),
             Order::Uri => project::smart_string_compare(&file_name(one), &file_name(two)),
+            // Smart-sorted like the names, and not like the ids: a metadata
+            // value is text somebody typed, and `block 2` before `block 10` is
+            // what they meant by it.
+            Order::Metadata(key) => {
+                project::smart_string_compare(metadata_value(one, key), metadata_value(two, key))
+            }
         }
     });
     rows
@@ -1403,7 +1494,7 @@ fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
         &project.stored.images,
         &|index| project.has_data(index),
         &app.filter,
-        app.order,
+        &app.order,
     );
     let shown = rows.len();
     ui.label(
@@ -1439,7 +1530,7 @@ fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
     ui.add_space(8.0);
     add_slide(ui, app, command);
     search(ui, app, command);
-    sort_by(ui, app, command);
+    sort_by(ui, app, &project.stored.images, command);
 
     if project.stored.images.is_empty() {
         ui.add(
@@ -1617,11 +1708,11 @@ fn search(ui: &mut egui::Ui, app: &App, command: &mut Command) {
 /// width is therefore whatever the row has left after the label, floored so
 /// that a very narrow panel truncates the choice rather than pushing the
 /// panel wider.
-fn sort_by(ui: &mut egui::Ui, app: &App, command: &mut Command) {
+fn sort_by(ui: &mut egui::Ui, app: &App, images: &[project::Image], command: &mut Command) {
     ui.horizontal(|ui| {
         ui.add(egui::Label::new(egui::RichText::new("Sort by").small()).wrap());
         let width = (ui.available_width() - 4.0).max(72.0);
-        let mut chosen = app.order;
+        let mut chosen = app.order.clone();
         egui::ComboBox::from_id_salt("project sort")
             .width(width)
             .selected_text(egui::RichText::new(app.order.label()).small())
@@ -1636,8 +1727,14 @@ fn sort_by(ui: &mut egui::Ui, app: &App, command: &mut Command) {
                 // reach that today; this is here so that a fifth one added
                 // later truncates instead of widening the menu.
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                for order in Order::ALL {
-                    ui.selectable_value(&mut chosen, order, order.label());
+                // Built per frame from the entries, because the choices are the
+                // study's metadata keys and adding a slide changes them. The
+                // truncation above stopped being about a hypothetical fifth
+                // label when this landed: a metadata key is text somebody
+                // typed, and nothing bounds how long it is.
+                for order in Order::all(images) {
+                    let label = order.label().to_owned();
+                    ui.selectable_value(&mut chosen, order, label);
                 }
             })
             .response
@@ -2405,20 +2502,28 @@ mod tests {
     /// fixture where two of the columns agreed.
     fn entries() -> Vec<qupath_viewer::project::Image> {
         use qupath_viewer::project::Image;
-        let entry = |id: u64, name: &str, file: &str| Image {
+        let entry = |id: u64, name: &str, file: &str, block: &str| Image {
             id,
             name: name.to_owned(),
             builder: String::from("uri"),
             slide: Ok(std::path::PathBuf::from(format!("/slides/{file}"))),
             uri: None,
             description: None,
-            metadata: Vec::new(),
+            // A fifth column, sorting differently from the other four for the
+            // reason they sort differently from each other — and one the second
+            // entry does not carry, so the unassigned case is in every test
+            // that walks `Order::all`.
+            metadata: if block.is_empty() {
+                Vec::new()
+            } else {
+                vec![(String::from("block"), block.to_owned())]
+            },
             tags: Vec::new(),
         };
         vec![
-            entry(7, "scan 10", "c.svs"),
-            entry(3, "scan 2", "a.svs"),
-            entry(9, "scan 1", "b.svs"),
+            entry(7, "scan 10", "c.svs", "2"),
+            entry(3, "scan 2", "a.svs", ""),
+            entry(9, "scan 1", "b.svs", "10"),
         ]
     }
 
@@ -2429,14 +2534,14 @@ mod tests {
         let order = |order| super::row_order(&images, &NO_DATA, "", order);
 
         // The project's own order, which is the order they were added.
-        assert_eq!(order(super::Order::Stored), [0, 1, 2]);
+        assert_eq!(order(&super::Order::Stored), [0, 1, 2]);
         // `scan 1`, `scan 2`, `scan 10` — the smart sort's whole point. A
         // plain string sort would give `scan 1`, `scan 10`, `scan 2`.
-        assert_eq!(order(super::Order::Name), [2, 1, 0]);
+        assert_eq!(order(&super::Order::Name), [2, 1, 0]);
         // 3, 7, 9.
-        assert_eq!(order(super::Order::Id), [1, 0, 2]);
+        assert_eq!(order(&super::Order::Id), [1, 0, 2]);
         // a.svs, b.svs, c.svs.
-        assert_eq!(order(super::Order::Uri), [1, 2, 0]);
+        assert_eq!(order(&super::Order::Uri), [1, 2, 0]);
     }
 
     /// **The index a row carries is the entry's, in every order.**
@@ -2451,8 +2556,8 @@ mod tests {
     #[test]
     fn a_sorted_row_still_names_its_own_entry() {
         let images = entries();
-        for order in super::Order::ALL {
-            let rows = super::row_order(&images, &NO_DATA, "", order);
+        for order in super::Order::all(&images) {
+            let rows = super::row_order(&images, &NO_DATA, "", &order);
             assert_eq!(rows.len(), images.len(), "{order:?} dropped a row");
             // Every entry exactly once: a sort that duplicated or lost one
             // would still be in order.
@@ -2470,6 +2575,85 @@ mod tests {
         }
     }
 
+    /// The menu offers every metadata key any entry carries, once, sorted, and
+    /// after the four that are always there.
+    ///
+    /// The dedup is what a project of fifty slides needs and a fixture of three
+    /// barely shows, so the fixture here gives two entries the same key: a
+    /// menu built without it offers `stain` twice, and a user picking either
+    /// gets the same sort — which is why nothing else would catch it.
+    #[test]
+    fn the_menu_offers_each_metadata_key_once_and_in_order() {
+        let images = vec![
+            image("a", &[("stain", "H&E"), ("case", "17B")]),
+            image("b", &[("stain", "CD8")]),
+        ];
+        let labels: Vec<String> = super::Order::all(&images)
+            .iter()
+            .map(|order| order.label().to_owned())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Project order",
+                "Name",
+                "Entry ID",
+                "File name",
+                // Alphabetical, and `case` comes before `stain` where the
+                // entry that has both lists them the other way round — so this
+                // is the menu's own order rather than the file's.
+                "case",
+                "stain",
+            ]
+        );
+    }
+
+    /// A project whose entries carry no metadata offers only the four.
+    #[test]
+    fn the_menu_is_the_four_when_there_is_no_metadata() {
+        assert_eq!(super::Order::all(&[image("a", &[])]), super::Order::BASE);
+    }
+
+    /// Sorting by a metadata key uses the value, smart-sorted, and an entry
+    /// that does not carry the key comes first.
+    ///
+    /// `block 2` before `block 10` is the smart sort doing its work: a plain
+    /// one puts `10` first, and both look like an order. The entry without the
+    /// key is the one QuPath calls `(Unassigned)` — first here, where the rows
+    /// the sort cannot speak for are worth meeting rather than scrolling past.
+    #[test]
+    fn a_metadata_sort_reads_the_value_and_puts_the_unassigned_first() {
+        let images = entries();
+        let rows = super::row_order(
+            &images,
+            &NO_DATA,
+            "",
+            &super::Order::Metadata(String::from("block")),
+        );
+        assert_eq!(rows, [1, 0, 2]);
+        assert_eq!(super::metadata_value(&images[1], "block"), "");
+        assert_eq!(super::metadata_value(&images[0], "block"), "2");
+        assert_eq!(super::metadata_value(&images[2], "block"), "10");
+    }
+
+    /// A key no entry carries leaves every row unassigned, and a stable sort
+    /// leaves them in the project's order.
+    ///
+    /// Reachable by picking a key and then opening another project — the choice
+    /// survives the study it was made in, and the rows should not be reshuffled
+    /// into some arbitrary order for it.
+    #[test]
+    fn a_key_no_entry_carries_leaves_the_project_order() {
+        let images = entries();
+        let rows = super::row_order(
+            &images,
+            &NO_DATA,
+            "",
+            &super::Order::Metadata(String::from("stain")),
+        );
+        assert_eq!(rows, [0, 1, 2]);
+    }
+
     /// The search runs first and the sort orders what it leaves.
     ///
     /// Both at once is the case worth having, because each control is easy to
@@ -2482,14 +2666,14 @@ mod tests {
         // `scan 2` and `scan 10` both contain `scan 1`? No — `scan 2` does
         // not, and `scan 10` does. So this is two rows: `scan 1` and
         // `scan 10`, in that order by name and the other way in the file.
-        let rows = super::row_order(&images, &NO_DATA, "scan 1", super::Order::Name);
+        let rows = super::row_order(&images, &NO_DATA, "scan 1", &super::Order::Name);
         assert_eq!(rows, [2, 0]);
         assert_eq!(images[rows[0]].name, "scan 1");
         assert_eq!(images[rows[1]].name, "scan 10");
 
         // The same search, left in the project's order.
         assert_eq!(
-            super::row_order(&images, &NO_DATA, "scan 1", super::Order::Stored),
+            super::row_order(&images, &NO_DATA, "scan 1", &super::Order::Stored),
             [0, 2]
         );
     }
@@ -2515,7 +2699,7 @@ mod tests {
             metadata: Vec::new(),
             tags: Vec::new(),
         });
-        let rows = super::row_order(&images, &NO_DATA, "", super::Order::Uri);
+        let rows = super::row_order(&images, &NO_DATA, "", &super::Order::Uri);
         assert_eq!(rows[0], 3, "the entry with no file is not first");
 
         // By *name* it sorts where its name puts it, which is the third of
@@ -2525,7 +2709,7 @@ mod tests {
         // falling back to the other; the assumption written here first was
         // that it would be last, and the sort it is a test of is the reason
         // it is not.
-        let by_name = super::row_order(&images, &NO_DATA, "", super::Order::Name);
+        let by_name = super::row_order(&images, &NO_DATA, "", &super::Order::Name);
         let names: Vec<&str> = by_name.iter().map(|&i| images[i].name.as_str()).collect();
         assert_eq!(names, ["scan 1", "scan 2", "scan 3", "scan 10"]);
     }
