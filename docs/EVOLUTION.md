@@ -28,7 +28,7 @@ inside one function belongs in that function's doc comment, not here.
 
 ## 2026-08 — Removing the reason not to is not a reason to
 
-`PENDING`
+`a93b197`
 
 `VIEWER.md` §8.8's stored image metadata block sat for a long time as *open*:
 the block was not written, and the stated obstacle was that nobody had compared
