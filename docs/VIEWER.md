@@ -1064,6 +1064,18 @@ project draws pictures. What it means here:
   up as a test. What §3.4b moved across the line is *where a tile landed*, not
   what it looks like.
 
+  **One narrower thing did cross it, and the distinction is worth keeping.**
+  Whether a colour is the right one is appearance. Whether *two* rows that
+  behave differently are drawn the same is not — it is a claim about the
+  interface saying what it does, and it is decidable.
+  `only_a_row_that_opens_fills_under_the_pointer` (§8.8) asserts on the
+  `Shape::Rect` the browser emits rather than on a rasterised picture, and it
+  exists because looking at two pictures found the fill was identical on a row
+  that opens and one that cannot. Looking is what *found* it; the test is what
+  keeps it found. That is the intended relationship between the two halves of
+  this section, and this is the first time in the viewer they have run in that
+  order.
+
 ### `examples/render.rs`, and what it changed about the above
 
 The window needs somebody watching it, and `dump` reaches its pixels with no
@@ -3100,13 +3112,47 @@ In the order it is worth having.
   coming, and the current-image fill on a row that names no image. But nothing
   has *clicked* a row, and nothing has pressed the add button; both are checked
   through `App` instead. The same hole as the overview's click-to-jump and
-  escape during a run: reachable only with a hand on the machine. The hover
-  states of the browser's rows are in that hole now too — the fill under a
-  hovered row has been reasoned about and drawn, and never seen. **The sort
+  escape during a run: reachable only with a hand on the machine. **The sort
   combo's dropdown was in it for about an hour and is not any more**: a popup
   only exists once its box has been pressed, so `examples/chrome` now presses
   it — a synthesised click, and then frames until the fade-in finishes. §8.3
   has what that cost and what it found.
+
+  ~~The hover states of the browser's rows are in that hole now too — the fill
+  under a hovered row has been reasoned about and drawn, and never seen.~~
+  **Out of it, and looking cost a bug immediately.** A hover is a
+  `PointerMoved` and nothing else, so the machinery the combo needed already
+  covered it: `render_hovering` moves the pointer and then settles, because
+  `egui` *interpolates* a widget towards its hovered colour rather than
+  switching to it and the frame the pointer arrives on is a picture of that
+  animation part-way through.
+
+  What the two pictures showed is that **the fill said nothing**.
+  `chrome-project-hover.png` and `chrome-project-hover-unopenable.png` were
+  indistinguishable at the fill — an entry built by a transform this cannot
+  open took byte-identically the same `(70, 70, 70)` as a slide that opens. The
+  rows carry different senses (`Sense::click()` against `Sense::hover()`, the
+  second so the context menu still reaches them) and the fill was drawn for
+  both, so the only thing it communicated was that the pointer was there, which
+  the pointer already communicates. The greyed text was carrying the whole
+  difference, and it is the quieter of the two: a row that lights up and then
+  ignores the press is the interface promising something.
+
+  The fill is now `openable && hovered`, and
+  `only_a_row_that_opens_fills_under_the_pointer` pins it — three layouts of
+  one project, because the claim is a *difference*: the un-openable row not
+  filling means nothing unless the openable one does, on the same list, and the
+  neutral layout is what says a fill seen at all is the hover's. It reads the
+  `Shape::Rect` rather than the rasterised pixels, since a rounded rectangle
+  tessellates to a fan carrying the same colour repeated and reading it back
+  out of one is reading it out of a rasteriser. Confirmed by restoring the old
+  condition and watching it fail with `#46_46_46_FF` — the colour the pictures
+  had shown.
+
+  **This is §6 again, and the fourth time in this file the picture is what
+  found it.** Nothing about the old code was wrong to read: the comment above
+  it said hovering fills a row while the pointer is over it, and it did. What
+  no reading produces is the two rows side by side.
 - **A look at the interface in a real window — started, and it paid at once.**
   The application has now been run and photographed on X11 at
   `WINIT_X11_SCALE_FACTOR=2`, which is what an offscreen render cannot be: a
@@ -3114,7 +3160,8 @@ In the order it is worth having.
   the two unit bugs above are invisible at 1.0 by construction. The first
   photograph is what showed `Fit` leaving slide behind the status bar.
   What is *still* unlooked-at is everything that needs a hand on the machine —
-  the trackpad, hover states, resizing, and the window manager.
+  the trackpad, resizing, and the window manager. Hover came off this list by
+  being synthesised rather than by being touched, which is the entry above.
 - ~~**An image opened from a project.**~~ **Done, and the blocker was not
   real.** Both formats had been through QuPath itself — §8.6 and §8.3 — but
   `ProjectImport` stops before the pixels, and this entry recorded that as

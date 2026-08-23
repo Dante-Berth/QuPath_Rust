@@ -760,3 +760,175 @@ fn adding_a_slide_keeps_the_pictures_already_made() {
          picture already made for it",
     );
 }
+
+/// A project with one openable row and one row built by a transform this cannot
+/// open, in that order, and the `.qpproj` that lists them.
+///
+/// The second entry's `builderType` is rewritten afterwards, for
+/// `examples/chrome`'s reason: writing one is exactly what `project.rs`
+/// refuses to do, so the only way to get the row is to edit the file. The
+/// rewrite lands on the *last* occurrence, so the openable row must be written
+/// first — an entry added after it would silently become the greyed one.
+fn a_project_with_an_unopenable_row() -> PathBuf {
+    let directory = std::env::temp_dir().join("qupath-rust-test-hover-fill");
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("a temporary project directory");
+
+    let openable = directory.join("openable.svs");
+    std::fs::write(&openable, b"").expect("a stand-in slide");
+    let rotated = directory.join("rotated.svs");
+    std::fs::write(&rotated, b"").expect("a stand-in slide");
+
+    let entries = [
+        Entry {
+            path: &openable,
+            name: "openable",
+            width: 2220,
+            height: 2967,
+        },
+        Entry {
+            path: &rotated,
+            name: "rotated",
+            width: 2967,
+            height: 2220,
+        },
+    ];
+
+    let project = directory.join("project.qpproj");
+    for file in project::files(&project, &entries, Timestamps::now()) {
+        let path = directory.join(&file.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("an entry directory");
+        }
+        let contents = if file.path == "project.qpproj" {
+            match file.contents.rsplit_once("\"builderType\": \"uri\"") {
+                Some((before, after)) => format!("{before}\"builderType\": \"rotated\"{after}"),
+                None => file.contents.clone(),
+            }
+        } else {
+            file.contents.clone()
+        };
+        std::fs::write(&path, contents).expect("write a project file");
+    }
+    project
+}
+
+/// Lays the browser out with the pointer at `at`, and returns the fill colours
+/// of the full-width rounded rectangles the rows draw.
+///
+/// Six frames and time between them, for `examples/chrome`'s reason: `egui`
+/// interpolates a widget towards its hovered colour rather than switching to
+/// it, so the frame the pointer arrives on has the fill part of the way in and
+/// a test reading that frame would be asserting on an animation a fifth of the
+/// way through rather than on a colour.
+///
+/// Reads the shapes rather than the tessellated meshes. A rounded rectangle
+/// becomes a fan of triangles carrying the same colour repeated, so a fill read
+/// back out of one is a fill read back out of a rasteriser; the `Shape::Rect`
+/// is where the decision actually is.
+///
+/// Filtered by width, which is what separates a row's own rectangle from the
+/// widget frames sharing the pane: the row is deliberately allocated the whole
+/// width of the browser (see `chrome.rs`), and the search box and the sort
+/// combo are not.
+fn row_fills(app: &mut App, at: egui::Pos2) -> Vec<egui::Color32> {
+    fn walk(shape: &egui::Shape, into: &mut Vec<egui::Color32>) {
+        match shape {
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    walk(shape, into);
+                }
+            }
+            egui::Shape::Rect(rect) => {
+                let size = rect.rect.size();
+                if size.x > 200.0 && (40.0..80.0).contains(&size.y) {
+                    into.push(rect.fill);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let context = egui::Context::default();
+    qupath_app::chrome::style(&context);
+    let mut input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(1100.0, 760.0),
+        )),
+        predicted_dt: 1.0 / 20.0,
+        ..Default::default()
+    };
+
+    let mut output = None;
+    for frame in 0..6 {
+        input.events.clear();
+        // Not on the first, which is `egui` still deciding where things are:
+        // a press or a hover has to land on a widget that already has a
+        // rectangle. The same reason `examples/chrome` clicks on the second.
+        if frame > 0 {
+            input.events.push(egui::Event::PointerMoved(at));
+        }
+        output = Some(context.run(input.clone(), |context| {
+            qupath_app::chrome::draw(context, app);
+        }));
+    }
+
+    let mut fills = Vec::new();
+    for clipped in &output.expect("a settled frame").shapes {
+        walk(&clipped.shape, &mut fills);
+    }
+    fills
+}
+
+/// A row the pointer is over fills only when pressing it would do something.
+///
+/// This is the assertion behind `chrome-project-hover.png` and
+/// `chrome-project-hover-unopenable.png`, and the pictures are what found it.
+/// The fill was on every hovered row, so an entry built by a transform this
+/// cannot open took byte-identically the same colour as a slide that opens —
+/// the two pictures were indistinguishable at the fill, and the greyed text was
+/// carrying the whole difference. A row that lights up under the pointer and
+/// then ignores the press is the interface promising something it will not do.
+///
+/// Written as three layouts of the same project rather than as one, because
+/// the claim is a difference between them: the un-openable row not filling
+/// means nothing unless the openable one does, on the same list, drawn the same
+/// way. The neutral layout is what says a fill seen at all is the hover's and
+/// not something the row draws regardless.
+#[test]
+fn only_a_row_that_opens_fills_under_the_pointer() {
+    let mut app = App::new(None);
+    app.open_project(a_project_with_an_unopenable_row());
+    wait_for_pictures(&mut app);
+
+    // Well away from the list, so nothing is hovered.
+    let neutral = row_fills(&mut app, egui::pos2(800.0, 600.0));
+    // The rows, read off the same layout the pictures are of: the browser's
+    // first row and its second, at the y `examples/chrome` uses.
+    let first = row_fills(&mut app, egui::pos2(150.0, 278.0));
+    let second = row_fills(&mut app, egui::pos2(150.0, 332.0));
+
+    let filled = |fills: &[egui::Color32]| -> usize {
+        fills
+            .iter()
+            .filter(|fill| **fill != egui::Color32::TRANSPARENT)
+            .count()
+    };
+
+    assert_eq!(
+        filled(&neutral),
+        0,
+        "no row should be filled with the pointer off the list, and one that is          means the fill below is not the hover's: {neutral:?}",
+    );
+    assert_eq!(
+        filled(&first),
+        1,
+        "the openable row should fill under the pointer: {first:?}",
+    );
+    assert_eq!(
+        filled(&second),
+        0,
+        "the row built by a transform this cannot open should not fill under          the pointer — it takes no click, and a fill says it does: {second:?}",
+    );
+}

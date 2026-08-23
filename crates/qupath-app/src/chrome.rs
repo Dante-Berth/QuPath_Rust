@@ -1812,9 +1812,21 @@ fn project_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
         // screen; hovering fills one while the pointer is over it. Both say the
         // same thing in the same way, which is what makes the first read as a
         // state rather than as a stuck highlight.
+        //
+        // **The hover fill is for the rows a press does something to, and
+        // that `openable` is not an accident.** The fill was on every hovered
+        // row until two pictures of it were put side by side: an entry built by
+        // a transform this cannot open took byte-identically the same
+        // `(70, 70, 70)` as a slide that opens, so the one thing the fill said
+        // was "the pointer is here" — which the pointer already says. Greyed
+        // text is not enough to carry the difference, because the fill is the
+        // louder of the two and it was the one saying "ready". A row that
+        // lights up and then ignores the press is the interface promising
+        // something; `Sense::hover()` on those rows exists so the menu still
+        // reaches them, not so they look pressable.
         let fill = if current {
             Some(ui.visuals().selection.bg_fill.gamma_multiply(0.35))
-        } else if laid.response.hovered() {
+        } else if openable && laid.response.hovered() {
             Some(ui.visuals().widgets.hovered.weak_bg_fill)
         } else {
             None

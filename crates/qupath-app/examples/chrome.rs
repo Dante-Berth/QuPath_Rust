@@ -138,7 +138,30 @@ fn main() {
     render_clicking(
         "chrome-project-sort-open.png",
         &mut app,
-        Some(egui::pos2(380.0, 204.0)),
+        egui::pos2(380.0, 204.0),
+    );
+
+    // And a row with the pointer over it, which §8.8 recorded as the part of
+    // the browser that had been reasoned about and drawn and never seen. The
+    // position is the first row, read off `chrome-project.png` the way the
+    // combo's was.
+    //
+    // Two pictures, because the fill is attached to two different senses and
+    // saying so is not the same as seeing it. The first row is openable and
+    // takes `Sense::click()`; the last is an entry built by a transform this
+    // cannot open, takes `Sense::hover()`, and is filled anyway — a row that
+    // highlights under the pointer and then does nothing when pressed is the
+    // one place in this pane where the fill could be a lie, and the picture is
+    // how anybody would find out.
+    render_hovering(
+        "chrome-project-hover.png",
+        &mut app,
+        egui::pos2(360.0, 278.0),
+    );
+    render_hovering(
+        "chrome-project-hover-unopenable.png",
+        &mut app,
+        egui::pos2(360.0, 440.0),
     );
 
     // And with a slide, which is the state the controls exist for: the empty
@@ -344,7 +367,45 @@ fn paste(texture: &mut Texture, patch: &Texture, x: usize, y: usize) {
 
 /// Lays the interface out and rasterises it.
 fn render(path: &str, app: &mut App) {
-    render_clicking(path, app, None);
+    render_pointing(path, app, None);
+}
+
+/// What the pointer does before the picture is taken.
+///
+/// Two gestures rather than a click and a boolean, because they are not a
+/// gesture and a modifier of it: a hover is a `PointerMoved` and nothing else,
+/// and a click is that move plus a press and a release. Writing the second as
+/// the first with a flag set would let a caller ask for a press with the
+/// pointer somewhere other than where it pressed, which is not a thing a hand
+/// can do.
+#[derive(Clone, Copy)]
+enum Pointer {
+    /// The pointer is moved here and left there.
+    Hovering(egui::Pos2),
+    /// The pointer is moved here, pressed and released.
+    Clicking(egui::Pos2),
+}
+
+impl Pointer {
+    /// Where the pointer ends up, which is what the settling frames hold it at.
+    fn at(self) -> egui::Pos2 {
+        match self {
+            Self::Hovering(at) | Self::Clicking(at) => at,
+        }
+    }
+}
+
+/// The same, with the pointer moved to `at` before the frame is drawn.
+///
+/// For the fill under a hovered row, which `docs/VIEWER.md` §8.8 recorded as
+/// reasoned about and drawn and never seen. A hover is not a weaker click: the
+/// row `egui` fills is the one the *pointer* is over on the frame being drawn,
+/// so a click that has already been released still leaves the pointer there and
+/// a picture of a click is a picture of a hover as well — which is exactly why
+/// this could not be read off the sort combo's picture, where the pointer sits
+/// on the combo rather than on a row.
+fn render_hovering(path: &str, app: &mut App, at: egui::Pos2) {
+    render_pointing(path, app, Some(Pointer::Hovering(at)));
 }
 
 /// The same, with a click delivered at `click` before the frame is drawn.
@@ -359,7 +420,12 @@ fn render(path: &str, app: &mut App) {
 /// The position is in points and is read off the picture; a click that lands on
 /// nothing renders the same frame as no click, so a wrong one shows up as a
 /// picture with no popup in it rather than as a silent pass.
-fn render_clicking(path: &str, app: &mut App, click: Option<egui::Pos2>) {
+fn render_clicking(path: &str, app: &mut App, click: egui::Pos2) {
+    render_pointing(path, app, Some(Pointer::Clicking(click)));
+}
+
+/// Lays the interface out with `pointer`'s gesture delivered, and rasterises it.
+fn render_pointing(path: &str, app: &mut App, pointer: Option<Pointer>) {
     // The browser's row pictures are made on a thread and arrive over a
     // channel, so an offscreen render has to wait for them the way the window
     // does — by asking again. The application asks once per frame and fills the
@@ -401,20 +467,22 @@ fn render_clicking(path: &str, app: &mut App, click: Option<egui::Pos2>) {
     // widget that already has a rectangle — the first frame is `egui` still
     // deciding where things are.
     let mut input = input;
-    if let Some(at) = click {
-        input.events.push(egui::Event::PointerMoved(at));
-        input.events.push(egui::Event::PointerButton {
-            pos: at,
-            button: egui::PointerButton::Primary,
-            pressed: true,
-            modifiers: egui::Modifiers::NONE,
-        });
-        input.events.push(egui::Event::PointerButton {
-            pos: at,
-            button: egui::PointerButton::Primary,
-            pressed: false,
-            modifiers: egui::Modifiers::NONE,
-        });
+    if let Some(pointer) = pointer {
+        input.events.push(egui::Event::PointerMoved(pointer.at()));
+        if let Pointer::Clicking(at) = pointer {
+            input.events.push(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            });
+            input.events.push(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
     }
     let output = context.run(input.clone(), |context| {
         chrome::draw(context, app);
@@ -432,14 +500,21 @@ fn render_clicking(path: &str, app: &mut App, click: Option<egui::Pos2>) {
     // transparent dialog and is an animation a fifth of the way through. Found
     // in the first picture of the metadata editor, having already been found
     // once for the sort combo's dropdown and written down right here.
-    let settling = click.or_else(|| app.editing.as_ref().map(|_| egui::pos2(-1.0, -1.0)));
+    // A hover settles for the same reason a click does, and it is the same
+    // animation: `egui` interpolates a widget's background towards its hovered
+    // colour rather than switching to it, so the frame the pointer arrives on
+    // has the fill part of the way in. A picture of that is a picture of a
+    // paler fill than the one a hand sees, and nothing about it looks wrong.
+    let settling = pointer
+        .map(Pointer::at)
+        .or_else(|| app.editing.as_ref().map(|_| egui::pos2(-1.0, -1.0)));
     let (output, pressed) = match settling {
         Some(at) => {
             input.events.clear();
-            // Only for a real click. The modal's settle uses a position off
+            // Only for a real gesture. The modal's settle uses a position off
             // the window, and moving the pointer there would take the hover
             // off whatever the picture is of.
-            if click.is_some() {
+            if pointer.is_some() {
                 input.events.push(egui::Event::PointerMoved(at));
             }
             // Several frames, and time passing between them, because `egui`
