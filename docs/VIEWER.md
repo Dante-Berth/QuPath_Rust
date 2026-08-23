@@ -1076,6 +1076,15 @@ project draws pictures. What it means here:
   this section, and this is the first time in the viewer they have run in that
   order.
 
+  **What that opened is larger than the one fill.** Laying the pane out and
+  reading the result back is not only a way to check a colour — `chrome::draw`
+  returns the `Command` a frame produced, so a synthesised press turns "what
+  happens when someone clicks here" into an assertion. §8.8's *hand on the
+  machine* hole had the row click in it on the grounds that a click needs a
+  window; it does not. What needs a window is the window manager, the trackpad
+  and resizing. Everything between a pixel position and a `Command` is
+  reachable from a test.
+
 ### `examples/render.rs`, and what it changed about the above
 
 The window needs somebody watching it, and `dump` reaches its pixels with no
@@ -2540,8 +2549,12 @@ reason the write path is shaped the way it is.
 What is still not looked at is the right-click itself: the menu is attached to
 every row — metadata belongs to the entry and not to the pixels, so an entry
 whose slide has been moved away still takes a note — but nothing has pressed a
-mouse button on one. It is in §8.8's *hand on the machine* hole with the row
-click and the add button.
+mouse button on one. It was in §8.8's *hand on the machine* hole with the row
+click and the add button; the row click has since come out of it, by the hole
+turning out to be drawn around the wrong thing — `chrome::draw` returns the
+command a press produced, so a synthesised press closes the chain. A
+right-click is `PointerButton::Secondary`, and the reason it has not followed
+is that the menu it opens is `egui`'s rather than this project's.
 
 ### 8.4 The overview — the invariant is that the two mappings agree
 
@@ -3109,10 +3122,53 @@ In the order it is worth having.
   and a slide together and photographed — `WINIT_X11_SCALE_FACTOR=2`, the list
   drawn, the add button live, no stderr — and those photographs are what found
   the relative-path bug above, the row that could not say its picture was never
-  coming, and the current-image fill on a row that names no image. But nothing
+  coming, and the current-image fill on a row that names no image. ~~But nothing
   has *clicked* a row, and nothing has pressed the add button; both are checked
   through `App` instead. The same hole as the overview's click-to-jump and
-  escape during a run: reachable only with a hand on the machine. **The sort
+  escape during a run: reachable only with a hand on the machine.~~
+
+  **A row has now been clicked, and it needed no hand either.** The hole was
+  drawn around the wrong thing: what `App` cannot reach is not the click but the
+  *pixel position*, and `chrome::draw` returns the `Command` a press produced,
+  so the whole chain from a coordinate to what the application is asked to do
+  closes without a window. `pressing_a_row_asks_for_that_row_and_only_that_row`
+  presses each of the three row states and asserts on the command; the same
+  `lay_out` the fill test uses, with a press and a release added.
+
+  Three things it pins that `App` could not. A row asks for **its own** slide —
+  a mutation routing every press to the first entry fails it, and that is the
+  bug that opens the wrong image silently. A row whose slide is **missing still
+  asks**, because the browser's mark is `Path::is_file` from when the project
+  was opened and the row's own hover text promises "Clicking still tries it";
+  making it refuse fails the test with that sentence in the message. And
+  pressing the empty space **below** the list asks for nothing, which is the
+  outward-facing half of the rule that a row takes the click across its whole
+  width.
+
+  **One assertion in it is weaker than it looks, and it is labelled as such.**
+  Pressing the un-openable row yields no command — but `openable` *is*
+  `slide.is_ok()` and the command is emitted inside `if let Ok(path)`, so that
+  row cannot ask for anything whatever its `Sense` is. Giving it
+  `Sense::click()` leaves the test passing, which was checked rather than
+  assumed. The sense controls the fill and the cursor, and the fill test above
+  is what guards that half.
+
+  A fourth test, `a_row_is_where_these_tests_think_it_is`, exists because a
+  click that misses produces no command and a hover that misses produces no
+  fill — so a coordinate that stopped being right *satisfies* both of the
+  assertions above. It asserts the three positions land on three different rows,
+  in the order the project lists them. `examples/chrome` records the same
+  failure twice already, once for a click landing on no popup and once for a
+  builder rewrite landing on the wrong entry.
+
+  **And one flake worth keeping.** All four tests shared a fixture directory, so
+  one test's `remove_dir_all` ran while another was reading the project out of
+  it — the fill test failed only when run alongside the others and passed alone.
+  A fixture torn down under a reader is a flake that looks exactly like a bug in
+  the thing under test. Each test now names its own directory.
+
+  What is still in the hole is the **add button**, the overview's click-to-jump,
+  and escape during a run. **The sort
   combo's dropdown was in it for about an hour and is not any more**: a popup
   only exists once its box has been pressed, so `examples/chrome` now presses
   it — a synthesised click, and then frames until the fade-in finishes. §8.3

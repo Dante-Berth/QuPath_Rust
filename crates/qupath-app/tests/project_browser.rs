@@ -13,6 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
+use qupath_app::chrome;
 use qupath_app::state::App;
 use qupath_viewer::project::{self, Entry, Timestamps};
 
@@ -761,21 +762,31 @@ fn adding_a_slide_keeps_the_pictures_already_made() {
     );
 }
 
-/// A project with one openable row and one row built by a transform this cannot
-/// open, in that order, and the `.qpproj` that lists them.
+/// A project with the three states a row can be in — a slide that is there, one
+/// that is not, and an entry built by a transform this cannot open — and the
+/// `.qpproj` that lists them, in that order.
 ///
 /// The second entry's `builderType` is rewritten afterwards, for
 /// `examples/chrome`'s reason: writing one is exactly what `project.rs`
 /// refuses to do, so the only way to get the row is to edit the file. The
 /// rewrite lands on the *last* occurrence, so the openable row must be written
 /// first — an entry added after it would silently become the greyed one.
-fn a_project_with_an_unopenable_row() -> PathBuf {
-    let directory = std::env::temp_dir().join("qupath-rust-test-hover-fill");
+fn a_project_with_an_unopenable_row(name: &str) -> PathBuf {
+    // Named by the caller, and that is not tidiness. `cargo test` runs these
+    // on threads; a shared directory means one test's `remove_dir_all` runs
+    // while another is reading the project out of it, and what that produced
+    // was the fill test failing only when run alongside the others and passing
+    // alone. A fixture that is torn down under a reader is a flake that looks
+    // like a bug in the thing under test.
+    let directory = std::env::temp_dir().join(format!("qupath-rust-test-rows-{name}"));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("a temporary project directory");
 
     let openable = directory.join("openable.svs");
     std::fs::write(&openable, b"").expect("a stand-in slide");
+    // Named and not created, which is the ordinary state of a study directory
+    // copied without its images.
+    let gone = directory.join("gone.svs");
     let rotated = directory.join("rotated.svs");
     std::fs::write(&rotated, b"").expect("a stand-in slide");
 
@@ -786,6 +797,16 @@ fn a_project_with_an_unopenable_row() -> PathBuf {
             width: 2220,
             height: 2967,
         },
+        Entry {
+            path: &gone,
+            name: "gone",
+            width: 2220,
+            height: 2967,
+        },
+        // Last, and that is load-bearing: the rewrite below finds the *last*
+        // `"builderType": "uri"` in the file, so an entry added after this one
+        // would silently become the greyed row instead. `examples/chrome` has
+        // the same comment, for the same reason and after the same mistake.
         Entry {
             path: &rotated,
             name: "rotated",
@@ -813,14 +834,107 @@ fn a_project_with_an_unopenable_row() -> PathBuf {
     project
 }
 
-/// Lays the browser out with the pointer at `at`, and returns the fill colours
-/// of the full-width rounded rectangles the rows draw.
+/// The y each row is laid out at, in points, in the 1100×760 pane these tests
+/// use.
+///
+/// Read off the layout rather than computed: a row's height depends on the
+/// picture beside it and on whether its name wraps, so a formula here would be
+/// a second implementation of `chrome.rs`'s layout that could agree with it
+/// while both were wrong. `a_row_is_where_these_tests_think_it_is` asserts
+/// these still land on rows, so a layout change fails there rather than
+/// quietly turning every gesture below into a press on nothing.
+const ROWS: [f32; 3] = [281.0, 335.0, 389.0];
+
+/// What the pointer does before the layout is read.
+///
+/// Two gestures rather than a position and a flag, for `examples/chrome`'s
+/// reason: a hover is a `PointerMoved` and nothing else, and a click is that
+/// move plus a press and a release. They are not one gesture with a modifier.
+#[derive(Clone, Copy)]
+enum Gesture {
+    /// The pointer is moved here and left there.
+    Hovering(egui::Pos2),
+    /// The pointer is moved here, pressed and released.
+    Clicking(egui::Pos2),
+}
+
+impl Gesture {
+    /// Where the pointer ends up.
+    fn at(self) -> egui::Pos2 {
+        match self {
+            Self::Hovering(at) | Self::Clicking(at) => at,
+        }
+    }
+}
+
+/// Lays the browser out with `gesture` delivered, and returns what the frame
+/// drew and what it asked for.
 ///
 /// Six frames and time between them, for `examples/chrome`'s reason: `egui`
 /// interpolates a widget towards its hovered colour rather than switching to
 /// it, so the frame the pointer arrives on has the fill part of the way in and
-/// a test reading that frame would be asserting on an animation a fifth of the
-/// way through rather than on a colour.
+/// a caller reading that frame would be reading an animation a fifth of the way
+/// through rather than a colour.
+///
+/// The gesture is delivered on **every** frame after the first rather than on
+/// one of them. For a hover that is what holding the pointer still means; for a
+/// click it means the press is repeated, which is deliberate — `Response
+/// ::clicked()` is true on the frame the release lands, and a click delivered
+/// once on frame 1 would have its command overwritten by the five frames after
+/// it. Repeating means the returned command is the one the *settled* layout
+/// produces, which is the layout everything else here is read off.
+///
+/// Returns the last frame's shapes and the last frame's command, so a caller
+/// can assert on what was drawn and on what pressing it did without laying the
+/// pane out twice and hoping the two agree.
+fn lay_out(
+    app: &mut App,
+    gesture: Option<Gesture>,
+) -> (Vec<egui::epaint::ClippedShape>, chrome::Command) {
+    let context = egui::Context::default();
+    chrome::style(&context);
+    let mut input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(1100.0, 760.0),
+        )),
+        predicted_dt: 1.0 / 20.0,
+        ..Default::default()
+    };
+
+    let mut last = None;
+    for frame in 0..6 {
+        input.events.clear();
+        // Not on the first, which is `egui` still deciding where things are: a
+        // press or a hover has to land on a widget that already has a
+        // rectangle. The same reason `examples/chrome` clicks on the second.
+        if let Some(gesture) = gesture.filter(|_| frame > 0) {
+            input.events.push(egui::Event::PointerMoved(gesture.at()));
+            if let Gesture::Clicking(at) = gesture {
+                input.events.push(egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                input.events.push(egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+        }
+        let mut command = chrome::Command::None;
+        let output = context.run(input.clone(), |context| {
+            command = chrome::draw(context, app).0;
+        });
+        last = Some((output.shapes, command));
+    }
+    last.expect("a settled frame")
+}
+
+/// The fill colours of the full-width rounded rectangles the rows draw.
 ///
 /// Reads the shapes rather than the tessellated meshes. A rounded rectangle
 /// becomes a fan of triangles carrying the same colour repeated, so a fill read
@@ -849,33 +963,9 @@ fn row_fills(app: &mut App, at: egui::Pos2) -> Vec<egui::Color32> {
         }
     }
 
-    let context = egui::Context::default();
-    qupath_app::chrome::style(&context);
-    let mut input = egui::RawInput {
-        screen_rect: Some(egui::Rect::from_min_size(
-            egui::pos2(0.0, 0.0),
-            egui::vec2(1100.0, 760.0),
-        )),
-        predicted_dt: 1.0 / 20.0,
-        ..Default::default()
-    };
-
-    let mut output = None;
-    for frame in 0..6 {
-        input.events.clear();
-        // Not on the first, which is `egui` still deciding where things are:
-        // a press or a hover has to land on a widget that already has a
-        // rectangle. The same reason `examples/chrome` clicks on the second.
-        if frame > 0 {
-            input.events.push(egui::Event::PointerMoved(at));
-        }
-        output = Some(context.run(input.clone(), |context| {
-            qupath_app::chrome::draw(context, app);
-        }));
-    }
-
+    let (shapes, _) = lay_out(app, Some(Gesture::Hovering(at)));
     let mut fills = Vec::new();
-    for clipped in &output.expect("a settled frame").shapes {
+    for clipped in &shapes {
         walk(&clipped.shape, &mut fills);
     }
     fills
@@ -899,15 +989,15 @@ fn row_fills(app: &mut App, at: egui::Pos2) -> Vec<egui::Color32> {
 #[test]
 fn only_a_row_that_opens_fills_under_the_pointer() {
     let mut app = App::new(None);
-    app.open_project(a_project_with_an_unopenable_row());
+    app.open_project(a_project_with_an_unopenable_row("hover-fill"));
     wait_for_pictures(&mut app);
 
     // Well away from the list, so nothing is hovered.
     let neutral = row_fills(&mut app, egui::pos2(800.0, 600.0));
-    // The rows, read off the same layout the pictures are of: the browser's
-    // first row and its second, at the y `examples/chrome` uses.
-    let first = row_fills(&mut app, egui::pos2(150.0, 278.0));
-    let second = row_fills(&mut app, egui::pos2(150.0, 332.0));
+    // The rows, at the y each one is laid out at. The first is a slide that is
+    // there; the third is the entry built by a transform this cannot open.
+    let first = row_fills(&mut app, egui::pos2(150.0, ROWS[0]));
+    let unopenable = row_fills(&mut app, egui::pos2(150.0, ROWS[2]));
 
     let filled = |fills: &[egui::Color32]| -> usize {
         fills
@@ -927,8 +1017,143 @@ fn only_a_row_that_opens_fills_under_the_pointer() {
         "the openable row should fill under the pointer: {first:?}",
     );
     assert_eq!(
-        filled(&second),
+        filled(&unopenable),
         0,
-        "the row built by a transform this cannot open should not fill under          the pointer — it takes no click, and a fill says it does: {second:?}",
+        "the row built by a transform this cannot open should not fill under          the pointer — it takes no click, and a fill says it does: \
+         {unopenable:?}",
+    );
+}
+
+/// The positions in [`ROWS`] land on rows, one each and in order.
+///
+/// Without this every gesture below could be a press on nothing. A click that
+/// misses produces no command and a hover that misses produces no fill, so both
+/// of the assertions those tests make are *satisfied* by a coordinate that
+/// stopped being right — which is the shape of a test that passes for the wrong
+/// reason, and the one `examples/chrome` records twice already (a click landing
+/// on no popup, and a builder rewrite landing on the wrong entry).
+///
+/// Asserts they are distinct rows rather than that they are at any particular
+/// y. The numbers are a fact about `egui`'s spacing and this pane's contents;
+/// what the tests below need is only that each one is a different row and that
+/// they run in the order the project lists.
+#[test]
+fn a_row_is_where_these_tests_think_it_is() {
+    let mut app = App::new(None);
+    app.open_project(a_project_with_an_unopenable_row("positions"));
+    wait_for_pictures(&mut app);
+
+    let mut hit = Vec::new();
+    for y in ROWS {
+        let (_, command) = lay_out(&mut app, Some(Gesture::Clicking(egui::pos2(150.0, y))));
+        hit.push(command);
+    }
+
+    // The first two rows name slides and open; the third is the transform,
+    // which is not clickable at all. So the first two must have produced a
+    // command and they must not be the same one.
+    let (first, second) = (&hit[0], &hit[1]);
+    let named = |command: &chrome::Command| match command {
+        chrome::Command::OpenPath(path) => Some(path.clone()),
+        _ => None,
+    };
+    let first = named(first).unwrap_or_else(|| panic!("ROWS[0] pressed nothing: {first:?}"));
+    let second = named(second).unwrap_or_else(|| panic!("ROWS[1] pressed nothing: {second:?}"));
+    assert_ne!(
+        first, second,
+        "ROWS[0] and ROWS[1] are the same row, so one of them has moved",
+    );
+    assert!(
+        first.ends_with("openable.svs"),
+        "ROWS[0] is not the first row the project lists: {}",
+        first.display(),
+    );
+    assert!(
+        second.ends_with("gone.svs"),
+        "ROWS[1] is not the second row the project lists: {}",
+        second.display(),
+    );
+}
+
+/// Pressing a row asks for that row's slide, and pressing one that cannot be
+/// opened asks for nothing.
+///
+/// `docs/VIEWER.md` §8.8 recorded this as needing a hand on the machine —
+/// "nothing has *clicked* a row" — alongside the hover states, and it needs one
+/// no more than they did. A click is a `PointerMoved` and two `PointerButton`
+/// events, and `chrome::draw` returns the `Command` the press produced, so the
+/// whole chain from a pixel position to what the application is asked to do is
+/// reachable without a window.
+///
+/// **The row that is missing its slide is the interesting one, and it must
+/// still ask.** The browser's mark comes from `Path::is_file` at the moment the
+/// project was opened, and a slide plugged in since is one the browser should
+/// not be second-guessing — the row's own hover text says "Clicking still tries
+/// it". A refusal here would make that sentence false, and `App::open`'s
+/// message is where a slide that really is gone gets reported.
+#[test]
+fn pressing_a_row_asks_for_that_row_and_only_that_row() {
+    let mut app = App::new(None);
+    app.open_project(a_project_with_an_unopenable_row("press"));
+    wait_for_pictures(&mut app);
+
+    let press =
+        |app: &mut App, y: f32| lay_out(app, Some(Gesture::Clicking(egui::pos2(150.0, y)))).1;
+
+    match press(&mut app, ROWS[0]) {
+        chrome::Command::OpenPath(path) => assert!(
+            path.ends_with("openable.svs"),
+            "pressing the first row asked for the wrong slide: {}",
+            path.display(),
+        ),
+        other => panic!("pressing a row that opens asked for nothing: {other:?}"),
+    }
+
+    match press(&mut app, ROWS[1]) {
+        chrome::Command::OpenPath(path) => assert!(
+            path.ends_with("gone.svs"),
+            "pressing the missing row asked for the wrong slide: {}",
+            path.display(),
+        ),
+        other => panic!(
+            "pressing a row whose slide is not there asked for nothing: {other:?} — the row's \
+             own hover text says clicking still tries it",
+        ),
+    }
+
+    // **A weaker assertion than it looks, and worth saying so.** The command is
+    // emitted inside `if let Ok(path) = &image.slide`, and `openable` *is*
+    // `slide.is_ok()` — so a row with no path cannot ask for anything whatever
+    // its `Sense` is. Giving that row `Sense::click()` leaves this passing,
+    // which was checked rather than assumed. What the sense actually controls
+    // is the fill and the pointer cursor, and
+    // `only_a_row_that_opens_fills_under_the_pointer` is what guards that half.
+    // This line is here so that a future change routing a command out of the
+    // greyed row has something to fail.
+    assert!(
+        matches!(press(&mut app, ROWS[2]), chrome::Command::None),
+        "pressing a row built by a transform this cannot open asked for something",
+    );
+}
+
+/// Pressing the browser's background asks for nothing.
+///
+/// The row is deliberately allocated the whole width of the pane so that the
+/// space to the right of a short name takes the fill *and* the click — the two
+/// have to agree, and the half that reads as broken is an obviously highlighted
+/// row ignoring a press. This is the other side of that: the agreement must
+/// stop at the row's edge, and a pane that opened a slide when someone pressed
+/// the empty space under the list would be the same bug pointing outward.
+#[test]
+fn pressing_below_the_rows_asks_for_nothing() {
+    let mut app = App::new(None);
+    app.open_project(a_project_with_an_unopenable_row("below"));
+    wait_for_pictures(&mut app);
+
+    // Inside the browser's panel and below the last row, which ends at 412.
+    let (_, command) = lay_out(&mut app, Some(Gesture::Clicking(egui::pos2(150.0, 600.0))));
+    assert!(
+        matches!(command, chrome::Command::None),
+        "pressing the empty space under the list asked for something: {command:?}",
     );
 }
