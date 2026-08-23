@@ -584,12 +584,19 @@ changes how many objects the pipeline finds:
   The test compares up to rotation while pinning every vertex, the length and
   the winding; what consumes these lists is smoothing and an area, and neither
   depends on which vertex is written first.
-- **Step 4b, cell expansion**, which D-008 shows is not optional for the count
-  claim even though it adds no objects — the seam resolution runs on cells.
-  With smoothing landed this is now the **only** thing between here and D-008,
-  and the tempting shortcut is worth naming: smoothing the nuclei and resolving
-  on those would look like progress and close nothing, because it would compare
-  smoothed nuclei where QuPath compares smoothed cells.
+- ~~**Step 4b, cell expansion**~~ — **done**. `qupath-watershed`'s
+  `expand_labels` is the EDM/negate/flood chain `WatershedCellDetection` runs
+  over the nucleus labels, and `cell_areas` is `labelsToFilledROIs` and the area
+  of what it traces. Pinned by `CellExpansion.json` over ten cases at four
+  checkpoints each, and the test discriminates: mutating either load-bearing
+  constant — the EDM's `(byte)255` background, or the `<=` on the
+  `-cellExpansion` threshold — fails it.
+
+  What is left of D-008 is therefore **not** a missing capability. It is routing
+  the pipeline through these and resolving overlaps on cells rather than on
+  nucleus masks. The shortcut named when this was still open still applies:
+  resolving on *smoothed nuclei* would compare the wrong objects more precisely
+  and close nothing.
 - **Step 5, measurements**, into the columnar table `qupath-objects` already
   provides.
 
@@ -735,7 +742,9 @@ loose end: an object placed exactly on a boundary is covered by
 `overlaps::tests`, on hand-built candidates rather than through the pipeline. A
 fixture recorded from QuPath's own `resolveOverlaps` would be stronger and does
 not exist — and **D-008 says the port is comparing the wrong objects anyway**,
-nucleus masks where QuPath compares smoothed cell polygons.
+nucleus masks where QuPath compares smoothed cell polygons. Both of those
+objects can now be built here (§1.5b step 4b, and the smoothing before it), so
+this is the next thing that can actually be fixed rather than only described.
 
 ---
 

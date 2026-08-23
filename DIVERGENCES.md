@@ -253,25 +253,37 @@ neither is visible from the rule itself:
 counts. Same grid, same keep-the-larger rule, same strict 10% threshold, on
 different objects.
 
-**Why it is here:** cell expansion is not ported, and neither is the smoothing
-that runs over the vertex list. Nothing in `overlaps.rs` can be made to match
-until both are, and stubbing either would be §10's plausible wrong value.
+**Why it was here:** when this entry was written neither cell expansion nor the
+smoothing that runs over the vertex list was ported, so nothing in `overlaps.rs`
+could be made to match and stubbing either would have been §10's plausible wrong
+value. Both have since landed; see below.
 
-**One of the two is now answered.** The smoothed polygon exists.
+**Both prerequisites are now answered.** The smoothed polygon exists:
 `qupath-watershed`'s `outline` traces the vertex list, pinned against ImageJ's
 Wand by `WandOutline.json`, and `smooth_boundary` runs the whole
 interpolate/smooth/interpolate/simplify chain over it, pinned stage by stage
-against `SmoothBoundaries.json`. So `geometry.getArea()` of the polygon this
-entry turns on is now computable here.
+against `SmoothBoundaries.json`. And the cells exist: `expand_labels` is the
+EDM/negate/flood chain `WatershedCellDetection` runs over the nucleus labels,
+with `cell_areas` for `labelsToFilledROIs`, pinned against `CellExpansion.json`
+over ten cases at four checkpoints each.
 
-**What still blocks the entry is cell expansion alone.** The rule compares two
-*cells*, and `PathObjectTools.getROI(pathObject, false)` returns the cell
-boundary; there are no cell objects here to smooth. Smoothing the nuclei and
-comparing those would be a change that looks like progress and closes nothing —
-it would compare smoothed nuclei where QuPath compares smoothed cells, which is
-the same wrong-object error this entry already describes, carried out more
-precisely. So the entry stands, with one of its two prerequisites removed
-rather than both.
+So the objects this entry says are wrong are now buildable here. What remains is
+not a missing capability but the work of routing the pipeline through them and
+resolving overlaps on the result, which is `docs/ROADMAP.md` §1.5b step 4b.
+
+**Two things the port settled that reading the call site would not have.** Both
+would have been guessed wrong, and both are pinned:
+
+- **The expansion EDM's background argument is `(byte)255`**, where every other
+  EDM in this pipeline passes `0`. The sense is inverted: the map is zero *on*
+  the nuclei and measures distance *outward*. Reusing the 0-background call
+  gives a distance map of the wrong region entirely, and the cells come out as
+  the gaps between nuclei. The comparison is equality on a sign-extended byte —
+  `baload` then `if_icmpeq` in ImageJ's bytecode — not a threshold.
+- **The threshold is `-cellExpansion` and the flood skips values `<=` it**, so a
+  pixel at *exactly* `cellExpansion` from a nucleus is **not** claimed. The tie
+  falls on the far side of what one would guess; `exact-distance-boundary`
+  records 20 pixels at exactly 4.0 px, none of them claimed.
 
 **One thing the port found that this entry should carry forward.** ImageJ's
 `getInterpolatedPolygon` treats a *negative* interval as "adjust the spacing
@@ -312,9 +324,13 @@ QuPath on 17 images and they pass, which puts the suspicion on what reaches
 them — the background estimate and its threshold — rather than on the tests.
 
 **Status:** known, quantified in direction, contributes but does not dominate.
-Boundary smoothing has landed; unfixable before **cell expansion** does
-(`docs/ROADMAP.md` §1.5b step 4b). The density-dependent remainder is a separate and currently
-unexplained divergence; see `docs/MEMO.md` §2.
+Both prerequisites have landed — boundary smoothing and cell expansion — so the
+entry is no longer blocked on a missing capability; what is left is routing the
+pipeline through them (`docs/ROADMAP.md` §1.5b step 4b). Closing it is expected
+to move the ratio by at most the 6.0% of objects the seam resolution touches,
+**not** to close the gap: the density-dependent remainder is a separate and
+currently unexplained divergence, and is the larger half. See `docs/MEMO.md` §2
+and D-009.
 
 ## D-009 — The count gap concentrates in the merge and the shape split, on clumped tissue
 

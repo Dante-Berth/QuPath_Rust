@@ -397,9 +397,11 @@ plans that were wrong.
   failing; and D-008 says it is comparing the wrong objects anyway. It is still
   the weakest thing in the tree and now it is also load-bearing for the headline
   number. A recorded fixture would pay more here than anywhere else.
-- **`ROADMAP.md`'s remaining plans** — the tail, cell expansion and measurements. Written from a summary of the source, same as the five that
-  turned out wrong. Every stage that has since been ported found something the
-  plan did not have.
+- **`ROADMAP.md`'s remaining plans** — the tail and measurements. Written from a
+  summary of the source, same as the five that turned out wrong. Every stage
+  that has since been ported found something the plan did not have — cell
+  expansion, the most recent, found two: the EDM's inverted background argument
+  and which side of the expansion threshold a tie falls on.
 - **The 1.17x, the 8%, and the 1.19x wall clock** — separate processes, not
   interleaved. Directions are sound, magnitudes are approximate. The 2.42x on the
   reconstruction pass itself does meet the bar.

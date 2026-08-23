@@ -355,3 +355,24 @@ parameter within one binary is the measurement that works.
 **Transferable:** below 5%, a two-binary comparison reports noise with a
 confident sign. This is why `ROADMAP.md` §5 asks for the same machine, the
 same thread count and the same fixture on every claim.
+
+## 2026-08 — The argument a port hardcodes is the one the next caller needs
+
+`make_float_edm` fixed ImageJ's background value at `0` and said why in its own
+doc comment: "a port of the branches nothing calls is a port nothing checks".
+That was correct when written — the shape split is the only EDM the pipeline
+had. Cell expansion calls the same ImageJ method with `(byte)255`, which does
+not merely vary a parameter: it *inverts* which pixels the distance is measured
+from, so reusing the `0` call would have produced a distance map of the wrong
+region entirely and cells that are the gaps between nuclei.
+
+Nothing would have failed loudly. The 0-background call returns a plausible
+float image of the right shape, and without `CellExpansion.json` the port would
+have looked like it worked.
+
+**Transferable:** "this argument is always X here" and "this guard never fires"
+are the same claim about callers, and they expire the same way — see the
+2026-08 entry above and the memory `read-the-layer-below`. When porting a new
+caller of an already-ported function, re-read the *original* signature, not the
+port's. The port records the old caller's choices, and a hardcoded constant is
+exactly where a new caller's difference hides.

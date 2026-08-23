@@ -644,10 +644,10 @@ untouched, so the line is one pixel wide and on the row it was asked for.
 `DIVERGENCES.md` D-008 is a claim about *geometry* — nucleus masks against
 smoothed cell polygons — and it had never been looked at directly because the
 vertices did not exist. They exist now, and the smoothing chain that runs over
-them is ported and pinned stage by stage, so **one of D-008's two halves is
-closed**: the smoothed polygon whose `getArea()` the rule takes is computable
-here. What still blocks the entry is **cell expansion alone** — the rule
-compares two *cells*, and there are no cell objects here to smooth.
+them is ported and pinned stage by stage. Cell expansion has since landed too,
+so **both of D-008's halves are closed**: the rule compares two smoothed cell
+polygons, and both the cells and the smoothing are now computable here. What
+remains is routing the pipeline through them, not building them.
 
 ### 3.6 An application — **partly done**
 
