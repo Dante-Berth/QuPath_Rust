@@ -90,10 +90,14 @@ impl DistanceMap {
     /// Writes into `out` each pixel's distance to the nearest zero pixel of
     /// `mask`.
     ///
-    /// This is `EDM.makeFloatEDM(ip, 0, false)` — the only call detection makes.
-    /// The general version takes a background value and an `edgesAreBackground`
-    /// flag; both are fixed here, at `0` and `false`, because a port of the
-    /// branches nothing calls is a port nothing checks.
+    /// This is `EDM.makeFloatEDM(ip, 0, false)`, which is the call the nucleus
+    /// split makes. `edgesAreBackground` stays fixed at `false`, because a port
+    /// of the branches nothing calls is a port nothing checks.
+    ///
+    /// The background *value* is no longer fixed: cell expansion calls the same
+    /// ImageJ method with `(byte)255`, which inverts which pixels the distance
+    /// is measured from. See [`Self::make_float_edm_from`], which this delegates
+    /// to.
     ///
     /// `false` for the edges is the load-bearing one: the image border is **not**
     /// background, so a blob running off the edge keeps growing distances
@@ -106,6 +110,49 @@ impl DistanceMap {
     /// zero or does not divide them, or if either dimension exceeds
     /// [`MAX_DIMENSION`].
     pub fn make_float_edm(&mut self, mask: &[u8], out: &mut [f32], width: usize) {
+        self.make_float_edm_from(mask, out, width, 0);
+    }
+
+    /// Writes into `out` each pixel's distance to the nearest pixel of `mask`
+    /// equal to `background`.
+    ///
+    /// This is `EDM.makeFloatEDM(ip, background, false)`. Detection reaches it
+    /// with two different values and they mean opposite things:
+    ///
+    /// - **`0`**, from the shape split. The mask is 0/255 with the objects at
+    ///   255, so distance is measured *inside* each object, outward from its
+    ///   boundary. That is the surface the maximum finder splits.
+    /// - **`255`**, from cell expansion. The same 0/255 mask, but now the
+    ///   objects themselves are the background, so the map is zero *on* the
+    ///   nuclei and measures distance *outward into the space between them*.
+    ///   That is the surface the expansion floods.
+    ///
+    /// Reusing the `0` call for the second would produce a distance map of the
+    /// wrong region entirely — cells that are the gaps between nuclei rather
+    /// than the nuclei grown. Pinned by `single-nucleus` in
+    /// `parity/fixtures/CellExpansion.json`, whose `edm` is zero exactly on the
+    /// nucleus.
+    ///
+    /// # The comparison is equality, and the sign does not matter here
+    ///
+    /// ImageJ loads the mask byte with `baload`, which sign-extends, and
+    /// compares it to the `int` argument with `if_icmpeq`. So `(byte)255`
+    /// arrives as `-1` and a mask pixel of 255 loads as `-1`: they match. The
+    /// mask is `u8` here and the comparison is against `255` directly, which is
+    /// the same set of pixels. It is equality either way — not a threshold, so
+    /// a mask holding some third value belongs to neither side and is treated
+    /// as foreground.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::make_float_edm`].
+    pub fn make_float_edm_from(
+        &mut self,
+        mask: &[u8],
+        out: &mut [f32],
+        width: usize,
+        background: u8,
+    ) {
         assert_eq!(
             mask.len(),
             out.len(),
@@ -122,7 +169,7 @@ impl DistanceMap {
         // Foreground starts at infinity and is lowered; background stays zero
         // and is never visited.
         for (distance, &pixel) in out.iter_mut().zip(mask) {
-            *distance = if pixel == 0 { 0.0 } else { f32::MAX };
+            *distance = if pixel == background { 0.0 } else { f32::MAX };
         }
 
         self.forward.clear();
@@ -130,7 +177,7 @@ impl DistanceMap {
         self.backward.clear();
         self.backward.resize(width, NO_POINT);
         for y in 0..height {
-            self.line(mask, out, width, y);
+            self.line(mask, out, width, y, background);
         }
 
         // The buffers are reset, not reused: the second pair of sweeps runs the
@@ -138,7 +185,7 @@ impl DistanceMap {
         self.forward.fill(NO_POINT);
         self.backward.fill(NO_POINT);
         for y in (0..height).rev() {
-            self.line(mask, out, width, y);
+            self.line(mask, out, width, y, background);
         }
 
         for distance in out.iter_mut() {
@@ -152,14 +199,14 @@ impl DistanceMap {
     }
 
     /// One row, scanned left to right and then right to left.
-    fn line(&mut self, mask: &[u8], out: &mut [f32], width: usize, y: usize) {
+    fn line(&mut self, mask: &[u8], out: &mut [f32], width: usize, y: usize, background: u8) {
         let row = y * width;
 
         let mut previous = NO_POINT;
         let mut diagonal = NO_POINT;
         for x in 0..width {
             let next_diagonal = self.forward[x];
-            if mask[row + x] == 0 {
+            if mask[row + x] == background {
                 self.forward[x] = pack(x, y);
             } else {
                 let squared = nearest(&mut self.forward, previous, diagonal, x, y);
@@ -175,7 +222,7 @@ impl DistanceMap {
         let mut diagonal = NO_POINT;
         for x in (0..width).rev() {
             let next_diagonal = self.backward[x];
-            if mask[row + x] == 0 {
+            if mask[row + x] == background {
                 self.backward[x] = pack(x, y);
             } else {
                 let squared = nearest(&mut self.backward, previous, diagonal, x, y);

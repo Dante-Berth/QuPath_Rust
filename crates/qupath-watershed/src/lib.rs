@@ -38,6 +38,7 @@
 //! ```
 
 mod edm;
+mod expand;
 mod label;
 mod outline;
 mod smooth;
@@ -46,6 +47,7 @@ mod regions;
 mod segment;
 
 pub use edm::DistanceMap;
+pub use expand::{cell_areas, expand_labels};
 pub use label::{Labeller, label_image};
 pub use outline::{Outline, outline_from, outline_mask};
 pub use smooth::{Point, Stages, smooth_boundary};
