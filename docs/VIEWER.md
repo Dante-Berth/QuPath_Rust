@@ -1085,6 +1085,13 @@ project draws pictures. What it means here:
   and resizing. Everything between a pixel position and a `Command` is
   reachable from a test.
 
+  That reaches a **disabled** control as well, which is the half worth naming
+  separately: a button `egui` refuses the press on returns `Command::None`, and
+  so does a press that lands on nothing. The two are indistinguishable in the
+  assertion, so a test that a disabled button stays quiet is only a test while
+  something else pins the coordinate — `the_add_button_is_where_these_tests
+  _think_it_is` (§8.8) exists for that and nothing else.
+
 ### `examples/render.rs`, and what it changed about the above
 
 The window needs somebody watching it, and `dump` reaches its pixels with no
@@ -2550,7 +2557,7 @@ What is still not looked at is the right-click itself: the menu is attached to
 every row — metadata belongs to the entry and not to the pixels, so an entry
 whose slide has been moved away still takes a note — but nothing has pressed a
 mouse button on one. It was in §8.8's *hand on the machine* hole with the row
-click and the add button; the row click has since come out of it, by the hole
+click and the add button; both have since come out of it, by the hole
 turning out to be drawn around the wrong thing — `chrome::draw` returns the
 command a press produced, so a synthesised press closes the chain. A
 right-click is `PointerButton::Secondary`, and the reason it has not followed
@@ -3167,7 +3174,37 @@ In the order it is worth having.
   A fixture torn down under a reader is a flake that looks exactly like a bug in
   the thing under test. Each test now names its own directory.
 
-  What is still in the hole is the **add button**, the overview's click-to-jump,
+  **The add button has now been pressed too, and by the same route.** It is a
+  coordinate like any other — `ADD_BUTTON` beside `ROWS`, read off the layout
+  rather than computed — and pressing it in the pane produces `AddToProject`.
+  What is worth the test is the two states in which it must produce *nothing*:
+  a project open with no slide showing, and a slide the project already holds.
+
+  **That pair is not the weak assertion the row's `Sense` was.** The button is
+  `add_enabled(app.addable().is_ok(), …)`, so what refuses the press is `egui`
+  and not a branch here, which is exactly the shape of the assertion labelled
+  weak above. The difference is that the mutation is reachable: replacing the
+  predicate with `true` leaves *both* silent states asking for `AddToProject`,
+  and that was run — it fails with the disabled hover text in the message
+  ("Open a slide first (o); it is the one that gets added."). The two
+  consequences are the reason to pin it. With nothing to add, the command is
+  `add_to_project` rewriting the index with nothing to write; with the slide
+  already in the project, it is a second entry for one image, which is a second
+  `data/` directory and a second row in QuPath's own browser. Neither says
+  anything on screen when it happens.
+
+  Three states of one button rather than one, for the fill test's reason: that
+  it stays quiet with nothing to add means nothing unless it speaks when there
+  is something. And `the_add_button_is_where_these_tests_think_it_is` guards the
+  coordinate, more sharply than the rows needed it — two of the three assertions
+  are that the press produces **no** command, which is what pressing empty space
+  produces, so a coordinate that drifted off the button would leave two thirds
+  of the test passing while checking nothing.
+
+  Unlike the hover and like the row press, this found no bug. The behaviour was
+  right; the check was missing.
+
+  What is still in the hole is the overview's click-to-jump
   and escape during a run. **The sort
   combo's dropdown was in it for about an hour and is not any more**: a popup
   only exists once its box has been pressed, so `examples/chrome` now presses

@@ -1157,3 +1157,109 @@ fn pressing_below_the_rows_asks_for_nothing() {
         "pressing the empty space under the list asked for something: {command:?}",
     );
 }
+
+/// Where the pane's *Add the slide showing* button is laid out.
+///
+/// Read off the layout, not computed, for `ROWS`' reason: the button sits under
+/// whatever the pane draws above it, so a formula here would be a second copy
+/// of `chrome.rs`'s layout free to agree with it while both were wrong.
+/// `the_add_button_is_where_these_tests_think_it_is` is what fails if the pane
+/// grows a row above it and this coordinate lands on nothing.
+const ADD_BUTTON: egui::Pos2 = egui::pos2(100.0, 140.0);
+
+/// The coordinate above is on the button, and not merely on nothing.
+///
+/// The same guard `a_row_is_where_these_tests_think_it_is` exists for, and it
+/// is needed more sharply here: two of the three assertions below are that
+/// pressing this point produces **no** command, which is exactly what pressing
+/// empty space produces. Without this test a coordinate that drifted off the
+/// button would leave those two passing while checking nothing at all, and only
+/// the third would notice.
+#[test]
+fn the_add_button_is_where_these_tests_think_it_is() {
+    let Some(slide) = a_real_slide() else {
+        eprintln!("skipping: data/CMU-1-Small-Region.svs not present");
+        return;
+    };
+    let mut app = App::new(None);
+    app.open_project(project_in("add-button-position", &[("first", true)]));
+    app.open(slide);
+    wait_for_pictures(&mut app);
+    app.addable().expect("a project and a slide not in it");
+
+    let (_, command) = lay_out(&mut app, Some(Gesture::Clicking(ADD_BUTTON)));
+    assert!(
+        matches!(command, chrome::Command::AddToProject),
+        "{ADD_BUTTON:?} is not on the add button any more: {command:?}",
+    );
+}
+
+/// The pane's add button asks for the add, and only when there is one to make.
+///
+/// The button is `add_enabled(app.addable().is_ok(), …)`, so what it refuses is
+/// refused by `egui` rather than by a branch here — but the mutation that
+/// removes the guard is a real one and this catches it. Replacing the predicate
+/// with `true` leaves both silent states below asking for `AddToProject`, which
+/// is `add_to_project` rewriting a project with nothing to add in the first
+/// case and adding a second entry for one image in the second. That is the
+/// difference from `pressing_a_row_asks_for_that_row_and_only_that_row`'s
+/// deliberately weak assertion: there the command was unreachable whatever the
+/// widget did, and here it is one argument away.
+///
+/// Three states of the same button rather than one, because the claim is a
+/// difference between them. That it stays quiet with nothing to add means
+/// nothing unless it speaks when there is something.
+#[test]
+fn the_add_button_asks_only_when_there_is_something_to_add() {
+    let Some(slide) = a_real_slide() else {
+        eprintln!("skipping: data/CMU-1-Small-Region.svs not present");
+        return;
+    };
+
+    // A project open and no slide showing: `addable` says so, and the button
+    // carries that sentence as its disabled hover text.
+    let mut app = App::new(None);
+    app.open_project(project_in("add-button-no-slide", &[("first", true)]));
+    wait_for_pictures(&mut app);
+    let reason = app.addable().expect_err("a project but no slide");
+    let (_, command) = lay_out(&mut app, Some(Gesture::Clicking(ADD_BUTTON)));
+    assert!(
+        matches!(command, chrome::Command::None),
+        "the button asked for the add with nothing to add ({reason}): {command:?}",
+    );
+
+    // A project and a slide it does not hold: the one state that asks.
+    let directory = std::env::temp_dir().join("qupath-rust-test-add-button-live");
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("a directory");
+    let mut app = App::new(None);
+    app.new_project(&directory);
+    app.open(slide);
+    assert!(
+        app.open.is_some(),
+        "the slide did not open: {}",
+        app.message
+    );
+    wait_for_pictures(&mut app);
+    app.addable().expect("a project and a slide not in it");
+    let (_, command) = lay_out(&mut app, Some(Gesture::Clicking(ADD_BUTTON)));
+    assert!(
+        matches!(command, chrome::Command::AddToProject),
+        "the button did not ask for the add: {command:?}",
+    );
+
+    // The same slide, now in the project. Adding it twice is two entries for
+    // one image, which QuPath shows as two rows; the button goes quiet again
+    // without the slide having been closed.
+    app.add_to_project();
+    wait_for_pictures(&mut app);
+    let reason = app
+        .addable()
+        .expect_err("the slide is already in the project");
+    assert!(reason.contains("already in this project"), "{reason}");
+    let (_, command) = lay_out(&mut app, Some(Gesture::Clicking(ADD_BUTTON)));
+    assert!(
+        matches!(command, chrome::Command::None),
+        "the button offered to add a slide the project already holds: {command:?}",
+    );
+}
