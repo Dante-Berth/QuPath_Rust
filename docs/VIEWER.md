@@ -1811,6 +1811,16 @@ no pyramid and QuPath would then read full resolution for every view of a
 null metadata, and `build` then leaves the server with what OpenSlide read.
 That is strictly better information than anything written here.
 
+One half of that has since stopped being true and the conclusion did not move,
+which is worth recording. The pyramid *is* now knowable at the point the entry
+is written — `add_to_project` holds an open `Slide`, and §8.8 has the parity
+recording showing this crate's level table and OpenSlide's agree in every
+field. So "this crate does not know" was a reason of its time, and the block is
+still not written for the reason that outlived it: `setMetadata` **replaces**
+what OpenSlide read, so the cost of the copy going stale is silent wrong pixels
+against a benefit that is one file open. §8.8 has that argument in full, and
+records it as decided rather than pending.
+
 `Entry::microns_per_pixel` went with it, and its going is the point. With no
 metadata block there is nowhere in the format QuPath reads a pixel size from —
 `ImageDataSummary` has no such field either — so it was a struct field that
@@ -3005,9 +3015,18 @@ exactly what the supersede did to them.
 
 ### 8.8 What is still missing
 
-In the order it is worth having.
+In the order it is worth having. Two entries here are neither missing nor done:
+the first is **decided against**, and `data.qpdata` below is **refused**. Both
+keep their place rather than being deleted, because a reader who wonders why the
+block is absent needs to find the reasoning where they look for the gap.
 
-- **Stored image metadata — the comparison is made, and the two agree.**
+- **Stored image metadata — decided: not written, and this is the reasoning.**
+  The comparison this entry waited on is made and the two agree, which is what
+  turned it from an open question into a settled one. It is settled the way it
+  was leaning: the block stays unwritten. Not for want of the information —
+  every field of it is available and checked — but because of what the two
+  sides of the trade actually are, which is below.
+
   `ProjectExport.json` holds QuPath's own block, so "nobody knows what to write"
   was already answered — `levels`, `preferredTileWidth` and
   `preferredTileHeight`, `isRGB`, `channels` as objects, `pixelCalibration` in
@@ -3023,27 +3042,62 @@ In the order it is worth having.
   directories and drops the label, macro and thumbnail; OpenSlide's Aperio driver
   makes its own choice, and the two had never been compared.
 
-  **They have now, and they agree in every field — but the block is still not
-  written**, and that is the one item in this section that is genuinely open
-  rather than done or refused. `parity/java/OpenSlideLevels
+  **They have now, and they agree in every field.** `parity/java/OpenSlideLevels
   .java` opens the slide through `qupath-extension-openslide` and records what
   QuPath ends up with; `parity_openslide_levels.rs` checks it against
   `Slide::levels` on the same file. Level count, every width and height, every
   downsample, the preferred tile size and the pixel size all match, on a
   three-level slide and a single-level one. So the block is now *safe* to write
-  rather than merely tempting, and §8.3's judgement — that QuPath reading the
-  slide itself is better information — stands as a preference rather than as a
-  precaution.
+  rather than merely tempting.
 
-  **Which leaves a decision, not a blocker.** Writing it buys QuPath not opening
-  the slide to learn what it could have been told, at the cost of a second copy
-  of a truth that can go stale — a block written today against a file somebody
-  later replaces is `setMetadata` applying the wrong level table to the right
-  path, and no reader would flag it. The comparison here does not settle that;
-  it only removes the reason not to. Both slides on this machine are Aperio, and
-  the agreement is evidence about the pair `Slide::open` and OpenSlide's Aperio
-  driver, not about every driver OpenSlide has. Whoever writes the block should
-  record a fixture for whatever vendor they write it for first.
+  **What that changed is the standing of §8.3's judgement, not the answer.**
+  Before it, "let QuPath read the slide itself" could have been
+  laziness dressed as principle — there was no measurement saying the two would
+  agree, so declining to write the block was as much precaution as preference.
+  Now there is one, and the judgement stands as a choice made *with* the
+  information rather than for lack of it. That is the whole value of the
+  recording, and it is worth having on its own: an item moves from *blocked* to
+  *decided*, which is a different state from *pending*.
+
+  **And the decision is not to write it, because the two sides of the trade are
+  not the same kind of thing.** What writing it buys is a performance
+  optimisation: QuPath does not open the slide to learn a level table it could
+  have been told. That is one OpenSlide open per entry, on the first open of a
+  project — real, but small, and a cost QuPath's own users already pay on every
+  project QuPath itself writes without a block. What it risks is silent wrong
+  pixels. `setMetadata` **replaces** what OpenSlide read, so a block that goes
+  stale — the file at that path replaced, re-scanned at a different resolution,
+  swapped for a re-export — is the wrong level table applied to the right path,
+  with no reader anywhere to flag it. The optimisation saves milliseconds; the
+  failure corrupts an analysis in a way that surfaces months later, if ever.
+  Those do not trade at par.
+
+  This is §8.3b's rule pointed outward, and it is worth seeing as the same rule.
+  `read` keeps every byte it did not touch precisely because a rebuilt index
+  silently loses what it did not understand. Writing a block whose truth this
+  application cannot later re-verify is that mistake made in the other
+  direction: claiming authority over a fact it will not be around to maintain.
+
+  **Three things would change the answer, and none of them hold here.** *One*, a
+  vendor whose level table QuPath gets wrong — a block would then be a
+  correction rather than a duplicate, buying accuracy instead of speed. Both
+  slides on this machine are Aperio, and the agreement above is evidence about
+  the pair `Slide::open` and OpenSlide's Aperio driver, not about every driver
+  OpenSlide has; whoever revisits this should record a fixture for the vendor
+  they are revisiting it for, before writing anything. *Two*, a path that cannot
+  go stale — content-addressed or immutable storage removes the staleness
+  argument entirely and flips the calculus. *Three*, slides this project can read
+  and QuPath cannot, where a block is the only way QuPath learns anything at all.
+  The JP2K entry is nearly that and backwards: QuPath reads it and this project
+  does not.
+
+  **If the open cost ever actually bites**, on a study with hundreds of entries
+  and someone complaining about first-open latency, the answer is not this block.
+  It is `thumbnail.jpg`, which is already written, and which buys the same "do
+  not re-read every slide" with none of the authority to override. That is
+  strictly the safer half of one optimisation, and the asymmetry is the whole
+  argument: a wrong thumbnail is a wrong *picture*, which a person notices at
+  once. A wrong level table is wrong *pixels*, which nobody does.
 
   **The blocker this entry named for a long time was not real, and the mistake
   is worth keeping.** It read as blocked on "a native library, and there is none

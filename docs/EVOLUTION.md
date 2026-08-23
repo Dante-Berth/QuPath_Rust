@@ -26,6 +26,51 @@ inside one function belongs in that function's doc comment, not here.
 
 ---
 
+## 2026-08 — Removing the reason not to is not a reason to
+
+`PENDING`
+
+`VIEWER.md` §8.8's stored image metadata block sat for a long time as *open*:
+the block was not written, and the stated obstacle was that nobody had compared
+this crate's level table against the one OpenSlide hands QuPath. The comparison
+was then made — `parity/java/OpenSlideLevels.java` against
+`parity_openslide_levels.rs`, two slides, every field agreeing — and the entry
+was rewritten as "a decision, not a blocker", which felt like progress.
+
+It was, but not toward writing the block. The comparison removed the *reason not
+to* and was quietly read as an argument *for*, and those are different things.
+Once the numbers agreed there was a pull to write the block because the work of
+checking had been done — the evidence-gathering became its own justification.
+
+What settles it is that the two sides of the trade are not the same kind of
+thing. Writing the block buys a **performance optimisation**: QuPath does not
+open the slide to learn a level table it could have been told, which is one file
+open per entry on first open of a project. Not writing it avoids **silent wrong
+pixels**: `setMetadata` *replaces* what OpenSlide read, so a block that goes
+stale — the file replaced, re-scanned, swapped for a re-export — is the wrong
+level table applied to the right path, with nothing anywhere to flag it. A
+correctness risk does not trade at par against milliseconds, however carefully
+the milliseconds were measured.
+
+It is also §8.3b's rule pointed outward, which is what makes it recur rather
+than being one decision. `project::read` keeps every byte it did not touch,
+because a rebuilt index silently loses what it did not understand. Writing a
+metadata block is claiming authority over a fact this application will not be
+around to maintain — the same mistake, in the other direction.
+
+**Transferable:** when a check comes back clean, ask what the clean result
+changed. It usually converts *precaution* into *preference*, which is worth
+having — the judgement is now made with the information rather than for lack of
+it — but a preference still needs its own argument. Write the decision down with
+the conditions that would reverse it (§8.8 names three: a vendor QuPath gets
+wrong, a path that cannot go stale, a slide QuPath cannot read at all) so the
+next person inherits a *decided* item rather than a *pending* one and re-opens
+it on evidence rather than on appetite.
+
+**Related:** the entry on blockers below — a note that records a conclusion
+instead of the test behind it. This is the mirror: a measurement that records a
+result without recording what question it answered.
+
 ## 2026-08 — Decompiled bytecode is a source you can misread, not a source of truth
 
 `cd18b4e`
