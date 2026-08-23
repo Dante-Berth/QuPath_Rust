@@ -643,10 +643,11 @@ untouched, so the line is one pixel wide and on the row it was asked for.
 
 `DIVERGENCES.md` D-008 is a claim about *geometry* — nucleus masks against
 smoothed cell polygons — and it had never been looked at directly because the
-vertices did not exist. They exist now. D-008's two halves are still both open,
-and are now both **reachable**: the outlines here are the raw pixel boundary,
-where QuPath interpolates, smooths, interpolates again and simplifies before
-anything sees them.
+vertices did not exist. They exist now, and the smoothing chain that runs over
+them is ported and pinned stage by stage, so **one of D-008's two halves is
+closed**: the smoothed polygon whose `getArea()` the rule takes is computable
+here. What still blocks the entry is **cell expansion alone** — the rule
+compares two *cells*, and there are no cell objects here to smooth.
 
 ### 3.6 An application — **partly done**
 
