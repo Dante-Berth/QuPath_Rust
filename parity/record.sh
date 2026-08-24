@@ -29,6 +29,13 @@ mkdir -p "$fixtures"
 # in `modules` above, so here it does not merely lack an input — it does not
 # compile. It has its own script, record-openslide-levels.sh.
 #
+# MergeAndSplitTile needs a slide and the bioformats extension, and is the most
+# recent thing to walk into the footgun below: it was added to java/ without
+# this line being touched, which would have truncated its own committed 1 MB
+# fixture on the next run here and aborted before the recorders after it. It
+# has its own script, record-merge-tiles.sh. Caught by reading this file rather
+# than by running it, which is the only reason the fixture survived.
+#
 # This list is the whole guard, and it is a footgun: a new recorder in java/ is
 # picked up automatically, so one that needs an input nobody passes empties its
 # own committed fixture on the next run. That is not hypothetical — adding the
@@ -38,7 +45,8 @@ mkdir -p "$fixtures"
 for src in "$root"/parity/java/*.java; do
     case "$(basename "$src")" in
         Bench* | SlideRegion.java | ProjectImport.java | ProjectExport.java \
-            | ProjectOpen.java | OpenSlideLevels.java) continue ;;
+            | ProjectOpen.java | OpenSlideLevels.java \
+            | MergeAndSplitTile.java) continue ;;
     esac
     name="$(basename "$src" .java)"
     # GeoJsonImport reads a file this project wrote rather than computing one,
