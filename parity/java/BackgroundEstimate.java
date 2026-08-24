@@ -122,6 +122,11 @@ public class BackgroundEstimate {
             out.append("\n  ]\n}\n");
             java.nio.file.Files.writeString(java.nio.file.Path.of(outPath), out.toString());
         }
+        // Bio-Formats leaves non-daemon threads behind; without this the
+        // recorder writes its JSON and then hangs. Every other recorder here
+        // that opens a server does the same -- ColourDeconvolution.java has
+        // carried the note since long before this file existed.
+        System.exit(0);
     }
 
     private static String record(ImageServer<BufferedImage> server, ColorDeconvolutionStains stains,

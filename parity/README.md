@@ -38,6 +38,16 @@ start — so the JDK must be installed before the first run. On Debian/Ubuntu,
 The script builds `qupath-core` if needed, resolves its runtime classpath from
 Gradle, runs each recorder in `java/`, and writes `fixtures/<name>.json`.
 
+**A recorder that opens an `ImageServer` must end with `System.exit(0)`.**
+Bio-Formats leaves non-daemon threads behind, so without it the recorder writes
+its JSON and then hangs — the work is finished and complete on disk, and the
+process never returns, so the script sits until whatever `timeout` wraps it
+fires. That reads as a failed recording and is not one:
+`record-merge-tiles.sh` came back at exit 143 once for exactly this reason and
+was misdiagnosed as a harness artefact. Fourteen recorders here already do it;
+`ColourDeconvolution.java` has carried the note the longest. With the call, both
+slide recorders return in about four seconds.
+
 A recorder that needs a slide must be excluded from `record.sh` and driven from
 `record-slide.sh` instead. `record.sh` truncates its target fixture before
 invoking a recorder, so running one there that cannot start does not merely
