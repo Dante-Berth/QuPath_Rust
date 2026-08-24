@@ -1310,6 +1310,42 @@ fn harvest(
     }
 }
 
+/// Runs the background estimate and its subtraction over one image, for parity
+/// tests, through the code the pipeline itself runs.
+///
+/// `density` is QuPath's `fpLoG` at the point `estimateBackground` is called —
+/// the deconvolved optical density — and is left holding `fpLoG` after
+/// `Blitter.SUBTRACT`, which is also what QuPath copies into `ipToMeasure`. The
+/// returned vector is `bpBackgroundMask`: empty where QuPath would have left it
+/// null, and 0/1 per pixel otherwise.
+///
+/// **A seam into the real path, not a second copy of it.** The stage is four
+/// operations whose composition is the thing worth checking — an erosion, a
+/// mask above `max_background` dilated by twice the radius, a geodesic
+/// dilation, and a subtraction — and each of the four already has its own
+/// fixture on synthetic input. What has never been checked is the composition
+/// on real tissue, which is where `DIVERGENCES.md` D-009's ladder now points.
+/// Reproducing the four calls in a test would check a transcription of this
+/// function rather than this function.
+///
+/// Public because a test in `tests/` cannot reach a private item, and reaching
+/// it through [`run`] would mean comparing an image nothing returns.
+#[must_use]
+pub fn background_for_parity(density: &mut [f32], width: usize, params: Params) -> Vec<f32> {
+    assert!(width > 0, "width must be non-zero");
+    assert_eq!(density.len() % width, 0, "width must divide the image");
+
+    let mut scratch = Scratch::new();
+    scratch.density.extend_from_slice(density);
+    let masked = subtract_background(&mut scratch, width, params, &StageClocks::default());
+    density.copy_from_slice(&scratch.density);
+    if masked {
+        scratch.background_mask
+    } else {
+        Vec::new()
+    }
+}
+
 /// Estimates the background and subtracts it from `scratch.density`, in place.
 ///
 /// This is `estimateBackground` followed by `Blitter.SUBTRACT`, which together

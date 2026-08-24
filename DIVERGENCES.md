@@ -463,10 +463,38 @@ things, compared, and the number that came out looked like a finding. Restoring
 the rung needs QuPath's count after `refineBoundary`, which the recorder does
 not yet write.
 
-**Status:** the merge and the split are **exonerated**, pixel for pixel, on real
-tissue in both regimes. Upstream of them the ladder is wrong at the first rung
-and worsens sharply across the mean-intensity filter, which points at the
-**background estimate and its subtraction** — a suspect, not a conclusion, and
-one carrying the caveat above. Do not treat the two dense regions' 1.012–1.018
-as the project's parity figure any more than the old 1.035x — see
-`docs/MEMO.md` §2 for the pooled number.
+**The background estimate was then the named suspect, and it is not the cause
+either.** `parity/java/BackgroundEstimate.java` records `estimateBackground` and
+the `Blitter.SUBTRACT` after it over seven 160x160 crops of real tissue, as an
+input image and an output image, floats by their bits.
+`parity_background_estimate.rs` feeds the recorded input to this pipeline's own
+stage — through `background_for_parity`, a seam into the code `run` executes,
+not a transcription of it — and compares. **Every pixel of every crop matches**,
+including the two recorded at a lowered `maxBackground` so the data-dependent
+branch is entered.
+
+The stage was worth suspecting for a reason that still holds: it is four
+operations, `RankFilterMinMax.json` pins the erosion on 42 synthetic cases and
+`RegionalMaxima.json` pins the geodesic dilation on 24, and *nothing pinned the
+composition on tissue* — the same gap the merge and the split had. It just did
+not contain the bug. Confirmed by mutation: a 1% smaller erosion radius fails on
+4.96% of pixels, and skipping the `NEG_INFINITY` assignment fails on 70.93%.
+
+Two details inside the masked branch are **not** pinned by these crops and are
+labelled in the test rather than left reading as stronger. Narrowing the mask's
+dilation from `radius * 2.0` to `radius * 1.5` leaves the test passing, because
+at the limits recorded the mask saturates its crop and both radii cover the same
+set; turning `>` into `>=` also passes, because no pixel sits exactly on the
+limit. Pinning the radius needs a crop whose mask is a *small isolated* blob.
+
+**Status:** three stages are now ruled out — the merge, the shape split, and the
+background estimate with its subtraction — each pixel-for-pixel on real tissue.
+What remains between the deconvolution and the first rung of the ladder is the
+**blur, the Laplacian, the regional maxima, the labelling and the flood**, plus
+the deconvolution itself and the decode under it (D-004 puts slide pixels within
+one channel step of QuPath's, which has never been shown to be harmless). Each
+has a synthetic fixture and none has one on tissue, which is now the pattern
+worth trusting: this project's stages agree on constructed input and the
+question is always what they do on real input. Do not treat the two dense
+regions' 1.012–1.018 as the project's parity figure any more than the old
+1.035x — see `docs/MEMO.md` §2 for the pooled number.

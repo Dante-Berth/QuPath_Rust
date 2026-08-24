@@ -106,6 +106,30 @@ then rest on crops that were never in the regime it claims. So it also checks
 that the sparse crops really do bridge more and split more, loosely enough that
 a re-recording may move the ratios and tightly enough that it may not lose them.
 
+## The background estimate, on real tissue
+
+Same shape and the same reason as the merge and the split above — a stage whose
+parts are pinned on synthetic input and whose *composition* was not pinned on
+tissue:
+
+```bash
+./parity/record-background.sh                        # needs a slide and a JVM
+cargo test -p qupath-pipeline --test parity_background_estimate
+```
+
+Seven crops: four ordinary, one of glass, and two recorded at a **lowered
+`maxBackground`**. That last pair is not tuning, it is branch coverage. The mask
+fires where the *eroded* optical density is still above the limit — dense stain,
+a fold, ink — and at QuPath's default of 2.0 it fires nowhere on this slide, so
+five crops at the default record one branch of a two-branch stage. The limit is
+carried per crop and the test applies the recorded one.
+
+The first version of this fixture got both of those wrong and both were caught
+by its own assertions: it asked for 320-pixel crops on the assumption that
+detection downsamples by two — it does not on this slide, and the fixture came
+out at 12 MB — and it added a crop of *glass* in the belief that the limit fires
+where the image is bright. Optical density runs the other way.
+
 ## Reported, not asserted
 
 Unlike the stage fixtures, `CellCounts.json` is **not** asserted by a Rust test. There is

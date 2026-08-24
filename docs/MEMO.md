@@ -128,11 +128,20 @@ keeps 0.530/0.659. The filter itself is pinned, so what differs is what it
 measures: `ipToMeasure`, the **background-subtracted image**. A background
 estimate that differs moves every candidate's mean at once and in one direction.
 
-**With one caveat that keeps it a suspect rather than a conclusion:** at 320x320
+**With one caveat that kept it a suspect rather than a conclusion:** at 320x320
 the sparse and dense ratios are nearly identical, where whole regions have them
 at 1.012 against 1.113. These crops do not reproduce the density regime, so what
-is localised here is a stage-level difference at this crop size, not yet shown to
-be the same effect. See D-009.
+is localised there is a stage-level difference at that crop size, not shown to be
+the same effect.
+
+**And the suspect was wrong.** `BackgroundEstimate.json` records the stage over
+seven crops of real tissue as an input image and an output image, and this
+pipeline reproduces it **bit for bit on every pixel of every crop**, both
+branches. Three stages are now ruled out this way — the merge, the split, and
+the background estimate — and what is left between the deconvolution and the
+ladder's first rung is the blur, the Laplacian, the regional maxima, the
+labelling and the flood, plus the deconvolution and the decode under it. Each
+has a synthetic fixture and none has one on tissue. See D-009.
 
 **So the honest statement is: 1.065x pooled, 1.012–1.129 by region, direction
 always the same (this over-counts), cause identified as density-dependent, not

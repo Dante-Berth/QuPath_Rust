@@ -36,6 +36,10 @@ mkdir -p "$fixtures"
 # has its own script, record-merge-tiles.sh. Caught by reading this file rather
 # than by running it, which is the only reason the fixture survived.
 #
+# BackgroundEstimate is the same: a slide, the bioformats extension, and its own
+# script, record-background.sh. Added to this line in the same commit that added
+# the recorder, which is the habit the entry above exists to create.
+#
 # This list is the whole guard, and it is a footgun: a new recorder in java/ is
 # picked up automatically, so one that needs an input nobody passes empties its
 # own committed fixture on the next run. That is not hypothetical — adding the
@@ -46,7 +50,7 @@ for src in "$root"/parity/java/*.java; do
     case "$(basename "$src")" in
         Bench* | SlideRegion.java | ProjectImport.java | ProjectExport.java \
             | ProjectOpen.java | OpenSlideLevels.java \
-            | MergeAndSplitTile.java) continue ;;
+            | MergeAndSplitTile.java | BackgroundEstimate.java) continue ;;
     esac
     name="$(basename "$src" .java)"
     # GeoJsonImport reads a file this project wrote rather than computing one,
