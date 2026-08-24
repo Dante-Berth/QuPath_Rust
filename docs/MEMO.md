@@ -119,6 +119,21 @@ of them — the background estimate and its subtraction, the LoG, the regional
 maxima, the labelling and the flood — with the mean-intensity filter the least
 likely, being the one link already pinned (`ObjectFilters.json`, 17 images).
 
+**Walking that ladder names a suspect.** `--example stage_ladder` prints both
+sides' counts at three boundaries over those crops. It is **already wrong at the
+first rung** — candidates, before the intensity filter and well before the merge
+(1.058 sparse, 1.079 dense) — and the intensity filter then roughly doubles it
+(1.270, 1.299), because QuPath keeps 0.441/0.547 of its candidates where this
+keeps 0.530/0.659. The filter itself is pinned, so what differs is what it
+measures: `ipToMeasure`, the **background-subtracted image**. A background
+estimate that differs moves every candidate's mean at once and in one direction.
+
+**With one caveat that keeps it a suspect rather than a conclusion:** at 320x320
+the sparse and dense ratios are nearly identical, where whole regions have them
+at 1.012 against 1.113. These crops do not reproduce the density regime, so what
+is localised here is a stage-level difference at this crop size, not yet shown to
+be the same effect. See D-009.
+
 **So the honest statement is: 1.065x pooled, 1.012–1.129 by region, direction
 always the same (this over-counts), cause identified as density-dependent, not
 primarily D-008, and not the merge or the split either.** That is a weaker claim

@@ -424,7 +424,49 @@ the flood. The mean-intensity filter is the one link there already pinned
 natural next fixture is the same crops recorded one stage earlier — QuPath's
 mask *entering* the merge against this port's, on identical deconvolved pixels.
 
+**Walking the ladder upstream puts it above the merge, and names a suspect.**
+`cargo run --release -p qupath-pipeline --example stage_ladder` prints both
+pipelines' object counts at three stage boundaries over those same eight crops —
+QuPath's half is already in the fixture, and `Outcome` carries this pipeline's.
+
+| rung | QuPath sparse → here | QuPath dense → here |
+| --- | ---: | ---: |
+| candidates (after the flood) | 1526 → 1614, **1.058** | 1912 → 2063, **1.079** |
+| after the mean-intensity filter | 673 → 855, **1.270** | 1046 → 1359, **1.299** |
+| after the merge | 286 → 360, **1.259** | 618 → 743, **1.202** |
+
+Two things fall out. The ladder is **already wrong at the first rung**, before
+the intensity filter and well before the merge, so the divergence starts at or
+above the labelling and the flood. And the **intensity filter roughly doubles
+it**: QuPath keeps 0.441 and 0.547 of its candidates where this pipeline keeps
+0.530 and 0.659. That is not the filter itself — `ObjectFilters.json` pins it on
+17 recorded images and it passes — it is what the filter *measures*.
+`ipToMeasure` is the background-subtracted image, so a background estimate that
+differs moves every candidate's mean at once, in one direction, which is the
+shape of the thing being looked for. The background stage is also the pipeline's
+largest by time and the one carrying the morphological reconstruction.
+
+**But these crops do not reproduce the density regime, and that is the caveat
+that matters.** The sparse and dense ratios here are nearly identical
+(1.058/1.079, then 1.270/1.299) where the whole-region measurement has them at
+1.012 against 1.113. At 320x320 the background estimate is computed over a field
+an order of magnitude smaller than a production tile, so this localises a
+stage-level difference *present at this crop size* and cannot yet be said to be
+the same effect as the end-to-end gap. One crop, `dense-1`, is a further outlier
+at exactly 2.000 on the middle rung against 1.081–1.229 for its neighbours.
+
+**A fourth rung was printed and withdrawn, and the mistake is the same one this
+entry already records.** Pairing `Outcome::nuclei` with the fixture's `objects`
+gives 1.77–1.89x, which reads as a spectacular divergence; `nuclei` is counted
+after the boundary refinement and the recorder stops at the split. Two different
+things, compared, and the number that came out looked like a finding. Restoring
+the rung needs QuPath's count after `refineBoundary`, which the recorder does
+not yet write.
+
 **Status:** the merge and the split are **exonerated**, pixel for pixel, on real
-tissue in both regimes. The gap is upstream of them and is not yet located. Do
-not treat the two dense regions' 1.012–1.018 as the project's parity figure any
-more than the old 1.035x — see `docs/MEMO.md` §2 for the pooled number.
+tissue in both regimes. Upstream of them the ladder is wrong at the first rung
+and worsens sharply across the mean-intensity filter, which points at the
+**background estimate and its subtraction** — a suspect, not a conclusion, and
+one carrying the caveat above. Do not treat the two dense regions' 1.012–1.018
+as the project's parity figure any more than the old 1.035x — see
+`docs/MEMO.md` §2 for the pooled number.
