@@ -150,7 +150,9 @@ Charts regenerate with `python3 docs/benchmarks/plot.py`; every figure in them
 is copied from a recording in [docs/benchmarks/](docs/benchmarks/) or
 [docs/profiles/](docs/profiles/). Component speedups and what they are worth in
 place are in [docs/benchmarks/README.md](docs/benchmarks/README.md); what comes
-next is in [docs/ROADMAP.md](docs/ROADMAP.md). **New here? Start with
+next is in [docs/ROADMAP.md](docs/ROADMAP.md). How the fixtures every parity
+claim rests on are recorded — and which recorders need a slide, which is not a
+detail — is in [parity/README.md](parity/README.md). **New here? Start with
 [docs/MEMO.md](docs/MEMO.md)** — what is finished, what is genuinely faster, and
 what to distrust, in one page.
 
