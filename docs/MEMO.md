@@ -99,18 +99,31 @@ images and they pass, which means the disagreement is in what reaches them.
 **Narrowed further in D-009**, on the three single-tile regions where no seam
 resolution happens at all. It is not the background mask (never fires), not
 object scale (127.2, 127.2, 127.8 px/object), and not over-large blobs
-(`max_area` rejects zero). It is the **merge and the shape split**, which move
-together and only on the clumped region: the merge keeps 0.557/0.560 of its
-input on the dense regions against **0.439** on the sparse one, and the split
-recovers 1.57x/1.57x against **2.16x**. Net through the pair is 0.875, 0.881,
-**0.948** — the split does not fully undo the extra merging. What would settle
-it is a fixture recording QuPath's counts at those two boundaries on a real
-clumped tile, which `MergeAndSplit.json` does not have.
+(`max_area` rejects zero). What moves with the gap is the **merge and the shape
+split**, together and only on the clumped region: the merge keeps 0.557/0.560 of
+its input on the dense regions against **0.439** on the sparse one, and the split
+recovers 1.57x/1.57x against **2.16x**.
+
+**And that pair has now been ruled out.** `MergeAndSplitTile.json` records
+QuPath's merge and split over eight crops of real CMU-1 tissue, four from the
+region that disagrees and four from one that agrees; given the same input mask
+this port reproduces the merged mask, the segmentation and the split **pixel for
+pixel on all eight**, with the object counts matching on each. The crops carry
+the regional signature — keep 0.425 sparse against 0.591 dense, recover 1.65x
+against 1.24x — so the two stages do visibly more work on clumped tissue and do
+QuPath's work while doing it. Confirmed by three mutations, each caught.
+
+So the merge and the split are where the gap becomes **visible**, not where it
+is **made**: their ratios move because their input does. The search is upstream
+of them — the background estimate and its subtraction, the LoG, the regional
+maxima, the labelling and the flood — with the mean-intensity filter the least
+likely, being the one link already pinned (`ObjectFilters.json`, 17 images).
 
 **So the honest statement is: 1.065x pooled, 1.012–1.129 by region, direction
-always the same (this over-counts), cause identified as density-dependent and
-not primarily D-008.** That is a weaker claim than the file used to make and a
-better-founded one.
+always the same (this over-counts), cause identified as density-dependent, not
+primarily D-008, and not the merge or the split either.** That is a weaker claim
+than the file used to make and a better-founded one, and each narrowing has cost
+a hypothesis rather than confirmed one.
 
 **The time**: 70.1 Mpx/s on a 9000x9000 region, 25 tiles on 20 threads — a grid
 large enough to fill the pool. That is **down** from 80.4 and it is not a

@@ -332,11 +332,15 @@ to move the ratio by at most the 6.0% of objects the seam resolution touches,
 currently unexplained divergence, and is the larger half. See `docs/MEMO.md` §2
 and D-009.
 
-## D-009 — The count gap concentrates in the merge and the shape split, on clumped tissue
+## D-009 — The count gap shows in the merge and the shape split, and is not made there
 
 **Not a decided divergence.** This is the narrowing of the density-dependent
 remainder D-008 leaves open, recorded because the search space it rules out is
-worth more than the answer it does not yet reach.
+worth more than the answer it does not yet reach. It has since ruled out one
+more thing than it set out to: the pair it named as the likely cause is now
+pinned against QuPath on real clumped tissue and matches exactly, so the entry
+below is kept in the order it was learnt — the measurement, the hypothesis it
+suggested, and the fixture that refuted it.
 
 **The measurement.** Three regions of CMU-1 small enough to be a *single tile*,
 so no seams exist and D-008 cannot apply. Stage-by-stage object counts:
@@ -381,11 +385,46 @@ difference from `MaximumFinder` in where the split lands is amplified. QuPath's
 `toWatershed` and this `Segmenter` agreeing on isolated blobs but diverging on
 heavily-merged ones would produce exactly this signature.
 
-**What would settle it:** a fixture recording QuPath's object count *at the
-merge and split boundaries* rather than only end to end, on a clumped tile.
-`MergeAndSplit.json` pins the pair on synthetic shapes and passes; what it does
-not have is a real clumped tile where the two stages do most of their work.
+**That fixture has now been recorded, and it rules the pair out.**
+`parity/java/MergeAndSplitTile.java` runs QuPath's chain over eight 319x319
+crops of real CMU-1 tissue — four from the region that disagrees at 1.1130, four
+from one that agrees at 1.0177 — and records the merge's input, the merged mask,
+the segmentation and the split, at the point in `doDetection` where they run.
+`parity_merge_and_split_tile.rs` gives this port the *same* input mask and
+compares every pixel.
 
-**Status:** narrowed, not explained. Do not treat the two dense regions'
-1.012–1.018 as the project's parity figure any more than the old 1.035x — see
-`docs/MEMO.md` §2 for the pooled number.
+**They agree, everywhere, in both regimes.** Not the counts alone: the merged
+mask, `MaximumFinder`'s segmentation and the mask `toWatershed` leaves are
+identical pixel for pixel on all eight crops, and the object count after the
+split matches on each. The crops reproduce the regional signature that motivated
+the search — pooled, the merge keeps **0.425** of its input on the sparse crops
+against **0.591** on the dense ones, and the split recovers **1.65x** against
+**1.24x**, which is the same direction and nearly the same size as the 0.439 /
+0.557 and 2.16x / 1.57x measured across whole regions. So the two stages do
+visibly more work on clumped tissue, and **they do QuPath's work**: the extra
+merging and the extra splitting are both reproduced exactly.
+
+Checked by mutation rather than assumed, three ways, each caught on the most
+clumped crop: dropping the hole fill (246 pixels), narrowing the dilation to
+five neighbours (97 pixels), and moving the maximum finder's tolerance from 0.5
+to 0.6 (55 pixels).
+
+**So the hypothesis this entry recorded is wrong, and that is the finding.** The
+reasoning was that `toWatershed` and this `Segmenter` might agree on isolated
+blobs and diverge on heavily-merged ones. They do not diverge on either. What
+the measurement above actually shows is that the merge and the split are where
+the gap becomes *visible* — the two stages whose ratios move with it — not where
+it is *made*. A stage that faithfully processes a different input produces
+different output, and the ratios move because the input does.
+
+**Which puts the search upstream**, on what reaches the merge: the background
+estimate and its subtraction, the LoG, the regional maxima, the labelling and
+the flood. The mean-intensity filter is the one link there already pinned
+(`ObjectFilters.json`, 17 images), so it is the least likely of them. The
+natural next fixture is the same crops recorded one stage earlier — QuPath's
+mask *entering* the merge against this port's, on identical deconvolved pixels.
+
+**Status:** the merge and the split are **exonerated**, pixel for pixel, on real
+tissue in both regimes. The gap is upstream of them and is not yet located. Do
+not treat the two dense regions' 1.012–1.018 as the project's parity figure any
+more than the old 1.035x — see `docs/MEMO.md` §2 for the pooled number.

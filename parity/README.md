@@ -68,7 +68,47 @@ what showed that `DIVERGENCES.md` D-008, the standing explanation for the gap,
 does not account for most of it. A control that cannot come out differently from
 the treatment is not a control; these can, and did.
 
-Unlike the stage fixtures, this one is **not** asserted by a Rust test. There is
+## The merge and the split, on real tissue
+
+`MergeAndSplit.json` pins those two stages on hand-built shapes and on random
+fields, and passes. `MergeAndSplitTile.json` pins them on tissue:
+
+```bash
+./parity/record-merge-tiles.sh                       # needs a slide and a JVM
+cargo test -p qupath-pipeline --test parity_merge_and_split_tile
+```
+
+Two fixtures for one pair of stages, because the first has no case in the regime
+that mattered. D-009 found the count gap tracking density, and the merge and the
+split as the two stages whose ratios moved with it — on clumped tissue the merge
+bridges about twice as much into shared blobs and the split cuts about twice as
+much back apart. Nothing in `MergeAndSplit.json` is clumped: its largest case is
+96x96 of blurred noise, and the rest are disks, bars and rings.
+
+The crops come from **both** regions D-009 measured — four where QuPath and this
+port disagree by 11.3% and four where they agree to 1.8%. A recording made only
+where two things diverge cannot say whether the stage is wrong or the input is
+unusual. Within each region the offsets are a fixed grid, not a choice: picking
+the clumpiest-looking crop by eye would be choosing the sample most likely to
+show the effect being looked for, which is the same failure as guessing regions
+by eye, one level in.
+
+The masks are **bit-packed**, one bit per pixel as hex, because all five are
+binary and the same eight crops written as decimal arrays would be a 40 MB
+fixture rather than a 1 MB one. The EDM is deliberately not recorded: it is the
+one floating-point checkpoint, `MergeAndSplit.json` pins it bit-for-bit on twelve
+cases, and what real tissue adds is scale and clumping rather than a new path
+through `makeFloatEDM`.
+
+The test asserts the regime as well as the pixels. Every comparison in it would
+pass just as well on eight crops of the same flat tissue — and the finding would
+then rest on crops that were never in the regime it claims. So it also checks
+that the sparse crops really do bridge more and split more, loosely enough that
+a re-recording may move the ratios and tightly enough that it may not lose them.
+
+## Reported, not asserted
+
+Unlike the stage fixtures, `CellCounts.json` is **not** asserted by a Rust test. There is
 no tolerance at which "the cell count matches" is currently true — it is 1.065x
 pooled and up to 1.129x by region — and writing a test with a 1.15x bound would
 be picking a number to pass rather than to measure. It is a reported comparison
