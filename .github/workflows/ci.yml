@@ -1,0 +1,130 @@
+# Parity is this project's test suite, and until now nothing ran it but a person
+# on one machine. This runs it on every push and pull request.
+#
+# The one thing this workflow cannot do is prove the suite ran in full. Slides
+# are untracked (docs/test-data.md) and the benchmark slide is 177 MB, so tests
+# that need it skip — and a skipped test in Rust reports `ok`. The last step
+# therefore re-runs the suite with QUPATH_RUST_REQUIRE_DATA set and reports what
+# that turns red, so the job summary says which tests a green run did not
+# exercise instead of leaving the total to imply it did.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch makes this run's answer irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Exact byte count from docs/test-data.md, checked against Content-Length on
+  # the server. A truncated download fails here rather than as a confusing
+  # decode error inside a test.
+  CI_SLIDE_BYTES: "1938955"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # qupath-app pulls winit, softbuffer and rfd's xdg-portal backend, none of
+      # which build on a bare runner. No GTK: rfd is built with
+      # default-features = false and the xdg-portal backend, on purpose.
+      - name: System libraries for the windowing crates
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libx11-dev libxkbcommon-dev libwayland-dev \
+            libxcursor-dev libxrandr-dev libxi-dev
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustc --version && cargo --version
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # Cheapest first, and it needs no build at all.
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # 1.9 MB and CC0, which is why docs/test-data.md marks this one "small
+      # enough to fetch on every run". It is the only slide CI has; the 177 MB
+      # benchmark slide is not fetched, and the tests needing it skip.
+      - name: Cache the CI slide
+        id: slide
+        uses: actions/cache@v4
+        with:
+          path: data/CMU-1-Small-Region.svs
+          key: cmu-1-small-region-${{ env.CI_SLIDE_BYTES }}
+
+      - name: Fetch the CI slide
+        if: steps.slide.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p data
+          base=https://openslide.cs.cmu.edu/download/openslide-testdata/Aperio
+          curl -fsSL --retry 3 --retry-delay 5 \
+            -o data/CMU-1-Small-Region.svs "$base/CMU-1-Small-Region.svs"
+          size=$(stat -c%s data/CMU-1-Small-Region.svs)
+          if [ "$size" != "$CI_SLIDE_BYTES" ]; then
+            echo "::error::expected $CI_SLIDE_BYTES bytes, got $size — truncated download"
+            exit 1
+          fi
+
+      - name: Tests
+        run: cargo test --workspace --release --locked
+
+      # The witness. This pass is expected to fail — the benchmark slide is not
+      # here — so its exit status is discarded and only what it names is kept.
+      # Without this the job above is green in a checkout that skipped a dozen
+      # tests, which is exactly what green is not supposed to mean.
+      - name: Say which tests no input was available for
+        if: always()
+        run: |
+          QUPATH_RUST_REQUIRE_DATA=1 cargo test --workspace --release --locked \
+            > required.log 2>&1 || true
+          {
+            echo "### Coverage of this run"
+            echo
+            if grep -q 'it skipped:' required.log; then
+              echo "These tests did **not** run — the input they need is not on the runner:"
+              echo
+              echo '```'
+              sed -n '/^failures:$/,/^$/p' required.log \
+                | grep -E '^[[:space:]]{4}[a-z]' | sort -u
+              echo '```'
+              echo
+              echo "What they wanted:"
+              echo
+              echo '```'
+              sed -n 's/.*it skipped: \(.*\)\. Fetch the missing.*/  \1/p' required.log \
+                | sort | uniq -c | sort -rn
+              echo '```'
+              echo
+              echo "See \`docs/test-data.md\`. The 177 MB benchmark slide is deliberately"
+              echo "not fetched here; \`CMU-1-Small-Region.svs\` is."
+            else
+              echo "Every test ran. Nothing skipped for want of a slide."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

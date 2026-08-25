@@ -1,7 +1,14 @@
 # QuPath_Rust
 
+[![CI](https://github.com/Dante-Berth/QuPath_Rust/actions/workflows/ci.yml/badge.svg)](https://github.com/Dante-Berth/QuPath_Rust/actions/workflows/ci.yml)
+
 An accelerated Rust implementation of parts of [QuPath](https://qupath.github.io/),
 reproducing its logic with a data layout suited to bulk analysis.
+
+The badge covers formatting, clippy, and the suite as it runs on a machine with
+one 1.9 MB slide. It does not cover the tests needing the 177 MB benchmark
+slide — each run's job summary names those explicitly rather than letting the
+total imply they passed. See [Building](#building).
 
 ## Licence
 
