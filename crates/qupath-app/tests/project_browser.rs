@@ -17,6 +17,10 @@ use qupath_app::chrome;
 use qupath_app::state::App;
 use qupath_viewer::project::{self, Entry, Timestamps};
 
+mod gestures;
+
+use gestures::{Gesture, lay_out};
+
 /// Writes a project into a fresh directory under the temporary one and returns
 /// its `.qpproj`.
 ///
@@ -879,8 +883,8 @@ fn a_project_with_an_unopenable_row(name: &str) -> PathBuf {
     project
 }
 
-/// The y each row is laid out at, in points, in the 1100×760 pane these tests
-/// use.
+/// The y each row is laid out at, in points, in the [`gestures::WINDOW`] these
+/// tests lay the interface out in.
 ///
 /// Read off the layout rather than computed: a row's height depends on the
 /// picture beside it and on whether its name wraps, so a formula here would be
@@ -889,95 +893,6 @@ fn a_project_with_an_unopenable_row(name: &str) -> PathBuf {
 /// these still land on rows, so a layout change fails there rather than
 /// quietly turning every gesture below into a press on nothing.
 const ROWS: [f32; 3] = [281.0, 335.0, 389.0];
-
-/// What the pointer does before the layout is read.
-///
-/// Two gestures rather than a position and a flag, for `examples/chrome`'s
-/// reason: a hover is a `PointerMoved` and nothing else, and a click is that
-/// move plus a press and a release. They are not one gesture with a modifier.
-#[derive(Clone, Copy)]
-enum Gesture {
-    /// The pointer is moved here and left there.
-    Hovering(egui::Pos2),
-    /// The pointer is moved here, pressed and released.
-    Clicking(egui::Pos2),
-}
-
-impl Gesture {
-    /// Where the pointer ends up.
-    fn at(self) -> egui::Pos2 {
-        match self {
-            Self::Hovering(at) | Self::Clicking(at) => at,
-        }
-    }
-}
-
-/// Lays the browser out with `gesture` delivered, and returns what the frame
-/// drew and what it asked for.
-///
-/// Six frames and time between them, for `examples/chrome`'s reason: `egui`
-/// interpolates a widget towards its hovered colour rather than switching to
-/// it, so the frame the pointer arrives on has the fill part of the way in and
-/// a caller reading that frame would be reading an animation a fifth of the way
-/// through rather than a colour.
-///
-/// The gesture is delivered on **every** frame after the first rather than on
-/// one of them. For a hover that is what holding the pointer still means; for a
-/// click it means the press is repeated, which is deliberate — `Response
-/// ::clicked()` is true on the frame the release lands, and a click delivered
-/// once on frame 1 would have its command overwritten by the five frames after
-/// it. Repeating means the returned command is the one the *settled* layout
-/// produces, which is the layout everything else here is read off.
-///
-/// Returns the last frame's shapes and the last frame's command, so a caller
-/// can assert on what was drawn and on what pressing it did without laying the
-/// pane out twice and hoping the two agree.
-fn lay_out(
-    app: &mut App,
-    gesture: Option<Gesture>,
-) -> (Vec<egui::epaint::ClippedShape>, chrome::Command) {
-    let context = egui::Context::default();
-    chrome::style(&context);
-    let mut input = egui::RawInput {
-        screen_rect: Some(egui::Rect::from_min_size(
-            egui::pos2(0.0, 0.0),
-            egui::vec2(1100.0, 760.0),
-        )),
-        predicted_dt: 1.0 / 20.0,
-        ..Default::default()
-    };
-
-    let mut last = None;
-    for frame in 0..6 {
-        input.events.clear();
-        // Not on the first, which is `egui` still deciding where things are: a
-        // press or a hover has to land on a widget that already has a
-        // rectangle. The same reason `examples/chrome` clicks on the second.
-        if let Some(gesture) = gesture.filter(|_| frame > 0) {
-            input.events.push(egui::Event::PointerMoved(gesture.at()));
-            if let Gesture::Clicking(at) = gesture {
-                input.events.push(egui::Event::PointerButton {
-                    pos: at,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    modifiers: egui::Modifiers::NONE,
-                });
-                input.events.push(egui::Event::PointerButton {
-                    pos: at,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers: egui::Modifiers::NONE,
-                });
-            }
-        }
-        let mut command = chrome::Command::None;
-        let output = context.run(input.clone(), |context| {
-            command = chrome::draw(context, app).0;
-        });
-        last = Some((output.shapes, command));
-    }
-    last.expect("a settled frame")
-}
 
 /// The fill colours of the full-width rounded rectangles the rows draw.
 ///
