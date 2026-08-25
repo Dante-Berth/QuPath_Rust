@@ -58,9 +58,8 @@ magnitude as the 1,712 resolved away here. That is the first place to look for
 the remainder, not the last.
 
 **The end-to-end time is still not comparable to QuPath's 15.87 s.** What
-separates the two is now the tail — boundary smoothing, cell expansion, the
-measurements — none of which changes how many objects there are, and all of
-which QuPath spends time on.
+separates the two is now the tail — the measurements — which does not change how
+many objects there are, and which QuPath spends time on.
 
 ### The correction this file owes: §2's plan was wrong in the same way §1.5's was
 
@@ -1472,8 +1471,8 @@ the third stage running.
   region, same default parameters, `region` against the 15.87 s in
   `docs/profiles/README.md`: **3.359 s on one thread, 1.019 s on twenty.** That
   is 4.7x and 15.6x. The comparison is generous to us — QuPath's 15.87 s
-  includes the tail this pipeline has not ported (boundary smoothing, cell expansion,
-  the measurements) — so the honest claim is "decisively faster, by a factor
+  includes the tail this pipeline has not ported (the measurements) — so the
+  honest claim is "decisively faster, by a factor
   this measurement puts at most at 4.7x single-threaded". It is not close, and
   no session needs to open by asking whether we are ahead.
 - **Wall clock on the profiled region is flat from six threads, and that is a

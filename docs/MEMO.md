@@ -44,8 +44,8 @@ overlap resolution, the merge, the Euclidean distance map, `MaximumFinder`'s
 segmentation, `refineBoundary`, and the area filter.
 
 **What is missing is the tail**, and none of it changes how many objects there
-are: cell expansion and the measurements. The ROI vertices and the boundary
-smoothing over them were on that list and are now ported, pinned against
+are: the measurements. The ROI vertices, the boundary smoothing over them and the
+cell expansion were the rest of that list and are now ported, pinned against
 ImageJ's Wand and against QuPath's own chain stage by stage.
 
 **The count.** This was quoted for several sessions as 26,647 objects against
@@ -168,9 +168,9 @@ tissue in it, and only the ratio within one region means anything.
 Read the single-threaded row, not the twenty-threaded one, when the question is
 whether the port is faster: QuPath's profile was taken single-threaded, and
 QuPath parallelises across tiles in real use. And read both as generous to us,
-because QuPath's 15.87 s includes the tail this pipeline has not ported — ROI
-vertices, cell expansion, the measurements. The gap is decisive either way; what
-is not yet measurable is its exact size.
+because QuPath's 15.87 s includes the tail this pipeline has not ported — the
+measurements. The gap is decisive either way; what is not yet measurable is its
+exact size.
 
 ---
 

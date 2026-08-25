@@ -46,11 +46,12 @@ pinned against output recorded from QuPath itself, and running on QuPath's own
 tile grid: background subtraction by reconstruction, the Laplacian of Gaussian,
 the regional maxima, the labelling, the flood, the region tracing, the
 mean-intensity filter, the merge, the shape split, `refineBoundary` and the area
-filter. What is missing is the tail — cell expansion and the measurements —
-neither of which changes how many objects there are. The ROI **vertices** and
-the **boundary smoothing** over them were part of that tail and are now ported:
-the contour against ImageJ's own Wand over nine cases, and `smoothBoundaries`'
-four stages against QuPath over twelve more, every intermediate pinned.
+filter. What is missing is the tail — the measurements — which does not change
+how many objects there are. The ROI **vertices**, the **boundary smoothing** over
+them and the **cell expansion** were the rest of that tail and are now ported: the
+contour against ImageJ's own Wand over nine cases, `smoothBoundaries`' four stages
+against QuPath over twelve more, and the expansion's EDM/negate/flood chain over
+ten at four checkpoints each, every intermediate pinned.
 
 **Measured over ten regions of CMU-1 the pooled count is 156,979 objects against
 QuPath's 147,351 cells — 1.065x, with a range of 1.012–1.129 across regions** and
@@ -121,8 +122,8 @@ On the region QuPath itself was profiled on — 4000x4000 at (27776, 5952) of
 when the question is whether the port is faster, because QuPath's 15.87 s was
 measured single-threaded and QuPath parallelises across tiles in real use. And
 read both as an *upper bound*: QuPath's time includes the tail this pipeline has
-not written — cell expansion and the measurements — so some of that
-gap is work not yet done rather than work done faster. The gap is decisive
+not written — the measurements — so some of that gap is work not yet done rather
+than work done faster. The gap is decisive
 either way; its exact size is not yet measurable.
 
 The two profiles do not have the same shape, which is the point — a stage that
