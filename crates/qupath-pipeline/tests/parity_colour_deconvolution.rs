@@ -208,7 +208,7 @@ fn matches_qupath_on_a_real_tile() {
         // Slides are untracked because they are hundreds of megabytes, so this
         // is skipped rather than failed where they are absent. It runs in any
         // checkout that has followed docs/test-data.md.
-        eprintln!("skipping: {} not recorded", path.display());
+        qupath_testing::skipped(&format!("{} not recorded", path.display()));
         return;
     };
     check(&parse_case(&text, "tile"), &Stains::h_and_e());

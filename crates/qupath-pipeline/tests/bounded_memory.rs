@@ -72,7 +72,7 @@ fn params() -> Params {
 #[test]
 fn peak_memory_does_not_grow_with_the_region() {
     let Some(slide) = slide() else {
-        eprintln!("skipping: data/CMU-1.svs not present");
+        qupath_testing::skipped("data/CMU-1.svs not present");
         return;
     };
 

@@ -302,6 +302,25 @@ Rust: `cargo test` — no system dependencies. Reading JPEG 2000 slides would
 need OpenSlide through FFI and is not implemented; those files are refused by
 name rather than mis-decoded.
 
+**A green `cargo test` does not by itself mean the whole suite ran.** No slides
+are committed ([docs/test-data.md](docs/test-data.md)), so the tests that need
+one skip where it is absent — and a skipped test in Rust prints `ok` and counts
+toward the total like any other. A checkout with no slides reports the same
+green as a full run, having exercised materially less of what the parity claim
+rests on.
+
+Set `QUPATH_RUST_REQUIRE_DATA=1` to turn every such skip into a failure that
+names the file it wanted:
+
+```sh
+QUPATH_RUST_REQUIRE_DATA=1 cargo test --workspace --release
+```
+
+Use it wherever a green run is being read as evidence — CI, a release check, or
+before quoting a figure the suite is meant to back. Leave it unset for ordinary
+local work, which is what lets the suite run at all without hundreds of
+megabytes of slides.
+
 The parity recorders that open a slide *through QuPath* do use OpenSlide, and it
 needs no system package either: `qupath-extension-openslide` depends on a jar
 carrying its own `libopenslide.so`, which JNA extracts at load time. `ldconfig`

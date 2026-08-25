@@ -96,13 +96,13 @@ fn matches_qupath_slide_pixels() {
         // Slides are untracked because they are hundreds of megabytes, so this
         // test is skipped rather than failed where they are absent. It runs in
         // any checkout that has followed docs/test-data.md.
-        eprintln!("skipping: {} not recorded", fixture.display());
+        qupath_testing::skipped(&format!("{} not recorded", fixture.display()));
         return;
     };
 
     let slide_path = slide_path(&text);
     if !slide_path.exists() {
-        eprintln!("skipping: {} not present", slide_path.display());
+        qupath_testing::skipped(&format!("{} not present", slide_path.display()));
         return;
     }
 

@@ -2382,6 +2382,7 @@ dependencies = [
  "png",
  "qupath-pipeline",
  "qupath-slide",
+ "qupath-testing",
  "qupath-viewer",
  "rfd",
  "softbuffer",
@@ -2412,6 +2413,7 @@ dependencies = [
  "qupath-filters",
  "qupath-objects",
  "qupath-slide",
+ "qupath-testing",
  "qupath-watershed",
  "rayon",
  "thiserror 2.0.20",
@@ -2422,10 +2424,15 @@ name = "qupath-slide"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "qupath-testing",
  "rayon",
  "thiserror 2.0.20",
  "zune-jpeg 0.4.21",
 ]
+
+[[package]]
+name = "qupath-testing"
+version = "0.1.0"
 
 [[package]]
 name = "qupath-viewer"

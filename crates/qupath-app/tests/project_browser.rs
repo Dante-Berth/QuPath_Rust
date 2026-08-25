@@ -321,7 +321,7 @@ fn a_real_slide() -> Option<PathBuf> {
 #[test]
 fn a_slide_added_to_a_project_is_in_the_file_afterwards() {
     let Some(slide) = a_real_slide() else {
-        eprintln!("skipping: data/CMU-1-Small-Region.svs not present");
+        qupath_testing::skipped("data/CMU-1-Small-Region.svs not present");
         return;
     };
 
@@ -389,7 +389,7 @@ fn a_slide_added_to_a_project_is_in_the_file_afterwards() {
 #[test]
 fn a_slide_opened_relatively_is_the_slide_the_project_names() {
     let Some(slide) = a_real_slide() else {
-        eprintln!("skipping: data/CMU-1-Small-Region.svs not present");
+        qupath_testing::skipped("data/CMU-1-Small-Region.svs not present");
         return;
     };
 
@@ -555,7 +555,7 @@ fn wait_for_pictures(app: &mut App) {
 #[test]
 fn a_row_gets_its_picture_from_the_slide() {
     let Some(slide) = a_real_slide() else {
-        eprintln!("skipping: data/CMU-1-Small-Region.svs not present");
+        qupath_testing::skipped("data/CMU-1-Small-Region.svs not present");
         return;
     };
 
@@ -664,7 +664,7 @@ fn a_slide_that_will_not_read_says_why() {
 #[test]
 fn the_pictures_of_a_closed_project_do_not_arrive_in_the_next_one() {
     let Some(slide) = a_real_slide() else {
-        eprintln!("skipping: data/CMU-1-Small-Region.svs not present");
+        qupath_testing::skipped("data/CMU-1-Small-Region.svs not present");
         return;
     };
 
@@ -747,7 +747,7 @@ fn the_pictures_of_a_closed_project_do_not_arrive_in_the_next_one() {
 #[test]
 fn adding_a_slide_keeps_the_pictures_already_made() {
     let Some(slide) = a_real_slide() else {
-        eprintln!("skipping: data/CMU-1-Small-Region.svs not present");
+        qupath_testing::skipped("data/CMU-1-Small-Region.svs not present");
         return;
     };
 
@@ -1223,7 +1223,7 @@ const ADD_BUTTON: egui::Pos2 = egui::pos2(100.0, 140.0);
 #[test]
 fn the_add_button_is_where_these_tests_think_it_is() {
     let Some(slide) = a_real_slide() else {
-        eprintln!("skipping: data/CMU-1-Small-Region.svs not present");
+        qupath_testing::skipped("data/CMU-1-Small-Region.svs not present");
         return;
     };
     let mut app = App::new(None);
@@ -1257,7 +1257,7 @@ fn the_add_button_is_where_these_tests_think_it_is() {
 #[test]
 fn the_add_button_asks_only_when_there_is_something_to_add() {
     let Some(slide) = a_real_slide() else {
-        eprintln!("skipping: data/CMU-1-Small-Region.svs not present");
+        qupath_testing::skipped("data/CMU-1-Small-Region.svs not present");
         return;
     };
 

@@ -39,6 +39,7 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 workspace = true
 
 [dev-dependencies]
+qupath-testing = { path = "../qupath-testing" }
 # Decodes what `encode_jpeg` wrote, so the round-trip test is checked by a
 # *different* implementation than the one that produced it. Encoding with
 # `image` and decoding with `image` would agree about a shared misreading of

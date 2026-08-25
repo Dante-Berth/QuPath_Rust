@@ -16,4 +16,5 @@ zune-jpeg = "0.4"
 workspace = true
 
 [dev-dependencies]
+qupath-testing = { path = "../qupath-testing" }
 criterion = { version = "0.5", default-features = false }
