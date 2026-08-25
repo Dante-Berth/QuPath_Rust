@@ -3258,12 +3258,60 @@ block is absent needs to find the reasoning where they look for the gap.
   Unlike the hover and like the row press, this found no bug. The behaviour was
   right; the check was missing.
 
-  What is still in the hole is the overview's click-to-jump
-  and escape during a run. **The sort
-  combo's dropdown was in it for about an hour and is not any more**: a popup
-  only exists once its box has been pressed, so `examples/chrome` now presses
-  it — a synthesised click, and then frames until the fade-in finishes. §8.3
-  has what that cost and what it found.
+  ~~What is still in the hole is the overview's click-to-jump and escape during
+  a run.~~ **What is still in the hole is escape during a run**, which needs a
+  `&Window` to reach `App::key` and is the last thing here that does. The
+  overview's click-to-jump came out of it by the route the row press came out
+  by: `tests/overview.rs` presses the picture, drags across it, and presses
+  beside it, all through the `Command` `chrome::draw` returns. The harness the
+  two files share now lives in `tests/gestures/mod.rs` rather than being copied
+  into the second of them — the six frames, the gesture withheld on the first
+  and the repeat on every frame after are three decisions whose reasons live in
+  comments, and a copied reason is one that can stop being true in one place.
+
+  **The sort combo's dropdown was in the hole for about an hour and is not any
+  more**: a popup only exists once its box has been pressed, so
+  `examples/chrome` now presses it — a synthesised click, and then frames until
+  the fade-in finishes. §8.3 has what that cost and what it found.
+
+  **What the click tests add to §8.4's unit test is a factor of one.** The
+  arithmetic there is checked and stays checked; what it cannot see is what the
+  *pane* puts either side of it — the picture's offset inside a panel, and the
+  `scale` the picture is fitted to that panel by. `overview_pane` divides the
+  click position back by that scale, and in every window anyone runs this in
+  the scale is exactly **1.0**: the panel asks for 240 points and the picture of
+  `CMU-1-Small-Region.svs` is 112 wide, so dividing by the factor, multiplying
+  by it and forgetting it are three programs that agree. Six of the seven tests here
+  run at 1.0 and are worth having for the offset and the mappings; the seventh
+  lays the interface out in a 200-point window, where the panel is capped to
+  half of it and the picture really is fitted down.
+
+  That split is not a guess about which test carries which claim — it was run.
+  Dropping the `/ scale` from the pane leaves **six of the seven passing** and
+  fails only `a_pane_narrower_than_the_picture_still_lands_where_it_was_aimed`,
+  by a third of the slide: a click on tissue landing on background. Three more
+  mutations, each caught by the test that claims it — swapping the axes fails
+  all four that check where a jump lands, dropping the `- rect.min` offset
+  fails four, and narrowing `clicked() || dragged()` to `clicked()` fails the
+  drag alone.
+
+  **The axis swap is only caught by four of them because running it changed
+  one.** The drag test first dragged to (0.8, 0.6) of the picture, and the
+  picture is 112 by 150: that is 89.6 points across and 90.0 down, so swapping
+  the two moved the jump by eight slide pixels and the test passed through the
+  mutation. Fractions that differ are not coordinates that differ, and a test
+  whose two axes come out nearly equal in pixels is blind to every mistake that
+  exchanges them. It drags to (0.85, 0.25) now. The other three tests had
+  caught the swap regardless, which is exactly why this one had to be run
+  rather than reasoned about — a mutation caught by the suite is not a mutation
+  caught by the test that claims it. This is §8.0's rule met in the interface rather than in the
+  pipeline — *a conversion whose factor is 1 in the development setup is
+  untested, not correct* — and it is the fourth factor of one to turn up here.
+  The difference is the outcome: scale factor 1.0, downsample 1.0 and level 0
+  each hid a live bug, and the fit-to-panel factor hid nothing. None of the
+  four mutations found one. The pane was right; what was missing was any way
+  for it to be wrong and be noticed, which is the same thing the add button's
+  three states were worth and is a weaker claim than the hover's.
 
   ~~The hover states of the browser's rows are in that hole now too — the fill
   under a hovered row has been reasoned about and drawn, and never seen.~~

@@ -7,11 +7,10 @@
 //! machinery.
 //!
 //! Shared rather than copied, and that is the point of the file. The browser's
-//! rows had it first, in the test file that drives them; the second thing to
-//! reach a pointer at a coordinate wants the same six frames, the same "not on
-//! the first" and the same repeat-every-frame — three decisions whose *reasons*
-//! live in the comments below and nowhere else. A second copy is a second place
-//! for those reasons to stop being true.
+//! rows had it first; the overview's click-to-jump wanted the same six frames,
+//! the same "not on the first" and the same repeat-every-frame — three
+//! decisions whose *reasons* live in the comments below and nowhere else. A
+//! second copy is a second place for those reasons to stop being true.
 //!
 //! A subdirectory module rather than `tests/gestures.rs`, because `cargo test`
 //! makes a binary of every file directly in `tests/` and this one has no tests
@@ -34,15 +33,26 @@ pub const WINDOW: egui::Vec2 = egui::vec2(1100.0, 760.0);
 
 /// What the pointer does before the layout is read.
 ///
-/// Two gestures rather than a position and a flag, for `examples/chrome`'s
-/// reason: a hover is a `PointerMoved` and nothing else, and a click is that
-/// move plus a press and a release. They are not one gesture with a modifier.
+/// Separate gestures rather than a position and a flag, for `examples/chrome`'s
+/// reason: a hover is a `PointerMoved` and nothing else, a click is that move
+/// plus a press and a release, and a drag is a press that never releases. They
+/// are not one gesture with a modifier.
 #[derive(Clone, Copy)]
 pub enum Gesture {
     /// The pointer is moved here and left there.
     Hovering(egui::Pos2),
     /// The pointer is moved here, pressed and released.
     Clicking(egui::Pos2),
+    /// The pointer is pressed at `from` and held while it moves to `to`, which
+    /// is where it stays. Never released, because a drag that has ended is a
+    /// click: what this reproduces is the middle of the gesture, which is the
+    /// state `Response::dragged` reports and `Response::clicked` does not.
+    Dragging {
+        /// Where the button goes down.
+        from: egui::Pos2,
+        /// Where the pointer is by the settled frame.
+        to: egui::Pos2,
+    },
 }
 
 impl Gesture {
@@ -50,6 +60,7 @@ impl Gesture {
     pub fn at(self) -> egui::Pos2 {
         match self {
             Self::Hovering(at) | Self::Clicking(at) => at,
+            Self::Dragging { to, .. } => to,
         }
     }
 }
@@ -108,6 +119,20 @@ pub fn lay_out_in(
                     input.events.push(egui::Event::PointerMoved(at));
                     input.events.push(button(at, true));
                     input.events.push(button(at, false));
+                }
+                // The press lands on the frame the pointer arrives at `from`
+                // and is not repeated: pressing again every frame is a stream
+                // of clicks, which is a different gesture and would report
+                // `clicked` rather than `dragged`. Afterwards the pointer is
+                // simply at `to`, which is what holding a button down and
+                // moving is.
+                Gesture::Dragging { from, to } => {
+                    if frame == 1 {
+                        input.events.push(egui::Event::PointerMoved(from));
+                        input.events.push(button(from, true));
+                    } else {
+                        input.events.push(egui::Event::PointerMoved(to));
+                    }
                 }
             }
         }
