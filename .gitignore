@@ -32,8 +32,10 @@ target
 
 __pycache__/
 
-# `examples/panes` writes its PNGs to the working directory; they are
-# regenerable from a slide and are looked at rather than committed.
+# `examples/panes`, `examples/chrome` and `examples/dump` write their PNGs to
+# the working directory; they are regenerable from a slide and are looked at
+# rather than committed.
 /display-*.png
 /overview-*.png
 /chrome-*.png
+/viewer-dump.png
