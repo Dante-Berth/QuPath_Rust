@@ -52,13 +52,27 @@ the **boundary smoothing** over them were part of that tail and are now ported:
 the contour against ImageJ's own Wand over nine cases, and `smoothBoundaries`'
 four stages against QuPath over twelve more, every intermediate pinned.
 
-**The count is 26,647 objects against QuPath's 25,757 cells on the same region**,
-1.035x, from 1.86x. It is not clean, and where it is not is documented: QuPath
-resolves its tile-seam overlaps on *cells* with smoothed polygon geometry, where
-this compares nucleus pixel masks, so it removes at least as many duplicates as
-this does. See D-008 in [DIVERGENCES.md](DIVERGENCES.md). A matching count is
-also the weakest evidence of a match there is — two runs can agree on how many
-objects they found and disagree about where every one of them is.
+**Measured over ten regions of CMU-1 the pooled count is 156,979 objects against
+QuPath's 147,351 cells — 1.065x, with a range of 1.012–1.129 across regions** and
+always in the same direction: this over-counts. On the profiled 4000x4000 region
+alone it is 26,647 against 25,757, 1.035x, from 1.86x — read that as one region
+and the best of the ten, not as the result. Reproduce with
+`./parity/record-cell-counts.sh` then
+`cargo run --release --example cell_counts -p qupath-pipeline`.
+
+What the gap tracks is cell **density**, inversely: sparse regions diverge by
+6–13% where dense ones agree to within 1–3.5%, and the seam count does not sort
+the table. So it is **not** primarily the tile-seam resolution D-008 predicted —
+three of the ten regions are a single tile with no seams at all, and they still
+disagree. Three stages have since been ruled out against QuPath on real tissue,
+pixel for pixel — the merge, the shape split, and the background estimate — which
+puts the cause between the deconvolution and the flood. See D-009 in
+[DIVERGENCES.md](DIVERGENCES.md) and §2 of [docs/MEMO.md](docs/MEMO.md).
+
+A matching count is also the weakest evidence of a match there is — two runs can
+agree on how many objects they found and disagree about where every one of them
+is. The strong test, Dice or IoU over the object masks, needs QuPath's
+per-object masks recorded, and no fixture holds them yet.
 
 **None of the last four stages was the fix the roadmap expected**, and the
 corrections are worth more than the code:
