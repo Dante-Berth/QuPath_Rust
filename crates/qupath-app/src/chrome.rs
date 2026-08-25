@@ -2867,7 +2867,8 @@ mod tests {
     /// look like a match.
     #[test]
     fn the_search_box_follows_qupaths_predicate() {
-        let named = |name: &str, filter: &str| super::matches(&image(name, &[]), false, false, filter);
+        let named =
+            |name: &str, filter: &str| super::matches(&image(name, &[]), false, false, filter);
 
         // Nothing typed, and nothing but separators, accept everything.
         assert!(named("CMU-1", ""));

@@ -70,7 +70,10 @@ fn project_in(name: &str, images: &[(&str, bool)]) -> PathBuf {
 fn a_project_written_here_opens_in_the_browser() {
     let path = project_in("written", &[("first", true), ("second", true)]);
     let mut app = App::new(None);
-    assert!(app.project.is_none(), "nothing is open before anything is opened");
+    assert!(
+        app.project.is_none(),
+        "nothing is open before anything is opened"
+    );
 
     app.open_project(path.clone());
 
@@ -90,8 +93,15 @@ fn a_project_written_here_opens_in_the_browser() {
 
     // The pane is opened by opening a project. A list that arrives hidden is a
     // command that reports having done nothing.
-    assert!(app.show_project, "opening a project did not show the browser");
-    assert!(app.message.contains('2'), "the status bar says nothing: {}", app.message);
+    assert!(
+        app.show_project,
+        "opening a project did not show the browser"
+    );
+    assert!(
+        app.message.contains('2'),
+        "the status bar says nothing: {}",
+        app.message
+    );
 }
 
 /// A slide that is not there is **listed and marked**, not dropped.
@@ -106,9 +116,19 @@ fn a_missing_slide_is_listed_and_marked() {
     app.open_project(path);
 
     let project = app.project.as_ref().expect("the project opened");
-    assert_eq!(project.stored.images.len(), 2, "the missing entry was dropped");
-    assert!(project.present(0), "the slide that is there is marked absent");
-    assert!(!project.present(1), "the slide that is not there is marked present");
+    assert_eq!(
+        project.stored.images.len(),
+        2,
+        "the missing entry was dropped"
+    );
+    assert!(
+        project.present(0),
+        "the slide that is there is marked absent"
+    );
+    assert!(
+        !project.present(1),
+        "the slide that is not there is marked present"
+    );
 
     // Out of range is present, so a caller iterating something else does not
     // paint warnings on rows it invented.
@@ -131,8 +151,14 @@ fn a_project_that_will_not_read_keeps_the_one_that_did() {
     std::fs::write(&broken, "{ this is not a project").expect("write a broken file");
     app.open_project(broken);
 
-    let project = app.project.as_ref().expect("the first project is still open");
-    assert_eq!(project.path, good, "a file that would not read replaced the project");
+    let project = app
+        .project
+        .as_ref()
+        .expect("the first project is still open");
+    assert_eq!(
+        project.path, good,
+        "a file that would not read replaced the project"
+    );
     assert!(
         app.message.contains("broken.qpproj"),
         "the failure does not name the file: {}",
@@ -203,9 +229,15 @@ fn a_new_project_is_created_empty_and_opened() {
     let mut app = App::new(None);
     app.new_project(&directory);
 
-    let project = app.project.as_ref().expect("the project was created and opened");
+    let project = app
+        .project
+        .as_ref()
+        .expect("the project was created and opened");
     assert_eq!(project.path, directory.join(App::PROJECT_FILE));
-    assert!(project.stored.images.is_empty(), "a new project starts empty");
+    assert!(
+        project.stored.images.is_empty(),
+        "a new project starts empty"
+    );
     assert!(project.path.is_file(), "the index was not written");
 
     // Empty on purpose: QuPath separates *Create project* from *Add images*,
@@ -276,8 +308,7 @@ fn adding_says_why_it_cannot() {
 /// fabricated size is exactly the kind of plausible wrong number this format
 /// work keeps turning up.
 fn a_real_slide() -> Option<PathBuf> {
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/CMU-1-Small-Region.svs");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/CMU-1-Small-Region.svs");
     path.is_file().then_some(path)
 }
 
@@ -301,9 +332,14 @@ fn a_slide_added_to_a_project_is_in_the_file_afterwards() {
     let mut app = App::new(None);
     app.new_project(&directory);
     app.open(slide.clone());
-    assert!(app.open.is_some(), "the slide did not open: {}", app.message);
+    assert!(
+        app.open.is_some(),
+        "the slide did not open: {}",
+        app.message
+    );
 
-    app.addable().expect("a project and a slide, and the slide not in it");
+    app.addable()
+        .expect("a project and a slide, and the slide not in it");
     app.add_to_project();
 
     // Read from disk rather than from the application, because what the pane
@@ -315,21 +351,25 @@ fn a_slide_added_to_a_project_is_in_the_file_afterwards() {
     assert_eq!(stored.images[0].name, "CMU-1-Small-Region.svs");
     assert_eq!(
         stored.images[0].slide.as_deref(),
-        Ok(std::path::absolute(&slide).expect("an absolute path").as_path()),
+        Ok(std::path::absolute(&slide)
+            .expect("an absolute path")
+            .as_path()),
         "the entry does not point at the slide that was added",
     );
 
     // The entry's own files, in the directory its id names. `summary.json`
     // carries the level-0 size, which is the one field that needed the slide.
-    let summary = std::fs::read_to_string(directory.join("data/1/summary.json"))
-        .expect("the entry summary");
+    let summary =
+        std::fs::read_to_string(directory.join("data/1/summary.json")).expect("the entry summary");
     assert!(summary.contains("\"width\": 2220"), "{summary}");
     assert!(summary.contains("\"height\": 2967"), "{summary}");
     assert!(directory.join("data/1/server.json").is_file());
 
     // Adding it twice is refused, because two entries for one image is two
     // directories under `data/` that QuPath will show as two rows.
-    let reason = app.addable().expect_err("the slide is already in the project");
+    let reason = app
+        .addable()
+        .expect_err("the slide is already in the project");
     assert!(reason.contains("already in this project"), "{reason}");
 }
 
@@ -374,7 +414,11 @@ fn a_slide_opened_relatively_is_the_slide_the_project_names() {
     let relative = Path::new("../../data/CMU-1-Small-Region.svs");
     assert!(relative.is_file(), "the test's own relative path is wrong");
     app.open(relative.to_path_buf());
-    assert!(app.open.is_some(), "the slide did not open: {}", app.message);
+    assert!(
+        app.open.is_some(),
+        "the slide did not open: {}",
+        app.message
+    );
 
     let reason = app
         .addable()
@@ -390,7 +434,10 @@ fn a_slide_opened_relatively_is_the_slide_the_project_names() {
         Ok(showing.as_path()),
         "the browser would not mark the row for the slide on screen",
     );
-    assert_eq!(showing, std::path::absolute(&slide).expect("an absolute path"));
+    assert_eq!(
+        showing,
+        std::path::absolute(&slide).expect("an absolute path")
+    );
 }
 
 /// The command line tells a project from a slide by its extension, and the
@@ -442,9 +489,7 @@ fn a_project_and_a_slide_can_be_asked_for_together() {
     // Said twice, the second one is meant — a shell history full of appended
     // arguments is how that happens.
     assert_eq!(
-        qupath_app::state::requested(
-            ["a.svs", "b.svs"].map(str::to_owned)
-        ),
+        qupath_app::state::requested(["a.svs", "b.svs"].map(str::to_owned)),
         (None, Some(PathBuf::from("b.svs"))),
     );
 }

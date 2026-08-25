@@ -57,7 +57,8 @@ fn a_project_qupath_wrote_reads_back() {
     // having a different version number.
     let version = stored.version.expect("a version");
     assert_ne!(
-        version, project::FORMAT_VERSION,
+        version,
+        project::FORMAT_VERSION,
         "QuPath is expected to write its own version, not keep the one it read"
     );
 
@@ -90,7 +91,8 @@ fn the_two_uri_spellings_both_resolve() {
         "no three-slash URI in {uris:?}"
     );
     assert!(
-        uris.iter().any(|uri| uri.starts_with("file:/") && !uri.starts_with("file://")),
+        uris.iter()
+            .any(|uri| uri.starts_with("file:/") && !uri.starts_with("file://")),
         "no one-slash URI in {uris:?}; the fixture no longer covers what it was recorded for"
     );
 
@@ -186,8 +188,14 @@ fn the_metadata_block_is_what_a_stored_pyramid_looks_like() {
     // write one. `rgb` and `pixelWidthMicrons` are not field names, and a
     // channel is an object rather than a string.
     assert!(!FIXTURE.contains("\"rgb\":"), "the field is isRGB");
-    assert!(!FIXTURE.contains("pixelWidthMicrons"), "the value is a quantity");
-    assert!(!FIXTURE.contains("\"channels\": [\""), "a channel is an object");
+    assert!(
+        !FIXTURE.contains("pixelWidthMicrons"),
+        "the value is a quantity"
+    );
+    assert!(
+        !FIXTURE.contains("\"channels\": [\""),
+        "a channel is an object"
+    );
 
     // And the entry's own uri is found past all of it.
     let stored = project::read(FIXTURE).expect("QuPath's own project file");
@@ -280,11 +288,19 @@ fn adding_to_a_project_leaves_every_other_entry_alone() {
         "\"createTimestamp\": 1700000000000",
         "\"uri\": \"file:/PROJECT/project.qpproj\"",
     ] {
-        assert!(index.contents.contains(kept), "{kept} did not survive the rewrite");
+        assert!(
+            index.contents.contains(kept),
+            "{kept} did not survive the rewrite"
+        );
     }
-    assert!(index.contents.contains("\"lastID\": 4"), "lastID was not advanced");
     assert!(
-        !index.contents.contains("\"modifyTimestamp\": 1700000060000"),
+        index.contents.contains("\"lastID\": 4"),
+        "lastID was not advanced"
+    );
+    assert!(
+        !index
+            .contents
+            .contains("\"modifyTimestamp\": 1700000060000"),
         "modifyTimestamp was left saying the project had not been written"
     );
 
@@ -297,8 +313,14 @@ fn adding_to_a_project_leaves_every_other_entry_alone() {
     // `lastID` was 3, so the new entry is 4 and its files go in `data/4`.
     assert_eq!(reread.images[3].id, 4);
     let written_paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
-    assert!(written_paths.contains(&"data/4/server.json"), "{written_paths:?}");
-    assert!(written_paths.contains(&"data/4/summary.json"), "{written_paths:?}");
+    assert!(
+        written_paths.contains(&"data/4/server.json"),
+        "{written_paths:?}"
+    );
+    assert!(
+        written_paths.contains(&"data/4/summary.json"),
+        "{written_paths:?}"
+    );
 
     // The timestamps: created untouched, modified advanced to the write.
     assert_eq!(reread.written.created, sample::WRITTEN.created);
@@ -321,7 +343,11 @@ fn the_first_uri_in_the_file_is_not_a_slide() {
     let stored = project::read(FIXTURE).expect("QuPath's own project file");
     for image in &stored.images {
         assert!(
-            !image.slide.as_deref().expect("a slide").ends_with("project.qpproj"),
+            !image
+                .slide
+                .as_deref()
+                .expect("a slide")
+                .ends_with("project.qpproj"),
             "entry {} resolved to the project file",
             image.id,
         );

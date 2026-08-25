@@ -146,7 +146,11 @@ pub fn parse(text: &str) -> Result<Value, String> {
 fn problem(bytes: &[u8], at: usize, what: &str) -> String {
     let seen = &bytes[..at.min(bytes.len())];
     let line = 1 + seen.iter().filter(|byte| **byte == b'\n').count();
-    let column = 1 + seen.len() - seen.iter().rposition(|byte| *byte == b'\n').map_or(0, |n| n + 1);
+    let column = 1 + seen.len()
+        - seen
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |n| n + 1);
     let mut out = String::new();
     let _ = write!(out, "{what}, at line {line} column {column} (byte {at})");
     out
@@ -167,7 +171,11 @@ fn space(bytes: &[u8], at: &mut usize) {
 fn value(bytes: &[u8], at: &mut usize) -> Result<Value, String> {
     space(bytes, at);
     match bytes.get(*at) {
-        None => Err(problem(bytes, *at, "a value was expected and the text ended")),
+        None => Err(problem(
+            bytes,
+            *at,
+            "a value was expected and the text ended",
+        )),
         Some(b'{') => object(bytes, at),
         Some(b'[') => array(bytes, at),
         Some(b'"') => string(bytes, at).map(Value::String),
@@ -295,12 +303,20 @@ fn unicode(bytes: &[u8], at: &mut usize, out: &mut String) -> Result<(), String>
     let scalar = if (0xd800..0xdc00).contains(&first) {
         // A high surrogate. Its partner must follow as its own `\u` escape.
         if bytes.get(*at) != Some(&b'\\') || bytes.get(*at + 1) != Some(&b'u') {
-            return Err(problem(bytes, *at, "a high surrogate with no low surrogate"));
+            return Err(problem(
+                bytes,
+                *at,
+                "a high surrogate with no low surrogate",
+            ));
         }
         *at += 2;
         let second = hex4(bytes, at)?;
         if !(0xdc00..0xe000).contains(&second) {
-            return Err(problem(bytes, *at, "a high surrogate followed by a non-surrogate"));
+            return Err(problem(
+                bytes,
+                *at,
+                "a high surrogate followed by a non-surrogate",
+            ));
         }
         0x1_0000 + ((first - 0xd800) << 10) + (second - 0xdc00)
     } else {
@@ -525,9 +541,15 @@ mod tests {
         .expect("valid JSON");
         assert_eq!(value.get("version").and_then(Value::as_str), Some("0.6.0"));
         assert_eq!(value.get("lastID").and_then(Value::as_u64), Some(2));
-        let images = value.get("images").and_then(Value::as_array).expect("images");
+        let images = value
+            .get("images")
+            .and_then(Value::as_array)
+            .expect("images");
         assert_eq!(images.len(), 2);
-        assert_eq!(images[1].get("imageName").and_then(Value::as_str), Some("b"));
+        assert_eq!(
+            images[1].get("imageName").and_then(Value::as_str),
+            Some("b")
+        );
     }
 
     /// The reason this is a parser: the *first* `"uri"` in an entry QuPath
@@ -545,7 +567,10 @@ mod tests {
         )
         .expect("valid JSON");
         let builder = value.get("serverBuilder").expect("a builder");
-        assert_eq!(builder.get("uri").and_then(Value::as_str), Some("file:///right"));
+        assert_eq!(
+            builder.get("uri").and_then(Value::as_str),
+            Some("file:///right")
+        );
         // And the outer object has no `uri` of its own, rather than borrowing
         // one from a child.
         assert_eq!(value.get("uri"), None);
@@ -566,7 +591,10 @@ mod tests {
     fn a_character_outside_ascii_survives_unescaped() {
         let value = parse("\"0.2498 \u{b5}m — Ω\"").expect("valid JSON");
         assert_eq!(value.as_str(), Some("0.2498 \u{b5}m — Ω"));
-        assert_eq!(value.as_str().map(str::chars).map(Iterator::count), Some(13));
+        assert_eq!(
+            value.as_str().map(str::chars).map(Iterator::count),
+            Some(13)
+        );
     }
 
     /// A character past the basic plane arrives as two escapes, and neither
@@ -575,8 +603,14 @@ mod tests {
     fn a_surrogate_pair_is_one_character() {
         let value = parse(r#""slide \ud83d\udd2c ready""#).expect("valid JSON");
         assert_eq!(value.as_str(), Some("slide 🔬 ready"));
-        assert!(parse(r#""\ud83d""#).is_err(), "a lone high surrogate is not a character");
-        assert!(parse(r#""\ud83d\u0041""#).is_err(), "a high surrogate needs a low one");
+        assert!(
+            parse(r#""\ud83d""#).is_err(),
+            "a lone high surrogate is not a character"
+        );
+        assert!(
+            parse(r#""\ud83d\u0041""#).is_err(),
+            "a high surrogate needs a low one"
+        );
     }
 
     /// Numbers keep their text, so a counter is read as a counter.
@@ -590,7 +624,10 @@ mod tests {
         );
         // One past 2^53, which is the first integer an `f64` cannot hold. A
         // parser that went through a float would answer 9007199254740992.
-        assert_eq!(value.get("big").and_then(Value::as_u64), Some(9_007_199_254_740_993));
+        assert_eq!(
+            value.get("big").and_then(Value::as_u64),
+            Some(9_007_199_254_740_993)
+        );
     }
 
     /// A count is a count: a fraction is not one, and reading it as though it
@@ -608,7 +645,10 @@ mod tests {
         assert_eq!(parse("[]").expect("valid"), Value::Array(Vec::new()));
         assert_eq!(parse("{}").expect("valid"), Value::Object(Vec::new()));
         assert_eq!(
-            parse(r#"{"images": []}"#).expect("valid").get("images").and_then(Value::as_array),
+            parse(r#"{"images": []}"#)
+                .expect("valid")
+                .get("images")
+                .and_then(Value::as_array),
             Some(&[][..])
         );
     }
@@ -646,7 +686,13 @@ mod tests {
         assert!(parse(r#"{"a": 1} {"b": 2}"#).is_err());
         assert!(parse("1 2").is_err());
         // Whitespace after the document is not trailing text.
-        assert_eq!(parse(" {\"a\": 1} \n").expect("valid").get("a").and_then(Value::as_u64), Some(1));
+        assert_eq!(
+            parse(" {\"a\": 1} \n")
+                .expect("valid")
+                .get("a")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
     }
 
     /// The message has to name a place, or a malformed project of several
@@ -662,16 +708,16 @@ mod tests {
     #[test]
     fn what_is_rejected() {
         for broken in [
-            "{a: 1}",             // an unquoted key
-            "{\"a\" 1}",          // no colon
-            "[1 2]",              // no comma
-            "\"a\nb\"",           // a raw control character in a string
-            "\"\\q\"",            // an escape that is not one
-            "\"\\u00g1\"",        // a non-hex digit
-            "\"\\u00\"",          // fewer than four digits
-            "1.2.3",              // not a number
-            "--1",                // not a number either
-            "{\"a\": }",          // a key with no value
+            "{a: 1}",      // an unquoted key
+            "{\"a\" 1}",   // no colon
+            "[1 2]",       // no comma
+            "\"a\nb\"",    // a raw control character in a string
+            "\"\\q\"",     // an escape that is not one
+            "\"\\u00g1\"", // a non-hex digit
+            "\"\\u00\"",   // fewer than four digits
+            "1.2.3",       // not a number
+            "--1",         // not a number either
+            "{\"a\": }",   // a key with no value
         ] {
             assert!(parse(broken).is_err(), "read {broken:?} as valid");
         }

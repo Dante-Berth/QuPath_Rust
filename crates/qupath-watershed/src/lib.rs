@@ -41,19 +41,19 @@ mod edm;
 mod expand;
 mod label;
 mod outline;
-mod smooth;
 mod queue;
 mod regions;
 mod segment;
+mod smooth;
 
 pub use edm::DistanceMap;
 pub use expand::{cell_areas, expand_labels};
 pub use label::{Labeller, label_image};
 pub use outline::{Outline, outline_from, outline_mask};
-pub use smooth::{Point, Stages, smooth_boundary};
 pub use queue::{HierarchicalQueue, LEVELS, PixelIndex};
 pub use regions::{RegionTracer, filled_regions};
 pub use segment::Segmenter;
+pub use smooth::{Point, Stages, smooth_boundary};
 
 /// Neighbourhood used when propagating labels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

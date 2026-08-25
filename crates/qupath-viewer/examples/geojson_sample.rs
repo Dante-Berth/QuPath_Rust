@@ -27,7 +27,9 @@
 mod sample;
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| sample::PATH.to_owned());
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| sample::PATH.to_owned());
     let (text, written) = sample::write();
 
     if let Some(parent) = std::path::Path::new(&path).parent() {

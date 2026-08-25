@@ -63,7 +63,9 @@ fn names(key: &str) -> Vec<String> {
 /// fixture does not carry — see `an_array_ends_at_its_own_bracket`.
 fn names_in(text: &str, key: &str) -> Vec<String> {
     let heading = format!("\"{key}\": [");
-    let at = text.find(&heading).unwrap_or_else(|| panic!("a `{key}` array"));
+    let at = text
+        .find(&heading)
+        .unwrap_or_else(|| panic!("a `{key}` array"));
     let rest = &text[at + heading.len()..];
 
     let mut end = None;
@@ -160,8 +162,16 @@ const RECORDED: usize = 33;
 fn matches_qupaths_smart_string_sort() {
     let input = names("input");
     let expected = names("sorted");
-    assert_eq!(input.len(), expected.len(), "the fixture lists the same names twice");
-    assert_eq!(input.len(), RECORDED, "the scrape did not read the whole fixture");
+    assert_eq!(
+        input.len(),
+        expected.len(),
+        "the fixture lists the same names twice"
+    );
+    assert_eq!(
+        input.len(),
+        RECORDED,
+        "the scrape did not read the whole fixture"
+    );
 
     // `sort_by` and not `sort_unstable_by`, for the reason the doc comment on
     // the test module gives: the fixture holds pairs the comparator calls
@@ -170,7 +180,10 @@ fn matches_qupaths_smart_string_sort() {
     let mut sorted = input.clone();
     sorted.sort_by(|one, two| project::smart_string_compare(one, two));
 
-    assert_eq!(sorted, expected, "\n  ours: {sorted:?}\n  theirs: {expected:?}");
+    assert_eq!(
+        sorted, expected,
+        "\n  ours: {sorted:?}\n  theirs: {expected:?}"
+    );
 }
 
 /// The recorded order really is non-decreasing under this comparator.

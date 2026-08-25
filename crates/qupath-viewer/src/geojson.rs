@@ -436,7 +436,10 @@ mod tests {
         let mut fractional = Overlay::new();
         fractional.push_level_ring(&[[1, 1], [3, 1], [3, 3]], 1.0 / 3.0);
         let (json, _) = write(&fractional, &[]);
-        assert!(json.contains("[0.33,0.33]"), "coordinates moved off the grid: {json}");
+        assert!(
+            json.contains("[0.33,0.33]"),
+            "coordinates moved off the grid: {json}"
+        );
     }
 
     /// The brace and bracket counts balancing is the cheap structural check

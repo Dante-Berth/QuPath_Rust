@@ -78,7 +78,9 @@ fn text<'a>(block: &'a str, key: &str) -> &'a str {
         + needle.len();
     let rest = &block[at..];
     if let Some(body) = rest.strip_prefix('"') {
-        let end = body.find('"').expect("an unterminated string in the fixture");
+        let end = body
+            .find('"')
+            .expect("an unterminated string in the fixture");
         return &body[..end];
     }
     let end = rest.find([',', '\n']).unwrap_or(rest.len());
@@ -94,7 +96,8 @@ fn number(block: &str, key: &str) -> f64 {
 
 /// The measurement names and values, in the order QuPath lists them.
 fn measurements(block: &str) -> Vec<(&str, f64)> {
-    let open = block.find("\"measurements\": [").expect("measurements") + "\"measurements\": [".len();
+    let open =
+        block.find("\"measurements\": [").expect("measurements") + "\"measurements\": [".len();
     let list = &block[open..block[open..].find(']').expect("measurements end") + open];
     list.split("{\"name\": ")
         .skip(1)
@@ -253,10 +256,20 @@ fn qupath_reads_back_the_outlines_it_was_given() {
         );
         // Rings here are wound clockwise, which is the opposite of what the
         // GeoJSON specification asks of an exterior ring. JTS does not mind.
-        assert_eq!(text(block, "valid"), "true", "object {object} is not a valid geometry");
-        assert_eq!(text(block, "roi"), roi, "object {object} became a different ROI");
         assert_eq!(
-            text(block, "points").parse::<usize>().expect("a vertex count"),
+            text(block, "valid"),
+            "true",
+            "object {object} is not a valid geometry"
+        );
+        assert_eq!(
+            text(block, "roi"),
+            roi,
+            "object {object} became a different ROI"
+        );
+        assert_eq!(
+            text(block, "points")
+                .parse::<usize>()
+                .expect("a vertex count"),
             points,
             "object {object} came back with a different vertex count"
         );
