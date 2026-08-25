@@ -428,9 +428,16 @@ fn fill_ring(outline: &Outline, completed: &mut [bool], width: usize, height: us
         }
 
         crossings.sort_unstable();
-        for pair in crossings.chunks_exact(2) {
-            let from = pair[0].max(0) as usize;
-            let to = (pair[1].max(0) as usize).min(width);
+        // `as_chunks` and not `chunks_exact`: the pair is a `[i32; 2]`, so the
+        // two ends destructure by name instead of being indexed. The discarded
+        // remainder is the odd trailing crossing, which `chunks_exact` dropped
+        // in the same way — a ring crosses any scanline an even number of
+        // times, so an odd count means a degenerate edge and there is no span
+        // to fill.
+        let (pairs, _odd) = crossings.as_chunks::<2>();
+        for &[start, end] in pairs {
+            let from = start.max(0) as usize;
+            let to = (end.max(0) as usize).min(width);
             for x in from..to {
                 completed[y * width + x] = true;
             }

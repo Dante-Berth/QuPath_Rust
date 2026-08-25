@@ -1,12 +1,27 @@
-# Parity is this project's test suite, and until now nothing ran it but a person
-# on one machine. This runs it on every push and pull request.
+# Parity is this project's test suite, and until bc3f094 nothing ran it but a
+# person on one machine. This runs it on every push and pull request.
 #
-# The one thing this workflow cannot do is prove the suite ran in full. Slides
-# are untracked (docs/test-data.md) and the benchmark slide is 177 MB, so tests
-# that need it skip — and a skipped test in Rust reports `ok`. The last step
-# therefore re-runs the suite with QUPATH_RUST_REQUIRE_DATA set and reports what
-# that turns red, so the job summary says which tests a green run did not
-# exercise instead of leaving the total to imply it did.
+# Two things this workflow has to get right, and the first push got the second
+# one wrong.
+#
+# 1. It cannot prove the suite ran in full. Slides are untracked
+#    (docs/test-data.md) and the benchmark slide is 177 MB, so tests needing it
+#    skip — and a skipped test in Rust reports `ok`. The last step of `gate`
+#    re-runs with QUPATH_RUST_REQUIRE_DATA set and reports what that turns red,
+#    so the job summary names the tests a green run did not exercise.
+#
+# 2. **The gate has to be reproducible on a developer's machine.** The first
+#    version ran `stable` with `-D warnings`, which is a build that breaks on
+#    its own: clippy gains lints every six weeks, so a release nobody asked for
+#    turns the build red with no code change. That is what happened —
+#    chunks_exact_to_as_chunks landed in 1.98 and failed a tree that was clean
+#    under the 1.96 it was developed on. `gate` is pinned below, so what CI
+#    enforces is what `cargo clippy` says locally, and bumping it is a
+#    deliberate commit that fixes whatever the new version found.
+#
+# `new-lints` keeps the floating check without the breakage: same clippy, on
+# current stable, allowed to fail. New lints show up as information there
+# instead of as a red build here.
 name: CI
 
 on:
@@ -17,20 +32,23 @@ on:
 permissions:
   contents: read
 
-# A newer push to the same branch makes this run's answer irrelevant.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  # Bump deliberately, in a commit that also fixes what the new version reports.
+  # Keep this equal to what the project is developed against, so `cargo clippy`
+  # locally and the gate here cannot disagree.
+  RUST_PINNED: "1.96.0"
   # Exact byte count from docs/test-data.md, checked against Content-Length on
-  # the server. A truncated download fails here rather than as a confusing
-  # decode error inside a test.
+  # the server. A truncated download fails at the fetch rather than as a
+  # confusing decode error inside a test.
   CI_SLIDE_BYTES: "1938955"
 
 jobs:
-  check:
+  gate:
     runs-on: ubuntu-latest
 
     steps:
@@ -46,11 +64,12 @@ jobs:
             pkg-config libx11-dev libxkbcommon-dev libwayland-dev \
             libxcursor-dev libxrandr-dev libxi-dev
 
-      - name: Rust toolchain
+      - name: Rust ${{ env.RUST_PINNED }}
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy
-          rustup default stable
-          rustc --version && cargo --version
+          rustup toolchain install "$RUST_PINNED" --profile minimal \
+            --component rustfmt --component clippy
+          rustup default "$RUST_PINNED"
+          rustc --version && cargo clippy --version
 
       - name: Cache cargo registry and target
         uses: actions/cache@v4
@@ -59,8 +78,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-cargo-${{ env.RUST_PINNED }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-${{ env.RUST_PINNED }}-
 
       # Cheapest first, and it needs no build at all.
       - name: Formatting
@@ -97,8 +116,8 @@ jobs:
 
       # The witness. This pass is expected to fail — the benchmark slide is not
       # here — so its exit status is discarded and only what it names is kept.
-      # Without this the job above is green in a checkout that skipped a dozen
-      # tests, which is exactly what green is not supposed to mean.
+      # Without this the job is green in a checkout that skipped tests, which is
+      # exactly what green is not supposed to mean.
       - name: Say which tests no input was available for
         if: always()
         run: |
@@ -126,5 +145,55 @@ jobs:
               echo "not fetched here; \`CMU-1-Small-Region.svs\` is."
             else
               echo "Every test ran. Nothing skipped for want of a slide."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Advisory only. Tells us what the next toolchain bump will cost, without
+  # letting a Rust release decide whether this repository's build is red.
+  new-lints:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System libraries for the windowing crates
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libx11-dev libxkbcommon-dev libwayland-dev \
+            libxcursor-dev libxrandr-dev libxi-dev
+
+      - name: Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+          cargo clippy --version
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-stable-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-stable-
+
+      - name: Clippy on current stable
+        run: |
+          cargo clippy --workspace --all-targets --locked 2>&1 | tee stable.log || true
+          {
+            echo "### Clippy on current stable ($(cargo clippy --version))"
+            echo
+            echo "The gate runs $RUST_PINNED. This is what a bump to stable would have to fix."
+            echo
+            count=$(grep -cE '^warning: ' stable.log || true)
+            if [ "$count" = "0" ]; then
+              echo "Nothing — stable is clean, and the pin could be moved forward."
+            else
+              echo '```'
+              grep -E '^warning: ' stable.log | sort | uniq -c | sort -rn
+              echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
