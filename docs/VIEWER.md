@@ -3186,7 +3186,9 @@ block is absent needs to find the reasoning where they look for the gap.
   coming, and the current-image fill on a row that names no image. ~~But nothing
   has *clicked* a row, and nothing has pressed the add button; both are checked
   through `App` instead. The same hole as the overview's click-to-jump and
-  escape during a run: reachable only with a hand on the machine.~~
+  escape during a run: reachable only with a hand on the machine.~~ **All four
+  are out of it now, and none of them needed a hand** — the hole was drawn
+  around the wrong thing every time.
 
   **A row has now been clicked, and it needed no hand either.** The hole was
   drawn around the wrong thing: what `App` cannot reach is not the click but the
@@ -3259,15 +3261,62 @@ block is absent needs to find the reasoning where they look for the gap.
   right; the check was missing.
 
   ~~What is still in the hole is the overview's click-to-jump and escape during
-  a run.~~ **What is still in the hole is escape during a run**, which needs a
-  `&Window` to reach `App::key` and is the last thing here that does. The
-  overview's click-to-jump came out of it by the route the row press came out
-  by: `tests/overview.rs` presses the picture, drags across it, and presses
-  beside it, all through the `Command` `chrome::draw` returns. The harness the
-  two files share now lives in `tests/gestures/mod.rs` rather than being copied
+  a run.~~ **The hole is empty.** Both came out of it, and neither needed a
+  hand — which is now true of everything that was ever listed in it: the row
+  press, the add button, the hover fills, the sort dropdown, and these two.
+  What still needs a hand on the machine is in the bullet below this one, and
+  it is a different list: the trackpad, resizing, and the window manager. Those
+  are not gestures a synthesised pointer can stand in for.
+
+  The overview's click-to-jump came out by the route the row press came out by:
+  `tests/overview.rs` presses the picture, drags across it, and presses beside
+  it, all through the `Command` `chrome::draw` returns. The harness the two
+  files share now lives in `tests/gestures/mod.rs` rather than being copied
   into the second of them — the six frames, the gesture withheld on the first
   and the repeat on every frame after are three decisions whose reasons live in
   comments, and a copied reason is one that can stop being true in one place.
+
+  **Escape came out by the same correction applied a second time, and that is
+  the part worth keeping.** It read as blocked because `App::key` takes a
+  `&Window` and no test can build one — which is true, and is not what the
+  gesture is. What needs the window is the *redraw* a command may ask for. What
+  escape actually does is decide, in order, which of two things in progress it
+  abandons, and a decision needs nothing. `App::escape` now returns that
+  decision — `Escape::Band`, `Escape::Run(Command)` or `Escape::Nothing` — and
+  `key` is the two lines that carry it out. Three tests in `state.rs` assert the
+  ordering.
+
+  The ordering is the whole behaviour and it is not the obvious one. Both
+  gestures mean *undo the thing I just started*, and resolving them the other
+  way round throws away a whole-slide run — up to a minute and a half of every
+  core — because someone was drawing a zoom rectangle while it went. It is also
+  silent: the band vanishes either way, so the frame after the keypress looks
+  identical in both cases, and the difference only appears when the run never
+  comes back. That is §6's shape again — two behaviours that draw the same
+  frame — and a picture is no use against it whichever way it is looked at.
+
+  Four mutations, each caught by the test that claims it. Stopping the run
+  before taking the band fails the ordering test; reading the band without
+  taking it fails the same one, because the second press then finds the band
+  again instead of the run; returning `Command::Detect` where it should return
+  `Command::StopDetecting` fails the two tests that name the command — a
+  keypress wired that way starts a *second* run over the region, which on
+  screen is the first one appearing to take longer; and claiming the key when
+  nothing is in progress fails the third.
+
+  What the run is pointed at is `/nonexistent/slide.svs`, deliberately.
+  `Detector::start` picks the level and the region on the calling thread and
+  only opens the file on the worker, so the run is in flight the moment `start`
+  returns and fails immediately afterwards without reaching `poll` — where a
+  run over a real slide would race the keypress under test, and a test that
+  passes because the work had already finished is a test of nothing. The trick
+  is borrowed from `detect.rs`, where `starting_a_run_stops_the_one_it_replaces`
+  uses it for the same reason.
+
+  What is *not* covered is the two-line match arm in `key` that runs the
+  returned command, because that is the line the `&Window` is actually on. It
+  is as small as that seam gets, and it is the honest residue rather than a
+  claim of completeness.
 
   **The sort combo's dropdown was in the hole for about an hour and is not any
   more**: a popup only exists once its box has been pressed, so

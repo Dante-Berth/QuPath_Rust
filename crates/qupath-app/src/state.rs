@@ -517,6 +517,29 @@ impl Project {
     }
 }
 
+/// What pressing escape found in progress, and therefore abandoned.
+///
+/// A returned decision rather than three branches inside [`App::key`], so the
+/// ordering between them can be asserted: `key` takes a `&Window` and no test
+/// can build one, which is what kept this gesture in `VIEWER.md` §8.8's hole
+/// long after the reason had stopped applying.
+///
+/// The `Run` case carries the command rather than being a bare "handled",
+/// because *which* command it is is half of what there is to get wrong here —
+/// a variant saying only that something happened would be satisfied by a
+/// keypress that started a detection run instead of stopping one.
+#[derive(Debug, Clone, PartialEq)]
+enum Escape {
+    /// Nothing was in progress. The key is not consumed.
+    Nothing,
+    /// A zoom rectangle mid-drag, taken by the decision itself: abandoning it
+    /// is dropping it, and there is nothing elsewhere in the application to
+    /// undo.
+    Band,
+    /// A detection run, which is abandoned by running this.
+    Run(Command),
+}
+
 /// The whole application.
 pub struct App {
     pub window: Option<Arc<Window>>,
@@ -1554,31 +1577,50 @@ impl App {
                 self.run(Command::Export, window);
                 true
             }
-            Key::Named(NamedKey::Escape) => {
-                // Not an exit. In an application escape closes a dialog, and
-                // taking the window down on a stray keypress is what makes an
-                // example an example. What it does do is abandon whatever is in
-                // progress, which is now two things.
-                //
-                // The band goes first and alone: a person drawing a zoom
-                // rectangle while a detection runs in the background means the
-                // rectangle, and stopping their run instead would be a
-                // surprising amount of lost work for one keypress.
-                if self.band.take().is_some() {
-                    return true;
+            // The decision is [`App::escape`], which needs no window; this is
+            // the two lines that carry it out.
+            Key::Named(NamedKey::Escape) => match self.escape() {
+                Escape::Nothing => false,
+                Escape::Band => true,
+                Escape::Run(command) => {
+                    self.run(command, window);
+                    true
                 }
-                // A zoom rectangle in the wrong place and a whole-slide run
-                // started by mistake are the same gesture: undo the thing I
-                // just started. The `Stop` button in the status bar is the
-                // discoverable form of this; escape is the fast one.
-                if self.detector.is_running() {
-                    self.run(Command::StopDetecting, window);
-                    return true;
-                }
-                false
-            }
+            },
             _ => false,
         }
+    }
+
+    /// What pressing escape abandons.
+    ///
+    /// Split out of [`App::key`] because the *ordering* is the behaviour, and
+    /// until this existed there was no way to check it without a hand on the
+    /// keyboard: `key` takes a `&Window`, which no test can build. What needs
+    /// the window is the redraw a command may ask for, not the decision about
+    /// which thing to abandon — the same mistake `VIEWER.md` §8.8 records
+    /// about the browser's rows, where the hole was drawn around the click and
+    /// what `App` could not reach was really the pixel position.
+    ///
+    /// Not an exit. In an application escape closes a dialog, and taking the
+    /// window down on a stray keypress is what makes an example an example.
+    /// What it does do is abandon whatever is in progress, which is now two
+    /// things.
+    fn escape(&mut self) -> Escape {
+        // The band goes first and alone: a person drawing a zoom rectangle
+        // while a detection runs in the background means the rectangle, and
+        // stopping their run instead would be a surprising amount of lost work
+        // for one keypress.
+        if self.band.take().is_some() {
+            return Escape::Band;
+        }
+        // A zoom rectangle in the wrong place and a whole-slide run started by
+        // mistake are the same gesture: undo the thing I just started. The
+        // `Stop` button in the status bar is the discoverable form of this;
+        // escape is the fast one.
+        if self.detector.is_running() {
+            return Escape::Run(Command::StopDetecting);
+        }
+        Escape::Nothing
     }
 
     /// Fits the whole slide into the part of the window that is not chrome.
@@ -3549,5 +3591,117 @@ mod tests {
                 "{command:?} closed the panel under the user"
             );
         }
+    }
+
+    /// A pyramid to start a run against, with a level 0 fine enough that
+    /// `level_for_detection` reads it.
+    ///
+    /// The slide the run is pointed at does not exist, and that is what makes
+    /// this deterministic: `Detector::start` decides the level and the region
+    /// on *this* thread and only opens the file on the worker, so the run is
+    /// in flight the moment `start` returns and fails immediately afterwards
+    /// without ever reaching `poll`. A run over a real slide would race the
+    /// keypress under test — it might finish first, and a test that passes
+    /// because the work was already done is a test of nothing.
+    fn a_pyramid() -> Vec<qupath_slide::Level> {
+        vec![qupath_slide::Level {
+            index: 0,
+            width: 2220,
+            height: 2967,
+            tile_width: 240,
+            tile_height: 240,
+            columns: 10,
+            rows: 13,
+            downsample: 1.0,
+        }]
+    }
+
+    /// An application with a detection run in flight and no window.
+    fn detecting() -> App {
+        let mut app = App::new(Vec::<String>::new());
+        let levels = a_pyramid();
+        app.detector.start(
+            Path::new("/nonexistent/slide.svs"),
+            &levels,
+            &levels[0],
+            Some(0.499),
+            Viewport {
+                centre: SlidePoint::new(1110.0, 1483.0),
+                scale: 1.0,
+                width: 1024,
+                height: 768,
+            },
+            Micron::default(),
+        );
+        assert!(
+            app.detector.is_running(),
+            "the run under test never started"
+        );
+        app
+    }
+
+    /// Escape abandons the zoom band before it stops a detection run.
+    ///
+    /// The ordering *is* the behaviour, and it is not the obvious one: both
+    /// gestures are "undo the thing I just started", and a keypress that
+    /// resolved them the other way round would throw away a whole-slide run —
+    /// up to a minute and a half of every core — because someone was drawing a
+    /// rectangle while it went. That is a surprising amount of lost work for
+    /// one key, and it is silent: the band vanishes either way, so the picture
+    /// on screen after the keypress is the same in both cases and the
+    /// difference only appears when the run does not come back.
+    ///
+    /// Two presses rather than one, because the first press asserted alone
+    /// says nothing about the run: `Escape::Band` is also what a program that
+    /// stopped the run *and* took the band would return. The second press
+    /// finding the run still there is what says the first one left it alone.
+    #[test]
+    fn escape_abandons_the_band_before_it_stops_a_run() {
+        let mut app = detecting();
+        app.band = Some(ScreenPoint::new(120.0, 80.0));
+
+        assert_eq!(
+            app.escape(),
+            Escape::Band,
+            "a band being dragged is what escape means while it is being dragged",
+        );
+        assert!(app.band.is_none(), "the band was not abandoned");
+
+        assert_eq!(
+            app.escape(),
+            Escape::Run(Command::StopDetecting),
+            "the run should have survived the press that took the band, and the \
+             press after it is what stops it",
+        );
+    }
+
+    /// Escape stops a run when nothing else is in progress.
+    ///
+    /// The `Stop` button in the status bar is the discoverable form of this and
+    /// goes through the same command; escape is the fast one. What this pins
+    /// beyond "something happened" is *which* command — a keypress wired to
+    /// `Detect` instead would start a second run over the region, which reads
+    /// on screen as the first one having taken longer.
+    #[test]
+    fn escape_stops_a_run_when_there_is_no_band() {
+        let mut app = detecting();
+        assert!(app.band.is_none(), "no band is being dragged");
+
+        assert_eq!(app.escape(), Escape::Run(Command::StopDetecting));
+    }
+
+    /// Escape with nothing in progress is not consumed.
+    ///
+    /// The outward-facing half, and the reason `key` returns a bool at all: a
+    /// keypress reported as handled is one no other handler sees. Escape is a
+    /// key an application gives away when it has nothing to abandon, and the
+    /// failure it prevents is invisible from inside this function — a dialog
+    /// that will not close, in code that has not been written yet.
+    #[test]
+    fn escape_with_nothing_in_progress_is_not_consumed() {
+        let mut app = App::new(Vec::<String>::new());
+        assert!(!app.detector.is_running() && app.band.is_none());
+
+        assert_eq!(app.escape(), Escape::Nothing);
     }
 }
