@@ -213,3 +213,146 @@ fn matches_qupath_on_a_real_tile() {
     };
     check(&parse_case(&text, "tile"), &Stains::h_and_e());
 }
+
+/// Reads the tile's geometry, so the region can be re-read with our decoder.
+fn tile_region(text: &str) -> (PathBuf, usize, u32, u32, u32, u32) {
+    let slide = {
+        let (name, _) = between(text, "\"slide\": \"", "\"", 0);
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../data")
+            .join(name)
+    };
+    let field = |key: &str| -> u32 {
+        let (value, _) = between(text, key, ",", 0);
+        value.trim().parse().expect("number")
+    };
+    // Recorded at downsample 1.0, which is level 0.
+    (
+        slide,
+        0,
+        field("\"x\": "),
+        field("\"y\": "),
+        field("\"width\": "),
+        field("\"height\": "),
+    )
+}
+
+/// Asks whether D-004's one-channel-step decode difference survives the stains.
+///
+/// `matches_qupath_on_a_real_tile` deliberately starts from `rgbIn` — QuPath's
+/// *own* decoded pixels — so that it isolates the deconvolution and says
+/// nothing about the decoder underneath it. That is the right design for that
+/// test and it leaves a gap: D-004 measures our JPEG decode against
+/// Bio-Formats' at up to one channel step on this very region, and records that
+/// this has never been shown to be harmless. Nothing downstream covers it,
+/// because every stage fixture starts from recorded input.
+///
+/// So this feeds *our* decode of the same rectangle through the same
+/// deconvolution and compares against the same recorded stain values. It is the
+/// composition that matters: a step of 1 in a channel is not interesting on its
+/// own, but the deconvolution takes a logarithm and then differences three
+/// channels that nearly cancel, which is exactly where a small input difference
+/// can stop being small.
+///
+/// This asserts a bound rather than equality. The two decoders are permitted to
+/// differ — see D-004 — so requiring equality here would be requiring one IDCT.
+/// What it pins is the *magnitude*: the stain channels stay far below the
+/// values the pipeline's thresholds act on.
+#[test]
+fn decode_difference_survives_deconvolution_only_as_noise() {
+    let path = fixture("ColourDeconvolutionTile.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        qupath_testing::skipped(&format!("{} not recorded", path.display()));
+        return;
+    };
+
+    let (slide_path, level, x, y, width, height) = tile_region(&text);
+    let Ok(slide) = qupath_slide::Slide::open(&slide_path) else {
+        qupath_testing::skipped(&format!("{} absent", slide_path.display()));
+        return;
+    };
+
+    let case = parse_case(&text, "tile");
+    let stains = Stains::h_and_e();
+    let rgb = slide
+        .read_region_rgb(level, x, y, width, height)
+        .unwrap_or_else(|e| panic!("{}: {e}", slide_path.display()));
+
+    assert_eq!(
+        rgb.len(),
+        case.rgb.len() * 3,
+        "read {} bytes for {} pixels",
+        rgb.len(),
+        case.rgb.len()
+    );
+
+    // How far the decoders differ, so a failure says whether the cause is the
+    // decode or the deconvolution built on it.
+    let mut worst_channel = 0i32;
+    let mut differing = 0usize;
+    for (pixel, &packed) in case.rgb.iter().enumerate() {
+        let theirs = [
+            ((packed >> 16) & 0xff) as i32,
+            ((packed >> 8) & 0xff) as i32,
+            (packed & 0xff) as i32,
+        ];
+        let mut any = false;
+        for channel in 0..3 {
+            let ours = i32::from(rgb[pixel * 3 + channel]);
+            let difference = (ours - theirs[channel]).abs();
+            worst_channel = worst_channel.max(difference);
+            any |= difference != 0;
+        }
+        differing += usize::from(any);
+    }
+
+    // The composed question: what those steps become after the logarithm and
+    // the near-cancelling three-channel difference.
+    let mut worst_stain = 0.0f64;
+    let mut worst_at = (0usize, 0usize);
+    let mut total = 0.0f64;
+    for (stain_index, expected) in case.stains.iter().enumerate() {
+        for (pixel, &theirs) in expected.iter().enumerate() {
+            let ours = f64::from(stains.stain(
+                stain_index,
+                rgb[pixel * 3],
+                rgb[pixel * 3 + 1],
+                rgb[pixel * 3 + 2],
+            ));
+            let difference = (ours - theirs).abs();
+            total += difference;
+            if difference > worst_stain {
+                worst_stain = difference;
+                worst_at = (stain_index, pixel);
+            }
+        }
+    }
+    let mean = total / (case.rgb.len() * 3) as f64;
+
+    println!(
+        "decode: worst channel step {worst_channel}, {differing} of {} pixels differ\n\
+         stains: worst absolute {worst_stain:.6} at stain {}, pixel {} — mean {mean:.6}",
+        case.rgb.len(),
+        worst_at.0,
+        worst_at.1,
+    );
+
+    // A regression floor, not a success criterion. Haematoxylin over nuclei
+    // runs of order 1, so 0.012 is about 1% of the signal the thresholds act
+    // on — small enough to be noise, and tight enough to discriminate.
+    //
+    // The bound is set from a mutation rather than chosen: subtracting one
+    // extra step from every red channel — a systematic decode error far worse
+    // than the scattered rounding D-004 measures — reaches 0.0179, and four
+    // steps reach 0.0743. The measured difference is 0.0075. A looser bound
+    // (0.05 was tried) passes the one-step mutation and so would not catch the
+    // failure this test exists for.
+    assert!(
+        worst_stain <= 0.012,
+        "a one-step decode difference became {worst_stain:.6} in stain {} \
+         at pixel {} — larger than rounding explains, so the deconvolution is \
+         amplifying it",
+        worst_at.0,
+        worst_at.1
+    );
+}

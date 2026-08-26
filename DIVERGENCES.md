@@ -514,14 +514,46 @@ at the limits recorded the mask saturates its crop and both radii cover the same
 set; turning `>` into `>=` also passes, because no pixel sits exactly on the
 limit. Pinning the radius needs a crop whose mask is a *small isolated* blob.
 
-**Status:** three stages are now ruled out — the merge, the shape split, and the
-background estimate with its subtraction — each pixel-for-pixel on real tissue.
-What remains between the deconvolution and the first rung of the ladder is the
-**blur, the Laplacian, the regional maxima, the labelling and the flood**, plus
-the deconvolution itself and the decode under it (D-004 puts slide pixels within
-one channel step of QuPath's, which has never been shown to be harmless). Each
-has a synthetic fixture and none has one on tissue, which is now the pattern
-worth trusting: this project's stages agree on constructed input and the
-question is always what they do on real input. Do not treat the two dense
+**The deconvolution and the decode under it are now ruled out too, and the
+claim this entry made about them was wrong.** This paragraph used to say that
+every remaining stage had "a synthetic fixture and none has one on tissue". That
+was false for the deconvolution when it was written: `ColourDeconvolutionTile.json`
+records a real 64x64 tile at (27776, 5952) — inside the dense region, the same
+rectangle as `SlideRegion.json`'s `tissue` case — through
+`ColorTransformer.getTransformedPixels`, the call `IJTools.colorDeconvolve`
+makes for `WatershedCellDetection`. It agrees to a worst **relative 5.9e-8**.
+The lesson is the one this file keeps relearning from the other direction:
+a stage was carried as an open suspect because a document said it was, and the
+fixtures directory said otherwise.
+
+**What that fixture deliberately does not cover is the decode**, and that gap
+was real. It starts from `rgbIn` — QuPath's *own* decoded pixels — which is
+correct design, because it isolates the deconvolution; but it means D-004's
+one-channel-step difference is excluded from the comparison rather than tested
+by it, and nothing downstream covered it either, since every stage fixture
+starts from recorded input.
+
+`decode_difference_survives_deconvolution_only_as_noise` composes the two: our
+decode of that rectangle, through the same deconvolution, against the same
+recorded stain values. **103 of 4096 pixels differ, by at most one channel
+step, and the worst stain-channel difference that produces is 0.0075 with a
+mean of 0.000059** — against haematoxylin values of order 1 over nuclei. So the
+logarithm and the near-cancelling three-channel difference do not amplify it,
+and D-004 is harmless at this stage rather than merely small.
+
+The bound was set by mutation, not chosen. Subtracting one extra step from
+every red channel — a *systematic* error far worse than the scattered rounding
+D-004 measures — reaches 0.0179, and four steps reach 0.0743. An earlier bound
+of 0.05 passed the one-step mutation, which is to say it would not have caught
+the failure the test exists for; it is 0.012 now, and the mutation fails it.
+
+**Status:** five stages are now ruled out — the merge, the shape split, the
+background estimate with its subtraction, the colour deconvolution, and the
+JPEG decode beneath it — each on real tissue. What remains between the
+deconvolution and the first rung of the ladder is the **blur, the Laplacian,
+the regional maxima, the labelling and the flood**. Each has a synthetic
+fixture and none has one on tissue, which is the pattern worth trusting: this
+project's stages agree on constructed input and the question is always what
+they do on real input. Do not treat the two dense
 regions' 1.012–1.018 as the project's parity figure any more than the old
 1.035x — see `docs/MEMO.md` §2 for the pooled number.
