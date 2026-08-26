@@ -40,7 +40,7 @@
 
 use qupath_objects::{FeatureId, Table};
 
-use crate::Region;
+use crate::{Extent, Region};
 
 /// Filled area of the nucleus, in pixels of the level the run read.
 ///
@@ -74,6 +74,16 @@ pub struct Detections {
     table: Table,
     area: FeatureId,
     mean: FeatureId,
+    /// One packed bitmask per object, when [`Detections::collect_masks`] asked
+    /// for them. Object `i` occupies `mask_bits[mask_starts[i]..[i + 1]]`, is
+    /// row-major over its own bounding box, and is bit `row * width + column`
+    /// counting from the least significant bit of the first word.
+    ///
+    /// Empty when masks were never asked for, which is every path but parity.
+    mask_bits: Vec<u64>,
+    /// `len() + 1` entries when masks are on, and `[0]` when they are off.
+    mask_starts: Vec<u32>,
+    masks_wanted: bool,
 }
 
 impl Detections {
@@ -93,7 +103,57 @@ impl Detections {
             table,
             area,
             mean,
+            mask_bits: Vec::new(),
+            mask_starts: vec![0],
+            masks_wanted: false,
         }
+    }
+
+    /// An empty set that will also carry a filled-pixel mask per object.
+    ///
+    /// **Only parity wants this.** A mask is the bounding box's area in bits,
+    /// so it costs far more than the 322 bytes an object costs above and it
+    /// grows with nucleus size rather than perimeter. Every viewer path uses
+    /// [`Detections::new`] and pays none of it.
+    ///
+    /// Why a mask at all, when [`Detections::outline`] already exists: QuPath's
+    /// `ObjectMasks.json` records `Roi::getMask`, ImageJ's own pixel mask, and
+    /// comparing it against a rasterisation of our outline would put our
+    /// rasteriser inside the comparison rather than the detection. The mask
+    /// here is copied straight out of the label map the pipeline already
+    /// built, so both sides are the pixels each pipeline actually decided on.
+    #[must_use]
+    pub fn collecting_masks(level: usize) -> Self {
+        Self {
+            masks_wanted: true,
+            ..Self::new(level)
+        }
+    }
+
+    /// Whether this set is carrying masks.
+    #[must_use]
+    pub fn has_masks(&self) -> bool {
+        self.masks_wanted
+    }
+
+    /// The packed filled-pixel mask of one object, or `None` if masks are off.
+    ///
+    /// Row-major over [`Detections::bounds`] `object`, bit `row * width +
+    /// column`, least significant bit first — the packing
+    /// `parity/java/.../RecordObjectMasks.java` writes, so the two can be
+    /// compared word against word.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `object` is past the end.
+    #[must_use]
+    pub fn mask(&self, object: usize) -> Option<&[u64]> {
+        if !self.masks_wanted {
+            return None;
+        }
+        let start = self.mask_starts[object] as usize;
+        let end = self.mask_starts[object + 1] as usize;
+        Some(&self.mask_bits[start..end])
     }
 
     /// Which pyramid level the coordinates are in.
@@ -198,7 +258,45 @@ impl Detections {
         self.vertices.extend_from_slice(outline);
         self.starts
             .push(u32::try_from(self.vertices.len()).expect("vertex count exceeds u32"));
+        if self.masks_wanted {
+            // No pixels to copy here: [`Detections::push_mask`] is the only
+            // caller with the label map, and it appends immediately after.
+            self.mask_starts
+                .push(u32::try_from(self.mask_bits.len()).expect("mask words exceed u32"));
+        }
         row.index()
+    }
+
+    /// Fills in the mask of the object [`Detections::push`] just appended, by
+    /// copying the pixels labelled `label` out of `regions`.
+    ///
+    /// `extent` is the object's box within `regions`, whose row stride is
+    /// `width`. A no-op when masks are off, so a caller need not branch.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no object has been pushed yet.
+    pub fn push_mask(&mut self, regions: &[u32], width: usize, label: u32, extent: Extent) {
+        if !self.masks_wanted {
+            return;
+        }
+        let (w, h) = (extent.width as usize, extent.height as usize);
+        let start = self.mask_bits.len();
+        self.mask_bits.resize(start + (w * h).div_ceil(64), 0);
+        for row in 0..h {
+            let line = (extent.y as usize + row) * width + extent.x as usize;
+            for column in 0..w {
+                if regions[line + column] == label {
+                    let bit = row * w + column;
+                    self.mask_bits[start + bit / 64] |= 1 << (bit % 64);
+                }
+            }
+        }
+        let end = u32::try_from(self.mask_bits.len()).expect("mask words exceed u32");
+        *self
+            .mask_starts
+            .last_mut()
+            .expect("push_mask follows a push") = end;
     }
 
     /// Appends every object of `other` whose row `keep` marks true.
@@ -232,6 +330,13 @@ impl Detections {
             self.vertices.extend_from_slice(other.outline(object));
             self.starts
                 .push(u32::try_from(self.vertices.len()).expect("vertex count exceeds u32"));
+            if self.masks_wanted {
+                if let Some(mask) = other.mask(object) {
+                    self.mask_bits.extend_from_slice(mask);
+                }
+                self.mask_starts
+                    .push(u32::try_from(self.mask_bits.len()).expect("mask words exceed u32"));
+            }
         }
     }
 
@@ -240,6 +345,8 @@ impl Detections {
         self.bounds.shrink_to_fit();
         self.vertices.shrink_to_fit();
         self.starts.shrink_to_fit();
+        self.mask_bits.shrink_to_fit();
+        self.mask_starts.shrink_to_fit();
         self.table.shrink_to_fit();
     }
 }

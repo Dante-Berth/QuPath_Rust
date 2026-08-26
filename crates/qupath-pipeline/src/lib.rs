@@ -634,7 +634,7 @@ const LAPLACIAN: [f32; 9] = [0.0, -1.0, 0.0, -1.0, 4.0, -1.0, 0.0, -1.0, 0.0];
 /// Fails if the level does not exist, the region leaves it, or a tile cannot
 /// be decoded.
 pub fn run(slide: &Slide, region: Region, params: Params) -> Result<Outcome, PipelineError> {
-    let (outcome, _) = run_inner(slide, region, params, false, None)?;
+    let (outcome, _) = run_inner(slide, region, params, false, false, None)?;
     Ok(outcome)
 }
 
@@ -662,7 +662,36 @@ pub fn run_collecting(
     region: Region,
     params: Params,
 ) -> Result<(Outcome, Detections), PipelineError> {
-    let (outcome, detections) = run_inner(slide, region, params, true, None)?;
+    let (outcome, detections) = run_inner(slide, region, params, true, false, None)?;
+    Ok((
+        outcome,
+        detections.expect("run_inner returns detections when asked for them"),
+    ))
+}
+
+/// [`run_collecting`], also carrying the filled-pixel mask of every object.
+///
+/// **For parity, and nothing else.** A mask costs the bounding box's area in
+/// bits per object, which dwarfs the 322 bytes [`Detections`] documents, so
+/// this breaks §6's memory bound harder than [`run_collecting`] already does.
+/// Ask for one region, not a slide.
+///
+/// What it is for: QuPath's `ObjectMasks.json` records `Roi::getMask` for every
+/// nucleus it detects, and comparing that against a rasterisation of
+/// [`Detections::outline`] would compare our rasteriser rather than our
+/// detection. The masks here come straight out of the label map this pipeline
+/// already built, so a Dice or IoU over the two is a statement about the two
+/// segmentations and not about either side's polygon filling.
+///
+/// # Errors
+///
+/// As [`run_collecting`].
+pub fn run_collecting_masks(
+    slide: &Slide,
+    region: Region,
+    params: Params,
+) -> Result<(Outcome, Detections), PipelineError> {
+    let (outcome, detections) = run_inner(slide, region, params, true, true, None)?;
     Ok((
         outcome,
         detections.expect("run_inner returns detections when asked for them"),
@@ -691,7 +720,7 @@ pub fn run_collecting_watched(
     params: Params,
     progress: &Progress,
 ) -> Result<(Outcome, Detections), PipelineError> {
-    let (outcome, detections) = run_inner(slide, region, params, true, Some(progress))?;
+    let (outcome, detections) = run_inner(slide, region, params, true, false, Some(progress))?;
     Ok((
         outcome,
         detections.expect("run_inner returns detections when asked for them"),
@@ -703,6 +732,7 @@ fn run_inner(
     region: Region,
     params: Params,
     collect: bool,
+    masks: bool,
     progress: Option<&Progress>,
 ) -> Result<(Outcome, Option<Detections>), PipelineError> {
     let level = slide
@@ -927,7 +957,7 @@ fn run_inner(
                     &padded,
                     width,
                     found.nuclei,
-                    collect.then_some(params.level),
+                    collect.then_some((params.level, masks)),
                 );
                 // Last, so the count never runs ahead of the work: a reader
                 // seeing n tiles done can rely on n tiles' objects existing.
@@ -954,7 +984,11 @@ fn run_inner(
     let duplicates = resolve_overlaps(&padded, &mut seam_candidates);
 
     let detections = collect.then(|| {
-        let mut all = Detections::new(params.level);
+        let mut all = if masks {
+            Detections::collecting_masks(params.level)
+        } else {
+            Detections::new(params.level)
+        };
         for (harvest, &offset) in harvests.iter().zip(&offsets) {
             let Some(tile) = harvest.detected.as_ref() else {
                 continue;
@@ -1225,9 +1259,12 @@ struct TileHarvest {
 /// without a mask — which is the difference between carrying pixel sets for
 /// every detection in the region and carrying them for the seams.
 ///
-/// `collect` is the level to record detections in, or `None` to record none. It
-/// is a level rather than a `bool` because [`Detections`] is meaningless without
-/// knowing which pyramid level its coordinates are in.
+/// `collect` is the level to record detections in and whether to carry a
+/// filled-pixel mask per object, or `None` to record none. It is a level rather
+/// than a `bool` because [`Detections`] is meaningless without knowing which
+/// pyramid level its coordinates are in; the mask flag rides along because only
+/// the parity comparison wants masks and every other caller should not pay for
+/// them.
 ///
 /// Returns nothing at all for a single-tile run that asked for no detections,
 /// where there is neither a seam nor anything to keep.
@@ -1238,10 +1275,16 @@ fn harvest(
     padded: &[Region],
     width: usize,
     count: u32,
-    collect: Option<usize>,
+    collect: Option<(usize, bool)>,
 ) -> TileHarvest {
     let seams_exist = padded.len() > 1;
-    let mut detected = collect.map(Detections::new);
+    let mut detected = collect.map(|(level, masks)| {
+        if masks {
+            Detections::collecting_masks(level)
+        } else {
+            Detections::new(level)
+        }
+    });
     if !seams_exist && detected.is_none() {
         return TileHarvest {
             seam: Vec::new(),
@@ -1286,7 +1329,12 @@ fn harvest(
             // The mean the area filter already computed, not a second pass over
             // the pixels: a detection's measurement and the reason it survived
             // cannot then disagree.
-            detected.push(bounds, &ring, extent.area, scratch.objects.stats()[at].mean)
+            let row = detected.push(bounds, &ring, extent.area, scratch.objects.stats()[at].mean);
+            // Straight out of the label map, not a rasterisation of `ring`:
+            // see `Detections::collecting_masks` for why that distinction is
+            // the whole point of the mask comparison.
+            detected.push_mask(&scratch.regions, width, region_index, *extent);
+            row
         });
 
         let reaches_a_seam = seams_exist
