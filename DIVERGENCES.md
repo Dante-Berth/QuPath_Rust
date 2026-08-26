@@ -417,6 +417,33 @@ the gap becomes *visible* — the two stages whose ratios move with it — not w
 it is *made*. A stage that faithfully processes a different input produces
 different output, and the ratios move because the input does.
 
+**The objects that do correspond are the right shape, which narrows it again.**
+`examples/object_masks` compares this pipeline's nucleus masks against QuPath's
+recorded ones over these same three regions, pixel for pixel:
+
+| region | ratio | pooled Dice | matched at Dice ≥ 0.5 | unmatched ours / theirs |
+| --- | ---: | ---: | ---: | ---: |
+| dense, 1597 c/Mpx | 1.0121 | 0.9351 | 6,296 of 6,389 | 167 / 90 |
+| dense, 1741 c/Mpx | 1.0177 | 0.9340 | 6,871 of 6,965 | 217 / 94 |
+| sparse, 931 c/Mpx | **1.1130** | **0.8801** | 3,557 of 3,725 | **557** / 136 |
+
+**Dice moves with the count ratio, and the unmatched objects move far more.**
+As a fraction of each side, the objects with no partner at all run **2.6%, 3.1%,
+13.4%** of ours against **1.4%, 1.4%, 3.7%** of QuPath's. Ours jumps by five
+times across the density range; theirs by under three, from a much lower base.
+Mean Dice over the pairs that *do* correspond moves far less over the same three
+regions — 0.929, 0.928, 0.894. So the gap is **not** a
+uniform shift in where every boundary falls — 97.9% of QuPath's nuclei pooled
+still find a one-to-one partner at Dice ≥ 0.5, and the mean Dice over matched
+pairs is 0.921. It is a population of extra objects on sparse tissue, on top of
+boundaries that otherwise agree.
+
+That is consistent with the suspect named below and not with a geometry bug: a
+background estimate that differs moves every candidate's mean at once and so
+changes *which* faint candidates survive, which shows up as unmatched objects
+rather than as displaced ones. A stage that traced or split differently would
+have degraded Dice on the matched pairs too, and it does not.
+
 **Which puts the search upstream**, on what reaches the merge: the background
 estimate and its subtraction, the LoG, the regional maxima, the labelling and
 the flood. The mean-intensity filter is the one link there already pinned

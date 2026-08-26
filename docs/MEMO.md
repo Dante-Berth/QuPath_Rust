@@ -51,6 +51,21 @@ by stage — but **only the contour is wired into the pipeline**. `smooth_bounda
 `expand_labels` and `cell_areas` are called by nothing but their own parity
 tests, so no end-to-end figure here reflects them.
 
+**The nuclei, not the count.** The strongest claim here used to be a count, and
+a count cannot tell a match from a coincidence. `ObjectMasks.json` — recorded,
+tracked and for several sessions read by nothing — holds QuPath's mask for every
+nucleus over three single-tile regions, and `examples/object_masks` now compares
+it against ours pixel for pixel: pooled Dice **0.935, 0.934, 0.880**, mean Dice
+0.921 over 16,759 one-to-one pairs, **97.9%** of QuPath's 17,079 nuclei matched
+at Dice ≥ 0.5. Single-tile by construction, so D-008 cannot reach it.
+
+Read the third region against the other two before reading the headline. Its
+Dice is the lowest *and* its count ratio is the worst (1.113 against 1.012 and
+1.018), and its unmatched objects are 557 of ours against 136 of theirs. That is
+the same density-dependent gap §2 is about, now visible as shape rather than
+only as a total — the per-object comparison localises D-009, it does not close
+it.
+
 **The count.** This was quoted for several sessions as 26,647 objects against
 QuPath's 25,757 cells — **1.035x** — on the profiled 4000x4000 region. That
 number is still exactly right and it was the wrong number to quote, because it
@@ -425,12 +440,16 @@ plans that were wrong.
 
 ## 5. What to distrust right now
 
-- **The 1.035x count, above everything else on this list.** It is a count, and
-  a count is the weakest evidence of a match there is: two runs can agree on how
-  many objects they found and disagree about where every one of them is. The
-  strong test — Dice or IoU >= 0.99 on the object masks — needs QuPath's
-  per-object masks recorded and no fixture holds them. **A matching count is
-  necessary and is not sufficient.**
+- **The counts, still — but less alone than they were.** A count is the weakest
+  evidence of a match there is: two runs can agree on how many objects they
+  found and disagree about where every one of them is. The strong test has now
+  been run over three regions — pooled Dice 0.935, 0.934, 0.880, with 97.9% of
+  QuPath's nuclei matched one-to-one at Dice >= 0.5 — so "necessary and not
+  sufficient" is no longer the end of the sentence. **What to distrust in it:**
+  it is 17,079 nuclei over three single-tile regions of one slide, not the ten
+  regions the count figure pools and not any region with a seam, so it says
+  nothing at all about `resolve_overlaps` below. And it **misses §5's 0.99
+  criterion**, which is recorded as a miss rather than met by moving the bar.
 - **`resolve_overlaps`, which is where the residual gap most likely is.** It has
   no QuPath-recorded fixture; its nine tests use hand-built candidates; one real
   divergence was found in it by re-reading the Java rather than by any of them

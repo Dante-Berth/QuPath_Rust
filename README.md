@@ -65,6 +65,19 @@ outside their own parity tests, which is why the viewer exposes no control for
 smoothing and why the counts above compare raw pixel boundaries against QuPath's
 smoothed cells.
 
+**The nuclei themselves agree, not just how many there are.** Over three
+single-tile regions of CMU-1, against the mask QuPath recorded for every
+nucleus it detected, the pooled Dice is **0.935, 0.934 and 0.880**, and
+**97.9% of QuPath's 17,079 nuclei** find a one-to-one partner at Dice ≥ 0.5,
+mean Dice 0.921 over matched pairs. Pooled Dice involves no matching decision,
+so read it first. The regions fit one tile each, so none of the seam
+resolution `DIVERGENCES.md` D-008 describes can reach these numbers: this is
+detection compared against detection, pixel for pixel. Both sides are the
+pixels each pipeline labelled — comparing QuPath's mask against a
+rasterisation of our polygon would have measured our rasteriser. Reproduce
+with `./parity/record-object-masks.sh` then
+`cargo run --release --example object_masks -p qupath-pipeline`.
+
 **Measured over ten regions of CMU-1 the pooled count is 156,979 objects against
 QuPath's 147,351 cells — 1.065x, with a range of 1.012–1.129 across regions** and
 always in the same direction: this over-counts. On the profiled 4000x4000 region
@@ -84,8 +97,13 @@ puts the cause between the deconvolution and the flood. See D-009 in
 
 A matching count is also the weakest evidence of a match there is — two runs can
 agree on how many objects they found and disagree about where every one of them
-is. The strong test, Dice or IoU over the object masks, needs QuPath's
-per-object masks recorded, and no fixture holds them yet.
+is. **That test has now been run**: `ObjectMasks.json` records QuPath's mask for
+every nucleus over three regions, and the Dice and IoU above are over those
+masks against ours. It is what turns "the counts agree within 6.5%" into a
+statement about the objects. What it does not do is explain the count gap: the
+region whose count disagrees most is also the one whose Dice is lowest, which
+points at the same density-dependent divergence D-009 is open on rather than
+away from it.
 
 **None of the last four stages was the fix the roadmap expected**, and the
 corrections are worth more than the code:

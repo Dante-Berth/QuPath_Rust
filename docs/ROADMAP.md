@@ -680,10 +680,27 @@ most likely is.
 
 **What is still not claimable is time**, and no honest comparison against
 QuPath's 15.87 s exists yet: QuPath spends part of that on the tail this
-pipeline does not have. Nor is the stronger success criterion met — Dice or IoU
->= 0.99 on the object masks per §5 needs QuPath's per-object masks recorded,
-which no fixture holds. A matching count is necessary and is not sufficient: two
-runs can agree on how many objects there are and disagree about where.
+pipeline does not have. **The stronger success criterion has now been measured, and it is not met.**
+§5 asks for Dice or IoU >= 0.99 on the object masks. `ObjectMasks.json` holds
+QuPath's per-object masks over three single-tile regions, `examples/object_masks`
+compares them, and the pooled Dice comes to **0.935, 0.934 and 0.880** — mean
+Dice 0.921 over 16,759 one-to-one pairs, with 97.9% of QuPath's 17,079 nuclei
+matched at Dice >= 0.5.
+
+That is a miss against §5 and is recorded as one rather than as a tolerance to
+be widened, which `parity/README.md` forbids. Two things are worth separating in
+it. The **shape**
+agreement on objects that correspond stays high across regions — mean Dice 0.929,
+0.928 and 0.894, a spread of 0.035 — while what moves far more is **how many objects have no counterpart at
+all**, which tracks density exactly as the count gap does (D-009 carries the
+table). So the residual is not a boundary that lands consistently one pixel out
+— that would depress Dice everywhere and it does not — it is a population of
+extra objects on sparse tissue. Reaching 0.99 means closing D-009, not tightening
+a tracer.
+
+A matching count was necessary and was never sufficient: two runs can agree on
+how many objects there are and disagree about where. That is no longer the
+strongest thing said here.
 
 ---
 
