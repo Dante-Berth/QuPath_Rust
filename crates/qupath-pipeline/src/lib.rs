@@ -26,13 +26,21 @@
 //! two measurements, columnar per §4. [`run`] is unchanged and still returns
 //! counts only, because it is the one that has to keep §6's memory bound.
 //!
-//! What is still absent:
+//! What is still absent **from this pipeline**:
 //!
-//! - **Cell expansion and measurement.** Neither changes the nucleus count.
+//! - **Measurement.** Unported everywhere; it does not change the nucleus count.
+//! - **Cell expansion.** `qupath_watershed::expand_labels` and `cell_areas` are
+//!   ported and pinned against `CellExpansion.json`, but nothing here calls
+//!   them, so no figure this crate produces involves cells.
 //! - **Boundary smoothing.** QuPath interpolates and simplifies each polygon
 //!   before anything else sees it; these outlines are the raw pixel boundary.
+//!   `qupath_watershed::smooth_boundary` is ported and pinned stage by stage
+//!   against `SmoothBoundaries.json`, and is likewise called by nothing here.
 //!   That is half of what `DIVERGENCES.md` D-008 is about, and having the
 //!   vertices is what makes it possible to look at for the first time.
+//!
+//! The distinction matters for reading any number below: "ported" means pinned
+//! against QuPath in `qupath-watershed`; "called" means it affects the counts.
 //!
 //! So [`Outcome::objects`] is now a count of the same objects QuPath's
 //! `roisNuclei` holds after its area filter — see `docs/ROADMAP.md` §1.5 for

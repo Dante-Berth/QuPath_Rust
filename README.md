@@ -55,10 +55,15 @@ the regional maxima, the labelling, the flood, the region tracing, the
 mean-intensity filter, the merge, the shape split, `refineBoundary` and the area
 filter. What is missing is the tail — the measurements — which does not change
 how many objects there are. The ROI **vertices**, the **boundary smoothing** over
-them and the **cell expansion** were the rest of that tail and are now ported: the
-contour against ImageJ's own Wand over nine cases, `smoothBoundaries`' four stages
-against QuPath over twelve more, and the expansion's EDM/negate/flood chain over
-ten at four checkpoints each, every intermediate pinned.
+them and the **cell expansion** were the rest of that tail. All three are ported
+and pinned in `qupath-watershed`: the contour against ImageJ's own Wand over nine
+cases, `smoothBoundaries`' four stages against QuPath over twelve more, and the
+expansion's EDM/negate/flood chain over ten at four checkpoints each, every
+intermediate pinned. **Of those three only the contour is called by the
+pipeline.** `smooth_boundary`, `expand_labels` and `cell_areas` have no caller
+outside their own parity tests, which is why the viewer exposes no control for
+smoothing and why the counts above compare raw pixel boundaries against QuPath's
+smoothed cells.
 
 **Measured over ten regions of CMU-1 the pooled count is 156,979 objects against
 QuPath's 147,351 cells — 1.065x, with a range of 1.012–1.129 across regions** and
@@ -196,8 +201,9 @@ nucleus in orange:
 
 Further in, at level 0 and past 1:1, where the outlines can be checked against
 individual nuclei. The boundaries are pixel-stepped because nothing smooths
-them yet — QuPath's *Smooth boundaries* is not implemented
-([docs/VIEWER.md](docs/VIEWER.md) §8.1), and a control for it is deliberately
+them yet — `smooth_boundary` is ported and pinned against QuPath in
+`qupath-watershed`, but nothing in the pipeline calls it
+([docs/VIEWER.md](docs/VIEWER.md) §8.1), so a control for it is deliberately
 absent rather than present and inert:
 
 ![Nuclear outlines at level 0](docs/images/viewer-zoom1.jpg)

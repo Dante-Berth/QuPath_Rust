@@ -45,8 +45,11 @@ segmentation, `refineBoundary`, and the area filter.
 
 **What is missing is the tail**, and none of it changes how many objects there
 are: the measurements. The ROI vertices, the boundary smoothing over them and the
-cell expansion were the rest of that list and are now ported, pinned against
-ImageJ's Wand and against QuPath's own chain stage by stage.
+cell expansion were the rest of that list. All three are ported and pinned in
+`qupath-watershed` — against ImageJ's Wand and against QuPath's own chain stage
+by stage — but **only the contour is wired into the pipeline**. `smooth_boundary`,
+`expand_labels` and `cell_areas` are called by nothing but their own parity
+tests, so no end-to-end figure here reflects them.
 
 **The count.** This was quoted for several sessions as 26,647 objects against
 QuPath's 25,757 cells — **1.035x** — on the profiled 4000x4000 region. That

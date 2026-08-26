@@ -1252,8 +1252,8 @@ else, so six numbers QuPath puts in a dialog are unreachable here.
 | Minimum area | `min_area` | implemented, not exposed |
 | Maximum area | `max_area` | implemented, not exposed |
 | Median filter radius | — | **not implemented** |
-| Cell expansion | — | **not implemented** (lib.rs §31) |
-| Smooth boundaries | — | **not implemented** (lib.rs §32) |
+| Cell expansion | — | ported in `qupath-watershed`, **not called by the pipeline** |
+| Smooth boundaries | — | ported in `qupath-watershed`, **not called by the pipeline** |
 | Split by shape | always on | not a parameter here |
 
 The right-hand column is why this is a table rather than a list. **A control for
