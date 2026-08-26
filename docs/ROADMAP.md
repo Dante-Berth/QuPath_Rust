@@ -60,10 +60,11 @@ here.
 **That reasoning is sound and it is no longer where to look first.** The
 ten-region sweep sorts the gap by cell **density**, not by seam count, and three
 of the ten regions are a single tile with no seams at all and still disagree —
-one of them by 1.113, the widest of the three. D-009 has since ruled out the
-merge, the shape split and the background estimate against QuPath on real tissue,
-pixel for pixel. What is left is between the deconvolution and the flood, and
-that is the first place to look for the remainder.
+one of them by 1.113, the widest of the three. D-009 has since ruled out seven
+stages against QuPath on real tissue, pixel for pixel — the merge, the shape
+split, the colour deconvolution, the JPEG decode beneath it, the labelling, the
+flood and the background estimate. What is left is the blur, the Laplacian and
+the regional maxima, and that is the first place to look for the remainder.
 
 **The end-to-end time is still not comparable to QuPath's 15.87 s.** What
 separates the two is now the tail — the measurements — which does not change how

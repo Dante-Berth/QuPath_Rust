@@ -600,10 +600,9 @@ labelling and the flood (from the ladder above), and the background estimate
 with its subtraction, the last of these at production size as well as at
 160x160. What remains between the deconvolution and the first rung is the
 **blur, the Laplacian and the regional maxima** — three stages, each with a
-synthetic fixture and none with one on tissue. Each has a synthetic
-fixture and none has one on tissue at the size it runs at, which is the pattern
-worth trusting: this project's stages agree on constructed input, and the
-question is always what they do on real input — at the size the pipeline
-actually gives them, which is the lesson the 320 px crops added. Do not treat the two dense
-regions' 1.012–1.018 as the project's parity figure any more than the old
-1.035x — see `docs/MEMO.md` §2 for the pooled number.
+synthetic fixture and none with one on tissue at the size it runs at, which is
+the pattern worth trusting: this project's stages agree on constructed input,
+and the question is always what they do on real input — at the size the
+pipeline actually gives them, which is the lesson the 320 px crops added. Do
+not treat the two dense regions' 1.012–1.018 as the project's parity figure any
+more than the old 1.035x — see `docs/MEMO.md` §2 for the pooled number.

@@ -90,9 +90,12 @@ What the gap tracks is cell **density**, inversely: sparse regions diverge by
 6–13% where dense ones agree to within 1–3.5%, and the seam count does not sort
 the table. So it is **not** primarily the tile-seam resolution D-008 predicted —
 three of the ten regions are a single tile with no seams at all, and they still
-disagree. Three stages have since been ruled out against QuPath on real tissue,
-pixel for pixel — the merge, the shape split, and the background estimate — which
-puts the cause between the deconvolution and the flood. See D-009 in
+disagree. Seven stages have since been ruled out against QuPath on real tissue,
+pixel for pixel — the merge, the shape split, the colour deconvolution, the JPEG
+decode beneath it, the labelling, the flood, and the background estimate, that
+last at the 2048x2048 the pipeline actually runs it at. What remains between the
+deconvolution and the first stage where the gap is visible is the blur, the
+Laplacian and the regional maxima. See D-009 in
 [DIVERGENCES.md](DIVERGENCES.md) and §2 of [docs/MEMO.md](docs/MEMO.md).
 
 A matching count is also the weakest evidence of a match there is — two runs can
