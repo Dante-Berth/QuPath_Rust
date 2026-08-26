@@ -451,36 +451,65 @@ the flood. The mean-intensity filter is the one link there already pinned
 natural next fixture is the same crops recorded one stage earlier — QuPath's
 mask *entering* the merge against this port's, on identical deconvolved pixels.
 
-**Walking the ladder upstream puts it above the merge, and names a suspect.**
-`cargo run --release -p qupath-pipeline --example stage_ladder` prints both
-pipelines' object counts at three stage boundaries over those same eight crops —
-QuPath's half is already in the fixture, and `Outcome` carries this pipeline's.
+**Walking the ladder upstream puts it above the merge, splits the gap in two,
+and rules out two more stages.** `cargo run --release -p qupath-pipeline
+--example stage_ladder` prints both pipelines' object counts at four stage
+boundaries over the recorded regions — QuPath's half is in the fixture, and
+`Outcome` carries this pipeline's.
 
-| rung | QuPath sparse → here | QuPath dense → here |
-| --- | ---: | ---: |
-| candidates (after the flood) | 1526 → 1614, **1.058** | 1912 → 2063, **1.079** |
-| after the mean-intensity filter | 673 → 855, **1.270** | 1046 → 1359, **1.299** |
-| after the merge | 286 → 360, **1.259** | 618 → 743, **1.202** |
+The crops this was first run on were sixteen 320x320 windows, and they could not
+reproduce the density regime: their ratios came back at 1.058 sparse against
+1.079 dense where the regions differ by eleven points end to end. They have been
+replaced by the three regions **whole, at 2048x2048** — one untiled tile each,
+the size `tile_preferred` derives from. That the merge now keeps 0.443 of its
+input on sparse against 0.563 on dense, where the end-to-end measurement has
+0.439 against 0.557/0.560, is what says these rungs measure the same thing the
+end-to-end numbers do. The old ones never did.
 
-Two things fall out. The ladder is **already wrong at the first rung**, before
-the intensity filter and well before the merge, so the divergence starts at or
-above the labelling and the flood. And the **intensity filter roughly doubles
-it**: QuPath keeps 0.441 and 0.547 of its candidates where this pipeline keeps
-0.530 and 0.659. That is not the filter itself — `ObjectFilters.json` pins it on
-17 recorded images and it passes — it is what the filter *measures*.
-`ipToMeasure` is the background-subtracted image, so a background estimate that
-differs moves every candidate's mean at once, in one direction, which is the
-shape of the thing being looked for. The background stage is also the pipeline's
-largest by time and the one carrying the morphological reconstruction.
+| rung | sparse | dense-2 | dense |
+| --- | ---: | ---: | ---: |
+| regional maxima | 16376 → 17101, **1.044** | 18472 → 19337, **1.047** | 17899 → 18819, **1.051** |
+| candidates (after the flood) | 16375 → 17101, **1.044** | 18472 → 19337, **1.047** | 17899 → 18819, **1.051** |
+| after the mean-intensity filter | 7455 → 8568, **1.149** | 11530 → 12095, **1.049** | 10555 → 10974, **1.040** |
+| after the merge | 3303 → 3761, **1.139** | 6493 → 6771, **1.043** | 5949 → 6116, **1.028** |
 
-**But these crops do not reproduce the density regime, and that is the caveat
-that matters.** The sparse and dense ratios here are nearly identical
-(1.058/1.079, then 1.270/1.299) where the whole-region measurement has them at
-1.012 against 1.113. At 320x320 the background estimate is computed over a field
-an order of magnitude smaller than a production tile, so this localises a
-stage-level difference *present at this crop size* and cannot yet be said to be
-the same effect as the end-to-end gap. One crop, `dense-1`, is a further outlier
-at exactly 2.000 on the middle rung against 1.081–1.229 for its neighbours.
+**Three things fall out, and the first two narrow the search.**
+
+**The flood adds nothing.** The maxima rung and the candidates rung are
+identical on all three regions — 16376/16375, 18472/18472, 17899/17899. So the
+**labelling and the flood are ruled out**: whatever produces the first rung's
+excess is already fully present in the regional maxima, upstream of both. That
+is two of the five stages this entry's status line was still carrying.
+
+**There are two effects here, not one, and only one of them is D-009.** The
+first rung is **flat across density** — 1.044, 1.047, 1.051 — so the ~4.7%
+excess in the maxima is density-*independent* and cannot be what D-009 tracks.
+The density split appears only at the **mean-intensity filter**, where sparse
+jumps to 1.149 while the two dense regions stay at 1.049 and 1.040. QuPath keeps
+0.455 of its candidates on sparse against this pipeline's 0.501; on dense the
+two agree to within a thousandth (0.624 against 0.626). Conflating these two was
+what the 320 px crops forced, since they could not separate the regimes.
+
+**The clumping is now measured rather than inferred.** The recorder also counts
+the thresholded LoG's connected components, which is what the maxima are found
+inside. Maxima per LoG blob runs **1.84 on the sparse region against 1.46 and
+1.42 on the dense ones** — the clumping this entry describes, read off the image
+itself instead of deduced from how hard the merge and the split had to work.
+
+**So the suspect is unchanged but better supported.** The filter is not the
+cause — `ObjectFilters.json` pins it on 17 recorded images — so it is what the
+filter *measures*. `ipToMeasure` is the background-subtracted image, and a
+background estimate that differs moves every candidate's mean at once, changing
+which faint candidates survive. That produces unmatched extra objects rather
+than displaced ones, which is exactly what the mask comparison above found.
+
+**And the fixture that rules the background estimate out is now the thing to
+distrust.** `BackgroundEstimate.json` compares it pixel-for-pixel and passes,
+but its crops are **160x160**. The 320 px crops here have just been shown unable
+to see this effect at all, and the background estimate is precisely the stage
+whose output depends on the size of the field it is given. Re-recording it at
+2048 is the next fixture, and until then "ruled out" should be read as "ruled
+out at 160x160".
 
 **A fourth rung was printed and withdrawn, and the mistake is the same one this
 entry already records.** Pairing `Outcome::nuclei` with the fixture's `objects`
@@ -547,13 +576,16 @@ D-004 measures — reaches 0.0179, and four steps reach 0.0743. An earlier bound
 of 0.05 passed the one-step mutation, which is to say it would not have caught
 the failure the test exists for; it is 0.012 now, and the mutation fails it.
 
-**Status:** five stages are now ruled out — the merge, the shape split, the
-background estimate with its subtraction, the colour deconvolution, and the
-JPEG decode beneath it — each on real tissue. What remains between the
-deconvolution and the first rung of the ladder is the **blur, the Laplacian,
-the regional maxima, the labelling and the flood**. Each has a synthetic
-fixture and none has one on tissue, which is the pattern worth trusting: this
-project's stages agree on constructed input and the question is always what
-they do on real input. Do not treat the two dense
+**Status:** seven stages are now ruled out — the merge, the shape split, the
+colour deconvolution, the JPEG decode beneath it, and (from the ladder above)
+the labelling and the flood, each on real tissue; plus the background estimate
+with its subtraction, **at 160x160 only**, which the ladder's own result now
+makes the weakest of the seven. What remains between the deconvolution and the
+first rung is the **blur, the Laplacian and the regional maxima**, plus
+re-recording the background estimate at production size. Each has a synthetic
+fixture and none has one on tissue at the size it runs at, which is the pattern
+worth trusting: this project's stages agree on constructed input, and the
+question is always what they do on real input — at the size the pipeline
+actually gives them, which is the lesson the 320 px crops added. Do not treat the two dense
 regions' 1.012–1.018 as the project's parity figure any more than the old
 1.035x — see `docs/MEMO.md` §2 for the pooled number.

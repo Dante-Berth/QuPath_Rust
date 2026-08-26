@@ -23,11 +23,29 @@
 //! upstream would hand us, which is a different question and a different
 //! fixture.
 //!
-//! **Crops from both regions, not only the divergent one.** Four from the region
-//! that disagrees at 1.1130 and four from one that agrees at 1.0177 — the claim
+//! **Crops from both regions, not only the divergent one.** The region that
+//! disagrees at 1.1130 and the two that agree at 1.0121 and 1.0177 — the claim
 //! under test is a difference between two regimes, and a recording of one
 //! regime cannot say whether the stage is wrong or the input is unusual. The
 //! same reason the browser's hover fill needed three layouts rather than one.
+//!
+//! **At production size, which the 320 px grid this replaces was not.** The
+//! earlier crops were sixteen 320x320 windows sampled inside those regions, and
+//! they did not reproduce the thing they were drawn to measure: their first-rung
+//! ratios came back at 1.058 sparse against 1.079 dense, near enough identical,
+//! where the regions themselves differ by eleven points. Two causes, both
+//! fixed by taking the region whole. The background estimate is computed over
+//! the field it is given, so at 320 px the stage most suspected of carrying the
+//! gap was measured in a regime it never runs in. And the windows were small
+//! enough for where they landed to dominate: `sparse-0` came back with one seed
+//! and zero objects, which is glass, and contributed nothing but a division by
+//! zero to every ratio pooled from it.
+//!
+//! 2048 is the size `Params::tile_preferred` derives from, the size
+//! `record-cell-counts.sh` and `record-object-masks.sh` already use for these
+//! same regions, and — being under `MAX_TILE_SIZE` — one whole untiled tile with
+//! no seam and no halo. So these rungs are comparable to D-009's end-to-end
+//! numbers, which the 320 px ones never were.
 
 use qupath_pipeline::{FOREGROUND, Merger};
 use qupath_watershed::{DistanceMap, RegionTracer, Segmenter};
@@ -233,17 +251,20 @@ fn matches_qupath_on_real_tiles() {
         count += 1;
     }
 
-    assert_eq!(count, 8, "expected 8 recorded crops");
-    // One crop of the eight lands on glass and comes back empty, which is
-    // recorded rather than removed — an empty input is a real state and the
-    // merge must leave it empty. The bound is what stops a re-recording that
-    // put *every* crop on glass from passing while asserting nothing: the
-    // fixture would still match QuPath everywhere, because both sides would be
-    // agreeing about a blank image. `record-cell-counts.sh` has the same trap
-    // written down, from the sweep that measured four regions of glass.
+    assert_eq!(count, 3, "expected 3 recorded regions");
+    // Every region must carry real tissue now, where the 320 px grid this
+    // replaces could afford one crop of glass among eight. That crop was not
+    // harmless: `sparse-0` came back with one seed and zero objects, and it
+    // sat inside the *sparse* pool, flattening the very signature the fixture
+    // exists to show. Taking each region whole removes the choice of where to
+    // land and with it that failure. The bound stays, because a re-recording
+    // that put a region on glass would still match QuPath everywhere — both
+    // sides agreeing about a blank image — while asserting nothing.
+    // `record-cell-counts.sh` has the same trap written down, from the sweep
+    // that measured four regions of glass.
     assert!(
-        substantial >= 6,
-        "at least six crops should carry real tissue, not {substantial}"
+        substantial == 3,
+        "all three regions should carry real tissue, not {substantial}"
     );
     assert!(
         objects_seen > merged_seen,
@@ -263,9 +284,24 @@ fn matches_qupath_on_real_tiles() {
     //
     // The bounds are loose on purpose. What is being pinned is the *direction*
     // and that the separation is not marginal; the exact ratios are properties
-    // of eight particular crops, and a re-recording that moved them slightly
+    // of these particular regions, and a re-recording that moved them slightly
     // should not fail. What must fail is a re-recording where the difference
     // has gone.
+    //
+    // At production size these come back at keep 0.443 sparse against 0.563
+    // dense, and recover 1.449 against 1.226. The keep figures reproduce
+    // D-009's whole-region measurement almost exactly (0.439 against
+    // 0.557/0.560), which is the check that recording the region whole
+    // measures the same thing the end-to-end numbers did. The 320 px crops
+    // never managed that: pooled, they gave 0.425 against 0.591 with one
+    // member of the sparse pool being glass.
+    //
+    // The recover separation is 0.223, which clears the 0.2 bound but not
+    // comfortably. It is left where it is rather than tightened to fit: the
+    // bound's job is to fail when the difference *disappears*, and a bound
+    // drawn snugly around today's number would fail on an honest re-recording
+    // instead. Per `parity/README.md`, the number is reported rather than the
+    // tolerance moved to flatter it.
     let keep = |(input, merged, _): (u32, u32, u32)| f64::from(merged) / f64::from(input);
     let recover = |(_, merged, objects): (u32, u32, u32)| f64::from(objects) / f64::from(merged);
     assert!(

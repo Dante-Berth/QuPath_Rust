@@ -64,6 +64,8 @@ struct Recorded {
     y: u32,
     width: u32,
     height: u32,
+    log_components: u64,
+    maxima: u64,
     seeds: u64,
     after_intensity: u64,
     merged: u64,
@@ -119,6 +121,8 @@ fn main() {
                 y: field(line, "y")?.parse().ok()?,
                 width: field(line, "requestedWidth")?.parse().ok()?,
                 height: field(line, "requestedHeight")?.parse().ok()?,
+                log_components: field(line, "logComponents")?.parse().ok()?,
+                maxima: field(line, "maximaCount")?.parse().ok()?,
                 seeds: field(line, "seeds")?.parse().ok()?,
                 after_intensity: field(line, "afterIntensity")?.parse().ok()?,
                 merged: field(line, "mergedCount")?.parse().ok()?,
@@ -139,17 +143,29 @@ fn main() {
          ratios is the stage that made it.\n"
     );
     println!(
-        "{:<11} {:>19} {:>19} {:>19}",
-        "", "candidates", "after intensity", "after merge"
+        "{:<11} {:>19} {:>19} {:>19} {:>19}",
+        "", "maxima", "candidates", "after intensity", "after merge"
     );
     println!(
-        "{:<11} {:>6} {:>5} {:>6} {:>6} {:>5} {:>6} {:>6} {:>5} {:>6}",
-        "crop", "QuPath", "here", "ratio", "QuPath", "here", "ratio", "QuPath", "here", "ratio",
+        "{:<11} {:>6} {:>5} {:>6} {:>6} {:>5} {:>6} {:>6} {:>5} {:>6} {:>6} {:>5} {:>6}",
+        "crop",
+        "QuPath",
+        "here",
+        "ratio",
+        "QuPath",
+        "here",
+        "ratio",
+        "QuPath",
+        "here",
+        "ratio",
+        "QuPath",
+        "here",
+        "ratio",
     );
 
     // Totals per regime, because the claim under investigation is a difference
     // between them: the sparse crops are the ones that disagree end to end.
-    let mut totals: [[u64; 6]; 2] = [[0; 6]; 2];
+    let mut totals: [[u64; 8]; 2] = [[0; 8]; 2];
 
     for entry in &recorded {
         let region = Region {
@@ -161,8 +177,11 @@ fn main() {
         let outcome = run(&slide, region, Params::default()).expect("run the pipeline");
 
         println!(
-            "{:<11} {:>6} {:>5} {} {:>6} {:>5} {} {:>6} {:>5} {}",
+            "{:<11} {:>6} {:>5} {} {:>6} {:>5} {} {:>6} {:>5} {} {:>6} {:>5} {}",
             entry.name,
+            entry.maxima,
+            outcome.markers,
+            show(ratio(outcome.markers, entry.maxima)),
             entry.seeds,
             outcome.regions,
             show(ratio(outcome.regions, entry.seeds)),
@@ -174,8 +193,26 @@ fn main() {
             show(ratio(outcome.merged, entry.merged)),
         );
 
+        // QuPath's side only: the thresholded LoG's connected components, which
+        // is what the maxima are found *inside*. Not a rung, because it is not
+        // comparable to a count of maxima -- a blob holds several of them, and
+        // here it runs about half. It is printed because it says how much
+        // clumping the tile carries: maxima per LoG blob is 1.84 on the sparse
+        // region against 1.46 and 1.42 on the dense ones, which is the clumping
+        // D-009 describes, measured directly rather than inferred from how hard
+        // the merge and the split had to work.
+        println!(
+            "{:<11} {:>6} LoG blobs, {:>5.2} maxima each",
+            "",
+            entry.log_components,
+            f64::from(u32::try_from(entry.maxima).unwrap_or(u32::MAX))
+                / f64::from(u32::try_from(entry.log_components.max(1)).unwrap_or(u32::MAX)),
+        );
+
         let row = usize::from(!entry.name.starts_with("sparse"));
         for (slot, value) in [
+            entry.maxima,
+            outcome.markers,
             entry.seeds,
             outcome.regions,
             entry.after_intensity,
@@ -194,7 +231,7 @@ fn main() {
     for (row, label) in [(0usize, "sparse"), (1, "dense")] {
         let t = totals[row];
         println!(
-            "{:<11} {:>6} {:>5} {} {:>6} {:>5} {} {:>6} {:>5} {}",
+            "{:<11} {:>6} {:>5} {} {:>6} {:>5} {} {:>6} {:>5} {} {:>6} {:>5} {}",
             label,
             t[0],
             t[1],
@@ -205,6 +242,9 @@ fn main() {
             t[4],
             t[5],
             show(ratio(t[5], t[4])),
+            t[6],
+            t[7],
+            show(ratio(t[7], t[6])),
         );
     }
 

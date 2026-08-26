@@ -137,29 +137,49 @@ of them — the background estimate and its subtraction, the LoG, the regional
 maxima, the labelling and the flood — with the mean-intensity filter the least
 likely, being the one link already pinned (`ObjectFilters.json`, 17 images).
 
-**Walking that ladder names a suspect.** `--example stage_ladder` prints both
-sides' counts at three boundaries over those crops. It is **already wrong at the
-first rung** — candidates, before the intensity filter and well before the merge
-(1.058 sparse, 1.079 dense) — and the intensity filter then roughly doubles it
-(1.270, 1.299), because QuPath keeps 0.441/0.547 of its candidates where this
-keeps 0.530/0.659. The filter itself is pinned, so what differs is what it
-measures: `ipToMeasure`, the **background-subtracted image**. A background
-estimate that differs moves every candidate's mean at once and in one direction.
+**Walking that ladder splits the gap in two.** `--example stage_ladder` prints
+both sides' counts at four boundaries. It was first run over sixteen 320x320
+windows, which could not reproduce the density regime — 1.058 sparse against
+1.079 dense, where whole regions differ by eleven points — so it has been
+re-recorded over the three regions **whole, at 2048x2048**. The merge now keeps
+0.443 of its input on sparse against 0.563 on dense, against the end-to-end
+0.439 and 0.557/0.560: the fixture measures what the end-to-end numbers measure,
+which the 320 px one never did.
 
-**With one caveat that kept it a suspect rather than a conclusion:** at 320x320
-the sparse and dense ratios are nearly identical, where whole regions have them
-at 1.012 against 1.113. These crops do not reproduce the density regime, so what
-is localised there is a stage-level difference at that crop size, not shown to be
-the same effect.
+| rung | sparse | dense-2 | dense |
+| --- | ---: | ---: | ---: |
+| regional maxima | **1.044** | **1.047** | **1.051** |
+| candidates (after the flood) | **1.044** | **1.047** | **1.051** |
+| after the mean-intensity filter | **1.149** | **1.049** | **1.040** |
+| after the merge | **1.139** | **1.043** | **1.028** |
 
-**And the suspect was wrong.** `BackgroundEstimate.json` records the stage over
-seven crops of real tissue as an input image and an output image, and this
-pipeline reproduces it **bit for bit on every pixel of every crop**, both
-branches. Three stages are now ruled out this way — the merge, the split, and
-the background estimate — and what is left between the deconvolution and the
-ladder's first rung is the blur, the Laplacian, the regional maxima, the
-labelling and the flood, plus the deconvolution and the decode under it. Each
-has a synthetic fixture and none has one on tissue. See D-009.
+**The flood adds nothing** — the maxima and candidates rungs are identical on
+all three regions, so the labelling and the flood are ruled out; the first
+rung's excess is already present in the maxima, above both.
+
+**And there are two effects, not one.** The first rung is flat across density
+(1.044/1.047/1.051), so that ~4.7% is density-*independent* and is not what
+D-009 tracks. The density split appears only at the **mean-intensity filter**:
+sparse jumps to 1.149 while the dense regions hold at 1.049 and 1.040, QuPath
+keeping 0.455 of its candidates on sparse against this pipeline's 0.501 where on
+dense the two agree to a thousandth. The filter is pinned, so what differs is
+what it measures — `ipToMeasure`, the **background-subtracted image**.
+
+Clumping is now measured rather than inferred: maxima per LoG blob is **1.84 on
+sparse against 1.46 and 1.42 on dense**.
+
+**The suspect survives, but the fixture that cleared it is now the weak link.**
+`BackgroundEstimate.json` reproduces the stage bit for bit on every pixel of
+seven crops, both branches — at **160x160**. The 320 px crops have just been
+shown blind to this effect, and the background estimate is exactly the stage
+whose output depends on the size of the field it is given. Re-recording it at
+2048 is the next fixture; until then read it as ruled out *at 160x160*.
+
+Seven stages are ruled out on real tissue — the merge, the split, the
+deconvolution, the decode beneath it, the labelling and the flood, and the
+background estimate at its recorded size. What is left between the deconvolution
+and the first rung is the **blur, the Laplacian and the regional maxima**. See
+D-009.
 
 **So the honest statement is: 1.065x pooled, 1.012–1.129 by region, direction
 always the same (this over-counts), cause identified as density-dependent, not

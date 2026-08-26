@@ -67,6 +67,16 @@ import java.util.Locale;
  * chain that had drifted into producing noise, or into producing the same thing
  * everywhere, would not reproduce that difference.
  *
+ * <p><b>Two rungs above the flood are recorded as counts.</b> The stage ladder
+ * built on this fixture is already wrong at its first rung -- the candidates the
+ * flood produces -- so the divergence starts at or above the labelling, and the
+ * counts alone cannot say which of the three stages between the LoG and the
+ * flood it starts at. {@code logComponents} counts the connected components of
+ * the thresholded LoG, and {@code maximaCount} counts the regional maxima
+ * {@code findRegionalMaxima} leaves, both the same way {@code seeds} is counted,
+ * so the three are comparable. The chain already computed both and discarded
+ * them.
+ *
  * <p><b>Masks are bit-packed</b>, one bit per pixel, little-endian within each
  * byte, as lowercase hex. Every recorded mask is binary, and the same crop
  * written as {@code [0, 255, 0, ...]} is forty times the bytes for no more
@@ -190,6 +200,51 @@ public class MergeAndSplitTile {
         ByteProcessor bpLoG = SimpleThresholding.thresholdAbove(fpLoG, 0.0f);
 
         ImageProcessor ipTemp = MorphologicalReconstruction.findRegionalMaxima(fpLoG, 0.001f, false);
+
+        // Two rungs above the flood, which this chain already computes and used
+        // to discard. The stage ladder's first rung is `seeds` -- after the
+        // flood -- and it is already wrong there, so the divergence starts at or
+        // above it. These say which of the three stages between the LoG and the
+        // flood it starts at: the threshold, the regional maxima, or the
+        // labelling. Counted as connected components the same way `seeds` is,
+        // so the three numbers are comparable to each other.
+        // Counted through labelImage, not getFilledPolygonROIs, and the
+        // difference is not cosmetic. Three things about findRegionalMaxima
+        // are easy to get wrong here and all three were, in order:
+        //
+        // It returns a *FloatProcessor*, so casting to ByteProcessor throws --
+        // and it throws only after the slide is opened and the tile
+        // deconvolved, which reads as a slow job rather than as a type error.
+        //
+        // With outputBinary false -- what this chain passes -- it does not
+        // return a mask. The else branch is a Blitter.DIFFERENCE, so each pixel
+        // carries the *height* of its maximum. Thresholding at 0.5 counts only
+        // maxima taller than half a unit, which came back as 0 against 1 seed.
+        //
+        // And a regional maximum is frequently a *single pixel*, which a Wand
+        // outline does not enclose the way it encloses a blob: counting the
+        // same dense tile through getFilledPolygonROIs gave 1 against 470
+        // seeds. Checked directly -- three isolated peaks in a flat float image
+        // give three nonzero pixels and three labels from labelImage, and one
+        // ROI from the Wand.
+        //
+        // So this counts the way the flood counts: labelImage with the
+        // predicate the flood itself uses, `d > 0`, since the line below is
+        // labelImage(ipTemp, 0, false). The maximum label is the count -- read
+        // with `get`, not `getf`: labelImage returns a ShortProcessor, whose
+        // getf applies the calibration and does not give back the label.
+        ImageProcessor ipMaximaLabels = RoiLabeling.labelImage(ipTemp.duplicate(), 0, false);
+        int maximaCount = 0;
+        for (int i = 0; i < width * height; i++)
+            maximaCount = Math.max(maximaCount, ipMaximaLabels.get(i));
+
+        // bpLoG is genuinely a ByteProcessor -- thresholdAbove returns one --
+        // and its components are blobs rather than points, so the Wand suits
+        // it. Counted the same way as `seeds` for that reason.
+        ImageProcessor ipLoGCount = bpLoG.duplicate();
+        ipLoGCount.setThreshold(127, Double.POSITIVE_INFINITY, ImageProcessor.NO_LUT_UPDATE);
+        int logComponents = RoiLabeling.getFilledPolygonROIs(ipLoGCount, Wand.FOUR_CONNECTED).size();
+
         ImageProcessor ipNucleusLabels = RoiLabeling.labelImage(ipTemp, 0, false);
         Watershed.doWatershed(fpLoG, ipNucleusLabels, 0, false);
 
@@ -243,8 +298,10 @@ public class MergeAndSplitTile {
         out.append(String.format(Locale.ROOT,
                 "    {\"name\": \"%s\", \"x\": %d, \"y\": %d, \"requestedWidth\": %d, \"requestedHeight\": %d,\n"
                         + "     \"width\": %d, \"height\": %d,\n"
+                        + "     \"logComponents\": %d, \"maximaCount\": %d,\n"
                         + "     \"seeds\": %d, \"afterIntensity\": %d, \"mergedCount\": %d, \"objects\": %d,\n",
-                name, x, y, w, h, width, height, seeds, survived, mergedCount, after.size()));
+                name, x, y, w, h, width, height, logComponents, maximaCount,
+                seeds, survived, mergedCount, after.size()));
         out.append("     \"binary\": \"").append(pack(binaryIn)).append("\",\n");
         out.append("     \"logMask\": \"").append(pack(bpLoG)).append("\",\n");
         out.append("     \"merged\": \"").append(pack(merged)).append("\",\n");

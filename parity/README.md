@@ -98,20 +98,35 @@ much back apart. Nothing in `MergeAndSplit.json` is clumped: its largest case is
 The crops come from **both** regions D-009 measured — four where QuPath and this
 port disagree by 11.3% and four where they agree to 1.8%. A recording made only
 where two things diverge cannot say whether the stage is wrong or the input is
-unusual. Within each region the offsets are a fixed grid, not a choice: picking
-the clumpiest-looking crop by eye would be choosing the sample most likely to
-show the effect being looked for, which is the same failure as guessing regions
-by eye, one level in.
+unusual. Each region is taken whole rather than sampled within, which removes
+the choice of where to sample: picking the clumpiest-looking crop by eye would
+be choosing the sample most likely to show the effect being looked for, which is
+the same failure as guessing regions by eye, one level in.
+
+**The crops are the three regions, whole, at 2048x2048.** They were sixteen
+320-pixel windows sampled inside two of them, and that grid could not see the
+effect it was drawn to measure: its first-rung ratios came back at 1.058 sparse
+against 1.079 dense, near enough identical, where the regions differ by eleven
+points end to end. Two causes. The background estimate is computed over the
+field it is given, so at 320 px the stage most suspected of carrying the gap ran
+in a regime it never runs in. And the windows were small enough for where they
+landed to decide the answer: `sparse-0` came back with one seed and zero objects
+-- glass -- inside the sparse pool, flattening the signature.
+
+Taken whole, they reproduce D-009's whole-region measurement: the merge keeps
+0.443 of its input on sparse against 0.563 on dense, where the end-to-end
+numbers are 0.439 against 0.557/0.560. That agreement is what says the fixture
+measures the same thing those numbers did.
 
 The masks are **bit-packed**, one bit per pixel as hex, because all five are
-binary and the same eight crops written as decimal arrays would be a 40 MB
-fixture rather than a 1 MB one. The EDM is deliberately not recorded: it is the
+binary and the same three regions written as decimal arrays would be a 600 MB
+fixture rather than a 16 MB one. The EDM is deliberately not recorded: it is the
 one floating-point checkpoint, `MergeAndSplit.json` pins it bit-for-bit on twelve
 cases, and what real tissue adds is scale and clumping rather than a new path
 through `makeFloatEDM`.
 
 The test asserts the regime as well as the pixels. Every comparison in it would
-pass just as well on eight crops of the same flat tissue — and the finding would
+pass just as well on three regions of the same flat tissue — and the finding would
 then rest on crops that were never in the regime it claims. So it also checks
 that the sparse crops really do bridge more and split more, loosely enough that
 a re-recording may move the ratios and tightly enough that it may not lose them.
