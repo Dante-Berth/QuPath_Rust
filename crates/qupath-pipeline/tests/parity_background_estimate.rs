@@ -41,6 +41,17 @@
 use qupath_pipeline::{Params, background_for_parity};
 
 fn fixture() -> std::path::PathBuf {
+    // Overridable so the same comparison can be pointed at a recording made at
+    // a different crop size without duplicating it. A 2048x2048 recording is
+    // ~200 MB and is deliberately not committed -- see the size note in
+    // `parity/README.md` -- so the way to check whether this stage's agreement
+    // survives production-size fields is to record one to a scratch path and
+    // set this. Reusing this test rather than writing a second one is the
+    // point: a re-implemented comparison would be checking the
+    // re-implementation.
+    if let Ok(path) = std::env::var("QUPATH_RUST_BACKGROUND_FIXTURE") {
+        return std::path::PathBuf::from(path);
+    }
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../parity/fixtures/BackgroundEstimate.json")
 }
@@ -174,6 +185,20 @@ fn matches_qupath_on_real_tissue() {
         }
 
         count += 1;
+    }
+
+    // The two guards below describe the *committed* fixture's coverage, so they
+    // are asserted only for it. An override (see `fixture`) points this same
+    // comparison at a recording made at another crop size, which is a different
+    // question -- does the stage still agree when the field is production-sized
+    // -- and has no reason to carry these seven crops. Skipping them there
+    // rather than loosening them keeps the committed fixture pinned exactly as
+    // it was; the pixel comparison above, which is what actually checks the
+    // stage, runs either way.
+    if std::env::var_os("QUPATH_RUST_BACKGROUND_FIXTURE").is_some() {
+        assert!(count > 0, "the override fixture recorded no crops");
+        println!("override fixture: {count} crops compared, {masked_seen} masked");
+        return;
     }
 
     assert_eq!(count, 7, "expected 7 recorded crops");

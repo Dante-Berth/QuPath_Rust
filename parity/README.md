@@ -149,6 +149,26 @@ a fold, ink — and at QuPath's default of 2.0 it fires nowhere on this slide, s
 five crops at the default record one branch of a two-branch stage. The limit is
 carried per crop and the test applies the recorded one.
 
+**Checked at production size too, without committing it.** The crops are 160 px
+because this is a stage comparison rather than a regime measurement — the same
+input goes into both sides, so a disagreement on any real tissue is a
+disagreement. That argument is sound but it does not cover this particular
+stage: `morphologicalReconstruction` is a queue-driven propagation across the
+whole image and switches strategy on `nChanges / nPixels > 0.1`, a condition on
+the *fraction* of pixels changing, which depends on field size. So the three
+D-009 regions were recorded whole at 2048x2048 and compared: **bit for bit on
+12.5 million pixels**, with a deliberately corrupted float caught at its exact
+coordinate.
+
+That recording is ~200 MB (seven crops would be ~470 MB) and is deliberately
+**not** committed. `parity_background_estimate.rs` reads
+`QUPATH_RUST_BACKGROUND_FIXTURE`, so the committed comparison can be pointed at
+a scratch recording rather than a second one being written to match it — a
+re-implemented comparison would be checking the re-implementation. The two
+coverage guards (seven crops, two masked) describe the committed fixture and are
+skipped under the override; the pixel comparison, which is what checks the
+stage, runs either way.
+
 The first version of this fixture got both of those wrong and both were caught
 by its own assertions: it asked for 320-pixel crops on the assumption that
 detection downsamples by two — it does not on this slide, and the fixture came

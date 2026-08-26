@@ -168,18 +168,20 @@ what it measures — `ipToMeasure`, the **background-subtracted image**.
 Clumping is now measured rather than inferred: maxima per LoG blob is **1.84 on
 sparse against 1.46 and 1.42 on dense**.
 
-**The suspect survives, but the fixture that cleared it is now the weak link.**
-`BackgroundEstimate.json` reproduces the stage bit for bit on every pixel of
-seven crops, both branches — at **160x160**. The 320 px crops have just been
-shown blind to this effect, and the background estimate is exactly the stage
-whose output depends on the size of the field it is given. Re-recording it at
-2048 is the next fixture; until then read it as ruled out *at 160x160*.
+**The fixture that cleared the suspect was the weak link, and it holds.**
+`BackgroundEstimate.json` reproduces the stage bit for bit at **160x160**, and
+`morphologicalReconstruction` is a global propagation that switches strategy on
+the *fraction* of pixels still changing — so it was a real candidate for
+agreeing at one field size and not another. Recorded at **2048x2048** it agrees
+bit for bit as well, on 12.5 million pixels, with a single corrupted float
+caught by the same comparison. That recording is 200 MB and is not committed;
+`parity_background_estimate.rs` takes `QUPATH_RUST_BACKGROUND_FIXTURE` so the
+committed comparison can be pointed at a scratch one.
 
 Seven stages are ruled out on real tissue — the merge, the split, the
-deconvolution, the decode beneath it, the labelling and the flood, and the
-background estimate at its recorded size. What is left between the deconvolution
-and the first rung is the **blur, the Laplacian and the regional maxima**. See
-D-009.
+deconvolution, the decode beneath it, the labelling, the flood, and the
+background estimate. What is left between the deconvolution and the first rung
+is the **blur, the Laplacian and the regional maxima**. See D-009.
 
 **So the honest statement is: 1.065x pooled, 1.012–1.129 by region, direction
 always the same (this over-counts), cause identified as density-dependent, not

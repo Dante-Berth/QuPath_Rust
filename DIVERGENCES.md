@@ -503,13 +503,31 @@ background estimate that differs moves every candidate's mean at once, changing
 which faint candidates survive. That produces unmatched extra objects rather
 than displaced ones, which is exactly what the mask comparison above found.
 
-**And the fixture that rules the background estimate out is now the thing to
-distrust.** `BackgroundEstimate.json` compares it pixel-for-pixel and passes,
-but its crops are **160x160**. The 320 px crops here have just been shown unable
-to see this effect at all, and the background estimate is precisely the stage
-whose output depends on the size of the field it is given. Re-recording it at
-2048 is the next fixture, and until then "ruled out" should be read as "ruled
-out at 160x160".
+**The fixture that rules the background estimate out was then the thing to
+distrust, and it has now been checked.** `BackgroundEstimate.json` compares the
+stage pixel-for-pixel and passes, but its crops are **160x160**, and the 320 px
+crops above had just been shown unable to see this effect at all. The suspicion
+was specific rather than general: `morphologicalReconstruction` is not a local
+operation like the erosion beside it. It is a queue-driven propagation across
+the whole image, and it switches strategy on `nChanges / nPixels > 0.1` — a
+condition on the *fraction* of pixels still changing, which is a function of how
+large the field is. That is exactly the shape of thing that can agree at one
+size and diverge at another.
+
+**It agrees at production size too.** The three regions recorded whole at
+2048x2048 and fed through `background_for_parity` match QuPath bit for bit on
+every one of **12.5 million pixels**, three crops of 4,177,936 each. Checked by
+mutation rather than assumed: corrupting a single float in the middle of the
+sparse region's recorded output fails the comparison at exactly that pixel,
+(484, 489), 1 differing of 4,177,936.
+
+That recording is **not committed**. Seven crops at 2048 as raw float bits is
+~470 MB; the three here are 200 MB, against 3 MB for the committed 160 px
+fixture. `parity_background_estimate.rs` reads
+`QUPATH_RUST_BACKGROUND_FIXTURE` so the same comparison — not a second one
+written to match — can be pointed at a scratch recording. Reproduce with
+`BackgroundEstimate` over `16000,20000,2048,2048,2.0,sparse` and the other two
+regions, then set that variable.
 
 **A fourth rung was printed and withdrawn, and the mistake is the same one this
 entry already records.** Pairing `Outcome::nuclei` with the fixture's `objects`
@@ -576,13 +594,13 @@ D-004 measures — reaches 0.0179, and four steps reach 0.0743. An earlier bound
 of 0.05 passed the one-step mutation, which is to say it would not have caught
 the failure the test exists for; it is 0.012 now, and the mutation fails it.
 
-**Status:** seven stages are now ruled out — the merge, the shape split, the
-colour deconvolution, the JPEG decode beneath it, and (from the ladder above)
-the labelling and the flood, each on real tissue; plus the background estimate
-with its subtraction, **at 160x160 only**, which the ladder's own result now
-makes the weakest of the seven. What remains between the deconvolution and the
-first rung is the **blur, the Laplacian and the regional maxima**, plus
-re-recording the background estimate at production size. Each has a synthetic
+**Status:** seven stages are now ruled out on real tissue — the merge, the
+shape split, the colour deconvolution, the JPEG decode beneath it, the
+labelling and the flood (from the ladder above), and the background estimate
+with its subtraction, the last of these at production size as well as at
+160x160. What remains between the deconvolution and the first rung is the
+**blur, the Laplacian and the regional maxima** — three stages, each with a
+synthetic fixture and none with one on tissue. Each has a synthetic
 fixture and none has one on tissue at the size it runs at, which is the pattern
 worth trusting: this project's stages agree on constructed input, and the
 question is always what they do on real input — at the size the pipeline
