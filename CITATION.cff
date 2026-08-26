@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use this software in research, please cite it."
+title: "QuPath_Rust"
+abstract: >-
+  An accelerated Rust implementation of QuPath's watershed cell detection,
+  reproducing its logic with a columnar object layout. Behaviour is checked
+  against output recorded from QuPath itself. Known divergences from QuPath,
+  including an open density-dependent count difference, are recorded in
+  DIVERGENCES.md and should be read before relying on its output.
+authors:
+  - name: "Dante-Berth"
+    alias: Dante-Berth
+repository-code: "https://github.com/Dante-Berth/QuPath_Rust"
+license: GPL-3.0-or-later
+type: software
+keywords:
+  - digital pathology
+  - whole-slide imaging
+  - cell detection
+  - QuPath
+  - Rust
