@@ -88,6 +88,15 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # A doc link to a renamed or private item still compiles, still passes
+      # clippy, and still reads correctly in the source — it fails only in the
+      # generated docs, where it silently becomes plain text. Nothing else here
+      # looks at them, so this is the only step that would notice.
+      - name: Rustdoc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
+
       # 1.9 MB and CC0, which is why docs/test-data.md marks this one "small
       # enough to fetch on every run". It is the only slide CI has; the 177 MB
       # benchmark slide is not fetched, and the tests needing it skip.
