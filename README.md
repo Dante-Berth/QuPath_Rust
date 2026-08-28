@@ -336,6 +336,32 @@ Rust: `cargo test` — no system dependencies. Reading JPEG 2000 slides would
 need OpenSlide through FFI and is not implemented; those files are refused by
 name rather than mis-decoded.
 
+### The API documentation
+
+Rust generates it from the source, so there is no second copy to fall out of
+date:
+
+```sh
+cargo doc --workspace --no-deps --open
+```
+
+That is 9,382 lines of doc comment across the eight crates, and it is where the
+*why* lives — each crate's page opens with what QuPath does, what this does
+instead, and what the difference is worth. `qupath-filters` on the rectangle
+decomposition and `qupath-objects` on why the columns are `f32` are the two
+worth reading first; `docs/` holds the prose that is about the project rather
+than about an item.
+
+Two things keep it honest rather than decorative. `missing_docs = "warn"` is set
+for the whole workspace, so an undocumented public item is visible at build
+time. And CI builds the docs with `RUSTDOCFLAGS: -D warnings`, which is what
+catches a link to a renamed or private item — that kind of breakage compiles,
+passes clippy, and reads correctly in the source, failing only in the generated
+page. Thirty-two of them had accumulated before that gate existed.
+
+The examples in doc comments are compiled and run by `cargo test`, so the code
+in the documentation is checked against the code it documents.
+
 **A green `cargo test` does not by itself mean the whole suite ran.** No slides
 are committed ([docs/test-data.md](docs/test-data.md)), so the tests that need
 one skip where it is absent — and a skipped test in Rust prints `ok` and counts
