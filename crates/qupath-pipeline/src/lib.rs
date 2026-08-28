@@ -20,7 +20,7 @@
 //! measure: the merge, the shape split, the boundary refinement, and the area
 //! filter that runs on the objects those leave.
 //!
-//! **ROI vertices** used to be on that list and are not any more: [`contour`]
+//! **ROI vertices** used to be on that list and are not any more: [`trace_outline_into`]
 //! traces a filled region to the polygon that bounds it, and
 //! [`run_collecting`] hands back [`Detections`] — outlines, bounding boxes and
 //! two measurements, columnar per §4. [`run`] is unchanged and still returns

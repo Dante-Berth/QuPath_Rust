@@ -21,7 +21,7 @@
 //! # Which level a run reads
 //!
 //! **The coarsest level that can still resolve a nucleus**, which is not always
-//! the level the viewer is drawing. See [`MAX_MICRONS_PER_PIXEL`].
+//! the level the viewer is drawing. See `MAX_MICRONS_PER_PIXEL`.
 //!
 //! This used to be the viewer's own level, chosen so that "detect what is on
 //! screen" was bounded work at every zoom. That is a real property and it is
@@ -38,12 +38,12 @@
 //! screenful of tissue found 1357, when the whole slide holds far more nuclei
 //! than one screenful.
 //!
-//! The cost is real and is bounded by [`MAX_PIXELS`] rather than by the zoom.
+//! The cost is real and is bounded by `MAX_PIXELS` rather than by the zoom.
 //! That cap now sits above a whole slide: `qupath_pipeline` already tiles
 //! internally, in parallel, and already removes the duplicates that fall on
 //! tile seams, so a whole-slide run needs no tiling *here* — measured on CMU-1,
 //! all 382,432 nuclei at level 0 in 33.5 s, with peak memory set by the thread
-//! count rather than by the region. See [`MAX_PIXELS`] for the measurements and
+//! count rather than by the region. See `MAX_PIXELS` for the measurements and
 //! for what the previous cap got wrong.
 //!
 //! Objects found at a coarse level are also coarse — outlines traced in level
@@ -61,7 +61,7 @@
 //! finishes into a result that is then dropped unread. That wastes at most one
 //! run's work, and the alternative is a lie in the status bar.
 //!
-//! [`Detector::generation`] is what makes superseding safe, and it is the same
+//! `Detector::generation` is what makes superseding safe, and it is the same
 //! device `qupath_viewer::loader` uses for the same reason: a result that
 //! answers a request nobody is waiting for any more must be discarded, not
 //! drawn.
@@ -132,7 +132,7 @@ use qupath_viewer::{Overlay, Viewport};
 /// level the viewer drew and the pixels behind a window stayed near the
 /// window's own size at any scale —
 /// `the_level_the_viewer_shows_keeps_a_run_under_the_cap_at_any_zoom` still
-/// asserts that of `region_for` alone. [`MAX_MICRONS_PER_PIXEL`] changed what is
+/// asserts that of `region_for` alone. `MAX_MICRONS_PER_PIXEL` changed what is
 /// asked for: a run started while zoomed out now reads a finer level than the
 /// view. With the cap where it is, a fitted view of CMU-1 no longer trips it —
 /// which is the point, since that is exactly the gesture that means "detect
@@ -170,7 +170,7 @@ const MAX_MICRONS_PER_PIXEL: f64 = 1.0;
 /// The viewer picks a level to *look* at, matched to the zoom so that pixels on
 /// screen stay near pixels in the file. Detection picks a level to *measure* at,
 /// and those are different questions the moment the view is zoomed out: see
-/// [`MAX_MICRONS_PER_PIXEL`] for what a coarse level does to the answer.
+/// `MAX_MICRONS_PER_PIXEL` for what a coarse level does to the answer.
 ///
 /// This returns the coarsest level at or under that limit — the cheapest level
 /// that can still resolve a nucleus — rather than always level 0, so a run at a
@@ -282,7 +282,7 @@ struct Summary {
     /// the outlines' resolution depends on. See the module documentation.
     level: usize,
     took: Duration,
-    /// Whether the region was shrunk to fit [`MAX_PIXELS`].
+    /// Whether the region was shrunk to fit `MAX_PIXELS`.
     capped: bool,
     /// Whether the run read a finer level than the viewer is drawing, because
     /// the drawn one is too coarse to resolve a nucleus. The status bar says
@@ -532,12 +532,12 @@ impl Detector {
 /// the area filter rejected essentially everything.
 ///
 /// It survived because it is unreachable on CMU-1. [`level_for_detection`]
-/// takes the coarsest level at or under [`MAX_MICRONS_PER_PIXEL`], and CMU-1's
+/// takes the coarsest level at or under `MAX_MICRONS_PER_PIXEL`, and CMU-1's
 /// levels are 0.499, 2.0 and 8.0 µm/px — only level 0 clears 1.0, so every run
 /// on the slide this project measures everything against reads level 0, where
 /// the two pixel sizes are the same number. A slide scanned at 40x has 0.25
 /// µm/px and a level 1 at exactly 1.0, which does clear it. The comment on
-/// [`MAX_MICRONS_PER_PIXEL`] already asserted this function's behaviour —
+/// `MAX_MICRONS_PER_PIXEL` already asserted this function's behaviour —
 /// "the pipeline converts them with the level's own pixel size, so a run at any
 /// level is *arithmetically* consistent" — which was the intent and not what
 /// the code did.
@@ -672,7 +672,7 @@ fn columns_of(detections: &pipeline::Detections, downsample: f64) -> Vec<Column>
 /// 1. the view's bounds are converted from slide coordinates into `level`'s;
 /// 2. the rectangle is **clipped** to the level, because a fitted view is wider
 ///    than the slide and `run_collecting` refuses a region that leaves it;
-/// 3. what is left is **capped** to [`MAX_PIXELS`] about its own centre.
+/// 3. what is left is **capped** to `MAX_PIXELS` about its own centre.
 ///
 /// Clipping before capping is what makes the cap mean what it says. Capping the
 /// unclipped rectangle would count the empty margins of a fitted view against
@@ -1157,7 +1157,7 @@ mod tests {
     ///
     /// The pixel size is 0.25 µm/px — a 40x scan — and not CMU-1's 0.499,
     /// because at 0.499 nothing but level 0 clears
-    /// [`MAX_MICRONS_PER_PIXEL`] and the bug is unreachable. That is why it
+    /// `MAX_MICRONS_PER_PIXEL` and the bug is unreachable. That is why it
     /// survived: every run on the slide this project measures against is at
     /// level 0, where the two pixel sizes are the same number.
     #[test]

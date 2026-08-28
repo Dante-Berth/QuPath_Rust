@@ -1,7 +1,7 @@
 //! Where the view is on the slide, as a small picture of the whole thing.
 //!
 //! `docs/VIEWER.md` §8.2. Ported from QuPath's `ImageOverview.java`, and like
-//! [`crate::scalebar`] the portable part is the arithmetic rather than the
+//! [`fn@crate::scalebar`] the portable part is the arithmetic rather than the
 //! drawing: a `Canvas`, a `WritableImage` and a `PathIterator` there, and the
 //! caller's business here. What this module owns is the two mappings that make
 //! the picture mean something —

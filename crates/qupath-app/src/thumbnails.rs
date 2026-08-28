@@ -277,7 +277,7 @@ impl Pictures {
     ///
     /// Called before the interface is laid out rather than after, because a
     /// picture that arrives has to be a texture *before* the frame that names
-    /// it — see [`Row::uploaded`].
+    /// it — see `Row::uploaded`.
     pub fn take(&mut self) {
         let Some(made) = &self.made else {
             return;

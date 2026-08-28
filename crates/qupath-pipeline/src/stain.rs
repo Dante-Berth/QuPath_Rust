@@ -28,7 +28,7 @@ pub struct Stains {
     /// This is the **transpose** of QuPath's `getMatrixInverse()`. QuPath reads
     /// that matrix as `invMat[channel][stain]` — down a column — so holding the
     /// transpose puts one stain's three coefficients in a contiguous row, which
-    /// is the order a per-pixel dot product wants. See [`invert`].
+    /// is the order a per-pixel dot product wants. See `invert`.
     coefficients: [[f64; 3]; 3],
     /// Per-channel white point, QuPath's `maxRed`, `maxGreen`, `maxBlue`.
     max_values: [f64; 3],
@@ -130,7 +130,7 @@ impl Stains {
 
     /// The deconvolution coefficients, `[stain][channel]`.
     ///
-    /// The transpose of QuPath's `getMatrixInverse()`, per [`invert`]. Exposed
+    /// The transpose of QuPath's `getMatrixInverse()`, per `invert`. Exposed
     /// so the parity test can compare the matrix itself: when a per-pixel
     /// comparison fails, this says whether the vectors, the inversion or the
     /// optical density is at fault, which the pixel values alone do not.

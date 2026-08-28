@@ -7,7 +7,7 @@
 //! measurement that motivated both:
 //!
 //! - the priority queue is a bucket queue rather than a comparison heap, which
-//!   is the point of [`queue`];
+//!   is the point of the `queue` module;
 //! - a pixel away from the image border reaches its neighbours by adding a
 //!   precomputed flat offset, rather than by recovering `(x, y)` through an
 //!   integer division and bounds-checking each shift.

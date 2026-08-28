@@ -8,12 +8,12 @@
 //!
 //! # Algorithm
 //!
-//! The disc is decomposed into a union of nested rectangles (see [`plan`]), and
-//! each rectangle is filtered separably: a vertical pass folding whole source
-//! rows into a column accumulator, then a horizontal windowed maximum along
-//! that accumulator. Because the rectangle heights are nested, one accumulator
-//! grown outwards from the centre serves every rectangle, so a source row is
-//! read once per output row rather than once per kernel row.
+//! The disc is decomposed into a union of nested rectangles (see the `plan`
+//! module), and each rectangle is filtered separably: a vertical pass folding
+//! whole source rows into a column accumulator, then a horizontal windowed
+//! maximum along that accumulator. Because the rectangle heights are nested,
+//! one accumulator grown outwards from the centre serves every rectangle, so a
+//! source row is read once per output row rather than once per kernel row.
 //!
 //! The consequence is that the per-pixel cost stops tracking the kernel and
 //! every inner loop becomes a slice-to-slice maximum over contiguous `f32`,

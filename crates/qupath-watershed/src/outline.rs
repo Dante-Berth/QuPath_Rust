@@ -345,10 +345,11 @@ const MAX_STEPS: usize = 1 << 26;
 ///
 /// It is **discarded**, not returned. QuPath marks the *filled* polygon as
 /// completed — `bpCompleted.fill(roi)` — so a region lying in another's hole is
-/// covered before the scan reaches it and never becomes an object. [`regions`]
-/// documents the same convention from the mask side and `ObjectFilters.json`
-/// pins it; this reproduces it by filling the traced ring rather than by
-/// flooding the component, which is the difference that makes it happen.
+/// covered before the scan reaches it and never becomes an object.
+/// [`crate::filled_regions`] documents the same convention from the mask side
+/// and `ObjectFilters.json` pins it; this reproduces it by filling the traced
+/// ring rather than by flooding the component, which is the difference that
+/// makes it happen.
 ///
 /// # Panics
 ///

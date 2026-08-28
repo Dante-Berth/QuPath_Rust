@@ -591,7 +591,7 @@ pub struct App {
     /// `self.cursor` comes from winit's `CursorMoved` in *physical pixels*.
     /// Those agree only where the scale factor is 1.0. Anywhere else the
     /// cursor's coordinates were compared against a rectangle in the wrong
-    /// units, so [`App::cursor_over_slide`] read false over most of the window
+    /// units, so `App::cursor_over_slide` read false over most of the window
     /// and every gesture gated on it -- scroll-to-zoom, drag-to-pan and the
     /// zoom band alike -- silently did nothing. It is converted at the point it
     /// is stored so there is one unit below this line rather than a conversion
@@ -726,9 +726,9 @@ pub struct App {
     /// the same reason [`App::order`] is, and QuPath keeps it per-session too.
     ///
     /// **It is not honoured for a project this application wrote**, and
-    /// [`crate::chrome::masked_name`] is where that is enforced rather than
-    /// here: `project::files` writes `entry-<id>` into `randomizedName`, which
-    /// spells out the very order masking exists to hide.
+    /// `chrome::maskable` is where that is enforced rather than here:
+    /// `project::files` writes `entry-<id>` into `randomizedName`, which spells
+    /// out the very order masking exists to hide.
     pub mask_names: bool,
     /// The order the masked rows are shuffled into, by entry id.
     ///
@@ -1284,7 +1284,7 @@ impl App {
         }
     }
 
-    /// Mean main-thread cost of the last [`WINDOW`] frames.
+    /// Mean main-thread cost of the last `WINDOW` frames.
     pub fn frame_cost(&self) -> Option<Duration> {
         (!self.costs.is_empty())
             .then(|| self.costs.iter().sum::<Duration>() / self.costs.len() as u32)
@@ -1331,7 +1331,7 @@ impl App {
     /// `egui_winit` derives it from `wants_pointer_input`, which is true for a
     /// pointer anywhere over a panel — and the slide is a panel, so the answer
     /// is true over bare glass and the mouse gestures gated on it silently did
-    /// nothing. Those ask [`App::cursor_over_slide`] instead, which is a
+    /// nothing. Those ask `App::cursor_over_slide` instead, which is a
     /// question about geometry and answerable.
     pub fn input(&mut self, window: &Window, event: &WindowEvent, consumed: bool) -> bool {
         match event {
@@ -2680,7 +2680,7 @@ impl App {
     ///
     /// `None` when no band is being dragged, or while it is still small enough
     /// to be a click — so the readout appears once the gesture has committed to
-    /// being a drag, at the same threshold [`App::finish_band`] uses.
+    /// being a drag, at the same threshold `App::finish_band` uses.
     ///
     /// Derived from [`Viewport::zoom_to_box`] rather than recomputed, because a
     /// label predicting a different factor from the one the release applies is

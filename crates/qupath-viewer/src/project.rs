@@ -140,7 +140,7 @@ impl Timestamps {
 ///
 /// **There is no pixel size here.** There was, and it had nowhere to go: the
 /// only field QuPath reads one from is the server metadata block, which
-/// [`server_builder`] does not write and explains why, and `summary.json` has
+/// `server_builder` does not write and explains why, and `summary.json` has
 /// no such field in `ImageDataSummary`. A pixel size on this struct would have
 /// been written into a file, discarded by Gson, and reported by nothing —
 /// which is the shape of every claim this project has had to go back and
@@ -470,7 +470,7 @@ pub fn file_uri(path: &Path) -> String {
 ///
 /// The counterpart of [`Entry`], and **not its inverse**: an [`Entry`] carries
 /// a width and a height, and this does not, because the only place a project
-/// keeps them is the server metadata block that [`server_builder`] deliberately
+/// keeps them is the server metadata block that `server_builder` deliberately
 /// does not write. A reader that reported dimensions here would be reporting
 /// something no project this module writes contains, and none QuPath writes
 /// contains either once the image has never been opened.
@@ -540,7 +540,7 @@ pub struct Image {
     /// **Not the server metadata block, which is a different `metadata` at a
     /// different depth.** The one here is `DefaultProjectImageEntry.metadata`,
     /// a `Map<String, String>` a user fills in from the browser; the one inside
-    /// `serverBuilder` describes the pixels and is what [`server_builder`]
+    /// `serverBuilder` describes the pixels and is what `server_builder`
     /// deliberately does not write. The two are told apart by where they are
     /// and nothing else — the same trap [`Image::uri`] met, where the first
     /// `"uri"` in an entry's text is not the entry's.
@@ -612,7 +612,7 @@ pub struct Stored {
     /// would still open, still list the same images, and have lost whatever
     /// someone had recorded against them. [`added`] rewrites this instead.
     ///
-    /// Private, and not merely because [`crate::json`] is: what a caller can do
+    /// Private, and not merely because `crate::json` is: what a caller can do
     /// with it is [`added`], and a `Value` on the public surface would be an
     /// invitation to edit a project field by field with nothing checking the
     /// result is still a project.
@@ -689,7 +689,7 @@ impl Stored {
     /// For a file Gson wrote this is **byte for byte the file that was read**,
     /// which is the check that says nothing was lost — see
     /// `parity_project_export.rs`. It is not a formatting coincidence:
-    /// [`crate::json`]'s writer copies Gson's spelling precisely so that this
+    /// `crate::json`'s writer copies Gson's spelling precisely so that this
     /// claim can be made as an equality rather than as an argument.
     #[must_use]
     pub fn rewritten(&self) -> String {
@@ -1177,7 +1177,7 @@ fn parts(name: &str) -> Vec<Part<'_>> {
 ///   every capital sorts before every lower-case letter: `Block` before `abc`.
 ///   The search box in the same pane lowercases both sides, and it is the same
 ///   pane and the same names — the two controls really do disagree, in QuPath
-///   as here. The UTF-16 half is [`compare_utf16`], and it is not a detail: a
+///   as here. The UTF-16 half is `compare_utf16`, and it is not a detail: a
 ///   byte comparison puts `\u{1f600}` on the wrong side of `\u{e000}`.
 /// - **`007` and `7` compare equal**, because the run becomes a `BigDecimal`
 ///   and scale is ignored. The tie falls through to the part count.
@@ -1820,7 +1820,7 @@ mod tests {
         );
     }
 
-    /// The reason [`crate::json`] is a parser: a `serverBuilder` QuPath wrote
+    /// The reason `crate::json` is a parser: a `serverBuilder` QuPath wrote
     /// carries a metadata block, and the first `"uri"` in the text is not the
     /// entry's.
     ///
@@ -1848,7 +1848,7 @@ mod tests {
     ///
     /// The entry's is `Map<String, String>` a user typed into the browser. The
     /// builder's describes the pixels — `width`, `levels`, `isRGB` — and is the
-    /// block [`server_builder`] refuses to write. A reader that found the wrong
+    /// block `server_builder` refuses to write. A reader that found the wrong
     /// one would offer `width=46000` as a metadata key somebody could sort a
     /// study by, and it would look entirely plausible.
     #[test]

@@ -108,7 +108,7 @@ impl DistanceMap {
     ///
     /// Panics if the buffers describe images of different sizes, if `width` is
     /// zero or does not divide them, or if either dimension exceeds
-    /// [`MAX_DIMENSION`].
+    /// `MAX_DIMENSION`.
     pub fn make_float_edm(&mut self, mask: &[u8], out: &mut [f32], width: usize) {
         self.make_float_edm_from(mask, out, width, 0);
     }

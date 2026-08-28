@@ -1,6 +1,6 @@
 //! Columnar storage for QuPath detection objects and their measurements.
 //!
-//! QuPath gives every [`PathObject`] its own `MeasurementList`: a per-object name
+//! QuPath gives every `PathObject` its own `MeasurementList`: a per-object name
 //! list plus a name-to-index map, with values boxed behind a `Measurement`
 //! interface. Reading one feature across a million detections therefore walks a
 //! million separate allocations and hashes a million strings.

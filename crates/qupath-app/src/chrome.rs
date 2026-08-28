@@ -221,11 +221,11 @@ pub enum Order {
     /// entry, collects the union of their metadata keys into a `TreeMap`, and
     /// offers one item per key — so the choices depend on the study being
     /// looked at rather than on anything this code knows in advance, and
-    /// [`Order::ALL`] cannot list them.
+    /// [`Order::offered`] cannot list them in advance.
     ///
     /// An entry that does not carry the key sorts under QuPath's
     /// `UNASSIGNED_NODE`, which is `(Unassigned)` in its resource bundle. The
-    /// empty string is used instead, for the reason [`file_name`] gives: those
+    /// empty string is used instead, for the reason `file_name` gives: those
     /// are the rows the sort has nothing to say about, and a list that puts
     /// them last is one where they are scrolled past.
     Metadata(String),

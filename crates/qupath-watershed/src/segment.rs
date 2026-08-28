@@ -179,7 +179,7 @@ impl Segmenter {
     }
 
     /// `findMaxima(edm, 0.5, NO_THRESHOLD, SEGMENTED, false, true)`, leaving the
-    /// segmentation in [`Segmenter::levels`] as 0 and 255.
+    /// segmentation in `Segmenter::levels` as 0 and 255.
     ///
     /// # Panics
     ///

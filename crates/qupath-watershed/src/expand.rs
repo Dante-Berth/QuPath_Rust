@@ -132,7 +132,7 @@ pub fn expand_labels(
 ///
 /// # Why this traces one label at a time
 ///
-/// [`filled_regions`] renumbers what it finds in scan order, which is right
+/// [`crate::filled_regions`] renumbers what it finds in scan order, which is right
 /// where the labelling *is* the numbering. Here it is not: a cell keeps the
 /// label of the nucleus that seeded it, `rois[(int)val-1] = roi`, and the scan
 /// order need not agree with it. So each label is traced against its own value

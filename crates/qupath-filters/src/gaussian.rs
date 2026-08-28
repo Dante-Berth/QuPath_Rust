@@ -783,7 +783,7 @@ fn make_upscale_kernel(unit_length: usize) -> Vec<f32> {
 /// pixels disagree, this says whether the kernel or the convolution is at
 /// fault, which the output alone does not.
 ///
-/// `accuracy` is [`FLOAT_ACCURACY`] for the blur QuPath runs; `max_radius` is
+/// `accuracy` is `FLOAT_ACCURACY` for the blur QuPath runs; `max_radius` is
 /// the line length, and is raised to 50 internally if smaller.
 #[must_use]
 pub fn gaussian_kernel(sigma: f64, accuracy: f64, max_radius: usize) -> (Vec<f32>, Vec<f32>) {

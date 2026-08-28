@@ -1,6 +1,6 @@
 //! The `smoothBoundaries` chain QuPath runs over a traced outline.
 //!
-//! [`outline`](crate::outline) produces the vertex list `Wand.autoOutline`
+//! the `outline` module produces the vertex list `Wand.autoOutline`
 //! traces. That list is *not* what a `PathObject` carries: `smoothBoundaries`
 //! defaults to `true`, and `WatershedCellDetection`'s lines 925-933 put four
 //! stages between the trace and the object.
@@ -22,7 +22,7 @@
 //!
 //! Two of the four stages are ImageJ's. `getInterpolatedPolygon` lives in
 //! `ij.gui.Roi` and this checkout has only the compiled `ij-1.54p` jar — the
-//! situation [`outline`](crate::outline) is in with `Wand`, handled the same
+//! situation the `outline` module is in with `Wand`, handled the same
 //! way. `parity/java/SmoothBoundaries.java` records every intermediate and
 //! `parity_smooth_boundaries.rs` checks each of them, so a stage that is wrong
 //! fails at that stage rather than at the end.
@@ -90,7 +90,7 @@ pub struct Stages {
 
 /// Runs the whole `smoothBoundaries` chain over a traced ring.
 ///
-/// `points` is the outline as [`outline`](crate::outline) produces it: each
+/// `points` is the outline as the `outline` module produces it: each
 /// vertex once, the last joining back to the first. `downsample` is the
 /// detection's, which sets both the coordinate scaling and — through its square
 /// root — the simplification threshold.

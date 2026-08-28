@@ -38,7 +38,7 @@ mod tag {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compression {
     /// Baseline JPEG, TIFF compression 7. Aperio writes abbreviated streams
-    /// that share one table set through [`tag::JPEG_TABLES`].
+    /// that share one table set through `tag::JPEG_TABLES`.
     Jpeg,
     /// TIFF compression 5, used by Aperio for the label image only.
     Lzw,

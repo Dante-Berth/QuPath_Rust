@@ -73,7 +73,7 @@ pub struct Stain {
     pub background: [f64; 3],
     /// The optical density shown as full black.
     ///
-    /// Separate from [`Display::max`] because a stain amount is not a byte: it
+    /// Separate from `Display::max` because a stain amount is not a byte: it
     /// is an optical density, typically 0 to about 2, and reusing the 0–255
     /// range for it would put every real value in the bottom one percent of the
     /// scale. QuPath keeps a separate display range per channel for the same
@@ -102,7 +102,7 @@ impl Display {
     ///
     /// `None` when the range is empty or not finite. An inverted or zero-width
     /// range makes `scale` infinite or negative, and a NaN reaching a pixel is
-    /// the same class of bug as the NaN [`crate::scalebar`] refuses — except
+    /// the same class of bug as the NaN [`fn@crate::scalebar`] refuses — except
     /// that here it would show as a frame of noise rather than a bad label, and
     /// be blamed on the decoder.
     #[must_use]
