@@ -2855,7 +2855,7 @@ mod tests {
     /// A project too deeply nested to parse is a message, not a dead process.
     ///
     /// `json::parse` grew a depth limit because its recursion had none, and a
-    /// ~40 KB file aborted the process with `SIGABRT`. That is fixed in the
+    /// 78 KB file aborted the process with `SIGABRT`. That is fixed in the
     /// parser, but the parser returning `Err` is only half of it: what a person
     /// does is *open a file*, and this asserts the other half — the error
     /// reaches [`App::message`], and the project that was already open is still

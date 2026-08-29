@@ -149,7 +149,7 @@ pub fn parse(text: &str) -> Result<Value, String> {
 /// so; a file that nests deeper than the stack is deep does not produce an
 /// error, it aborts the process. That was measured, not assumed: `[` repeated
 /// 40,000 times and closed again overflows an 8 MB main-thread stack and dies
-/// with `SIGABRT`, and 20,000 does not. A crash on a 40 KB file is not a
+/// with `SIGABRT`, and 20,000 does not. A crash on a 78 KB file is not a
 /// failure mode a project browser can have — `Result` is the whole contract of
 /// [`parse`], and a stack overflow is not catchable, so the guard has to come
 /// before the recursion rather than around it.

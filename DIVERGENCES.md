@@ -606,3 +606,48 @@ and the question is always what they do on real input — at the size the
 pipeline actually gives them, which is the lesson the 320 px crops added. Do
 not treat the two dense regions' 1.012–1.018 as the project's parity figure any
 more than the old 1.035x — see `docs/MEMO.md` §2 for the pooled number.
+
+## D-010 — The project reader stops at 255 levels of nesting, where Gson stops at 255 too
+
+**QuPath:** `DefaultProject.writeProject` puts `project.qpproj` through Gson,
+and Gson's own `JsonReader` has a nesting limit — a `int[] stack` that starts
+at 32 and, since 2.8.6, refuses beyond 255 with "Nesting too deep". So a
+document deeper than 255 is one QuPath itself would not read back.
+
+**Here:** `qupath_viewer::json::parse` refuses at the same depth, with an error
+naming the limit and the byte offset.
+
+**Why this is written down at all.** The limit is not a divergence in what is
+*accepted* — 255 either side. It is a divergence in *why*, and the reason
+matters more than the number. `value` calls `array` and `object`, and both call
+`value` back, so before this the reader's stack depth was the document's
+nesting depth with nothing bounding it. Gson's limit protects a Java thread
+stack; this one protects a Rust one, and unlike Gson's, exceeding it here was
+not an exception.
+
+**Measured**, on this machine, release build:
+
+| Nesting depth | 2 MB test-thread stack | 8 MB main-thread stack |
+| --- | --- | --- |
+| 10,000 | parses | parses |
+| 20,000 | **SIGABRT** | parses |
+| 40,000 | **SIGABRT** | **SIGABRT** |
+
+Both columns are the real parser with the guard removed, run one test at a
+time; the thresholds move if the process is sharing stacks with other tests, so
+the figure to trust is the 8 MB one, which is what the application has. A file
+of `[` repeated 40,000 times and closed again is 78 KB and killed the process. A
+stack overflow is not a `Result` and cannot be caught, so the guard is placed
+before the recursion rather than around it, and every recursive step goes
+through one `nest` function so a future container type cannot skip the check.
+
+**Consequence:** none for any file QuPath can write. A real `project.qpproj`
+nests about six deep, the deepest structure in one being a `serverBuilder`'s
+metadata block. The boundary is asserted in both directions — a document at
+exactly 255 parses and all 255 levels are walked back out, 256 is refused —
+because a limit that is off by one in the other direction would reject valid
+projects, and that failure would be silent until someone had such a file.
+
+**Status:** matches Gson's observable limit. If QuPath ever raises Gson's, this
+should follow it rather than be raised independently; the ceiling that matters
+is what QuPath can write, not what a stack can take.
