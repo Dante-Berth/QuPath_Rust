@@ -5,6 +5,21 @@
 An accelerated Rust implementation of parts of [QuPath](https://qupath.github.io/),
 reproducing its logic with a data layout suited to bulk analysis.
 
+**Parity is measured rather than assumed, and it is currently incomplete.** Over
+ten regions of CMU-1 this finds **1.065x** QuPath's object count — 156,979
+against 147,351, a range of 1.012–1.129 by region, and always in the same
+direction: this over-counts. The nuclei that do correspond agree well (97.9% of
+QuPath's 17,079 nuclei match one-to-one, mean Dice 0.921), so the gap is a
+population of extra objects on sparse tissue rather than boundaries falling in
+different places. Seven pipeline stages have been ruled out against QuPath on
+real tissue, pixel for pixel; three remain. Tracked as D-009 in
+[DIVERGENCES.md](DIVERGENCES.md), with the numbers in
+[docs/MEMO.md](docs/MEMO.md) §2.
+
+Read that before the speed figures, not after: a 6.5% density-dependent
+over-count is not a rounding difference, and what is fast here is not yet
+what QuPath computes.
+
 The badge covers formatting, clippy, and the suite as it runs on a machine with
 one 1.9 MB slide. It does not cover the tests needing the 177 MB benchmark
 slide — each run's job summary names those explicitly rather than letting the
