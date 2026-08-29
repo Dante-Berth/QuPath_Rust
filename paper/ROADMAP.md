@@ -77,18 +77,32 @@ Checked against the repository on 2026-08-29.
 
 ### Must be added
 
-- [ ] **`CONTRIBUTING.md`** — JOSS requires documented contribution guidelines.
-      State how to run the parity suite, and that a new parity claim needs a
-      recorded fixture plus a mutation check.
-- [ ] **`CODE_OF_CONDUCT.md`** — required. Contributor Covenant is standard.
+- [x] **`CONTRIBUTING.md`** — added 2026-08-29. Carries the gate CI runs
+      (quoted from `ci.yml`, not from memory), the fixture-plus-mutation rule
+      for any new parity claim, and the warning that a green `cargo test` is
+      not a full run. Linked from the README's own §Contributing, since
+      GitHub only surfaces it at the pull-request box — after the code is
+      written, which is too late for the rule it carries.
+- [x] **`CODE_OF_CONDUCT.md`** — added 2026-08-29, Contributor Covenant 2.1,
+      enforcement contact set. **Reproduced from memory** (the fetch was
+      blocked): diff it against the published 2.1 text before submitting.
 - [ ] **Statement of need** — required section of `paper.md`. Who is this for?
       Bulk/batch analysis where QuPath's per-object layout is the bottleneck.
       Be precise that the speedup is the columnar layout, not Rust as such;
       the README already makes this distinction and the paper must not lose it.
 - [ ] **A tagged release with a DOI** (Zenodo), created at submission time.
-- [ ] **Installation instructions a stranger can follow** — README §Building
-      exists; verify it works from a clean checkout on a machine without the
-      177 MB slide, and say plainly which tests skip without it.
+- [x] **Installation instructions a stranger can follow** — verified
+      2026-08-29 by cloning to a fresh directory with no `data/` and following
+      README §Building. `cargo test --workspace --release --locked` builds and
+      passes with no system dependencies, as claimed: **594 pass, 0 fail**.
+      Of those, **18 did not actually run** — 14 want the 1.9 MB
+      `CMU-1-Small-Region.svs`, 4 the 177 MB `CMU-1.svs` — and the README now
+      says so with those numbers.
+
+      This exercise found a real bug: the witness pass lacked
+      `--no-fail-fast`, so it named 7 skipped tests out of 18 and CI's job
+      summary under-reported the very thing it exists to report. Fixed in
+      `ci.yml` and in all three places the command is documented.
 
 ### Must be resolved before submission
 
@@ -98,9 +112,12 @@ Checked against the repository on 2026-08-29.
       another project's algorithms. Notify the QuPath maintainers before
       submitting — a JOSS reviewer may well be one of them, and the courtesy
       costs nothing. Cite QuPath's own paper (Bankhead et al. 2017) prominently.
-- [ ] **Slide provenance.** CMU-1 is from the OpenSlide freely-distributable
-      test set; state its licence and where it comes from, since every headline
-      number depends on it.
+- [x] **Slide provenance** — already documented and verified in
+      `docs/test-data.md` §Licensing: the OpenSlide test data is CC0 1.0,
+      declared per file in the directory index and machine-readable in
+      `index.json`, no attribution or registration required. Exact byte counts
+      are recorded there too. The paper needs to *cite* this, not establish
+      it.
 
 ## Preprint outline
 
@@ -141,8 +158,10 @@ Reuse, do not regenerate:
 1. Draft `paper.md` against JOSS's required sections (summary, statement of
    need, references). ~700 words is a hard constraint; the preprint carries
    the rest.
-2. Add `CONTRIBUTING.md` and `CODE_OF_CONDUCT.md`.
-3. Resolve authorship and affiliation.
+2. ~~Add `CONTRIBUTING.md` and `CODE_OF_CONDUCT.md`.~~ Done 2026-08-29.
+3. Resolve authorship and affiliation. **This is the gating item** — nothing
+   downstream (arXiv, Zenodo, JOSS) can be submitted under a handle, and it
+   is the one blocker no amount of repository work removes.
 4. Notify the QuPath maintainers.
 5. Draft the preprint from `DIVERGENCES.md` D-009 and `docs/MEMO.md` §2 —
    both already contain the argument in prose; this is largely restructuring,
