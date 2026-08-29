@@ -2,18 +2,20 @@
 
 Two artifacts, one body of evidence:
 
-- **`paper.md` + `paper.bib`** — the JOSS submission. Markdown, ~700 words, is
-  what JOSS's own tooling compiles. This is the format the journal requires;
-  it is not a stylistic choice.
-- **`preprint/`** — the arXiv preprint. LaTeX, longer, carries the parity
+- **`paper.md` + `paper.bib`** — the JOSS submission. Markdown is what JOSS's
+  own tooling compiles; the ~1000-word ceiling is the journal's, not a
+  stylistic choice. Currently 626 words.
+- **`preprint/`** — the arXiv preprint. LaTeX, 11 pages, carries the parity
   tables and the method that JOSS's word limit has no room for.
 
-They are not two papers. The preprint is the full argument; `paper.md` is the
-software summary that points at it.
+They are not two papers, and they are not the same paper at two lengths. The
+preprint argues the **method**, with the port as its case study. `paper.md`
+describes the **software** — the port and its parity harness as one artefact —
+because that is what JOSS reviews.
 
-**Both are drafted as of 2026-08-29.** What is still marked `\todo{}` in the
-LaTeX is not writing: the author block and the Zenodo DOI. Everything else is
-prose. Figures are converted from the tracked SVGs in `docs/benchmarks/` by
+**Both are drafted, and re-cut on 2026-08-30** around the framing below. What
+is still marked `\todo{}` in the LaTeX is not writing: the author block and
+the Zenodo DOI. Everything else is prose. Figures are converted from the tracked SVGs in `docs/benchmarks/` by
 the Makefile and gitignored, so there is no second copy of a recording.
 
 The numbers in both were copied from `DIVERGENCES.md` D-009, `docs/MEMO.md`
@@ -23,52 +25,85 @@ downstream, and `main.tex` says so in its header.
 
 ## The framing decision, which everything else follows from
 
-**This is not a "we reproduced QuPath" paper, and must not be written as one.**
-D-009 is open: over ten regions of CMU-1 this finds 1.065x QuPath's object
-count (1.012–1.129 by region), always over-counting. That gap is real,
-density-dependent, and unexplained.
+**This is not a "we reproduced QuPath" paper, and not a "we made QuPath fast"
+paper either.** Both are refutable from the repository's own documentation,
+and the second is the more tempting mistake because the speed figure is real.
 
-Writing a parity claim now would be refuted by the repository's own
-`DIVERGENCES.md`, which a reviewer will read.
+The speedup is 3.359 s against QuPath's 15.87 s single-threaded, 4.7x. It is
+also an upper bound of unknown tightness — QuPath's time includes computing
+measurements this port does not implement — and it is attached to output that
+finds **6.5% more objects than the reference**, density-dependently, so it
+cannot be corrected for with a constant. A faster implementation that computes
+something measurably different is not yet useful to anyone doing research, and
+a paper selling the speed invites exactly the review that says so.
 
-**Write the method paper instead.** The contribution is *how a port of a
-scientific image-analysis pipeline is verified stage by stage, and what that
-method finds* — including the hypotheses it refuted. Concretely, what is
-defensible today:
+**So the method is the subject and the port is the case study.** What is
+defensible today, in the order the papers now present it:
 
-1. A stage-level parity methodology: record the reference implementation's
-   intermediate state at each stage boundary, feed the port the *same* input at
-   that boundary, compare pixel for pixel. (See `parity/README.md`.)
-2. **Mutation testing of the fixtures themselves** — every parity test is shown
-   able to fail before it is trusted. This is the part most ports skip, and it
-   is what makes the negative results credible.
-3. Seven stages ruled out on real tissue, three remaining, and a documented
-   trail of refuted hypotheses (D-009's own history: the merge/split pair was
-   the named suspect and was exonerated pixel-for-pixel).
-4. Three bugs the fixtures caught that produced *entirely plausible images* —
-   the opening-for-tophat substitution, the DAB-vector-as-EOSIN error, the
-   missing-APP14 JPEG decode. This is the strongest argument for the method:
-   visual inspection passed all three.
+1. **The usual validation practices fail, with evidence.** Three bugs that
+   produced entirely plausible images — the opening-for-tophat substitution,
+   the DAB-vector-as-EOSIN error, the missing-APP14 JPEG decode. Visual
+   inspection passed all three; count comparison would have caught none. This
+   is the paper's opening claim because it is the part that holds for readers
+   who do not care about cell detection.
+2. **A stage-level parity methodology**: record the reference's intermediate
+   state at each stage boundary, feed the port the *same* input there, compare
+   pixel for pixel. (See `parity/README.md`.)
+3. **Mutation testing of the fixtures themselves** — every parity test shown
+   able to fail before it is trusted. The part most ports skip, and what makes
+   the negative results credible.
+4. **A localisation result**: seven stages ruled out on real tissue, three
+   remaining, the gap split into a density-independent ~4.7% maxima excess and
+   a density-dependent effect at the mean-intensity filter, and the merge/split
+   pair — which every aggregate statistic implicated — exonerated pixel for
+   pixel.
 
-The open gap is a **result**, not an embarrassment. Frame it as: the method
-localised a discrepancy that visual comparison could not see, to three named
-stages out of ten.
+The open gap is a **result**, not an embarrassment: the method localised a
+discrepancy that visual comparison could not see and that end-to-end counts
+could not attribute. A method for finding subtle discrepancies is best
+evidenced by one it found.
 
-## Venue
+**The corollary for the speed figure**: report it, with its conditions, in the
+case-study section. Do not lead with it, do not put it in Results, and do not
+let a redraft quietly promote it. A port reporting a speedup without reporting
+how equivalence was established has not reported its main risk.
 
-**arXiv + JOSS, in that order.** They do not conflict; JOSS explicitly permits
-preprints.
+## Venue, and the order
+
+**arXiv first, and soon. JOSS second, and only after the claims are clean.**
+
+This reverses an earlier version of this file, which said JOSS was the best
+fit and put it first. The correction matters: **JOSS reviews whether the
+software does what it claims.** A submission whose README claimed a QuPath
+port, while `DIVERGENCES.md` recorded a 6.5% over-count, would stall in review
+on the discrepancy rather than on anything about the software's quality. Fix
+what is claimed, then submit. That is now done in `paper.md`, which offers the
+port *and the parity harness* as one artefact and states the gap in its
+Summary.
 
 - **arXiv**, category `eess.IV` (Image and Video Processing), cross-list
-  `cs.CV`. Not bioRxiv: the contribution is software verification and numerical
-  parity, not a biological finding, and bioRxiv's readership judges biological
-  novelty this does not claim. Note arXiv requires endorsement for a first
-  submission in a category.
-- **JOSS** — reviews the *software*, not novelty; open review on GitHub; free;
-  issues a DOI. The best fit for what this is.
-- Considered and rejected for now: **SoftwareX** carries a ~$2,500 APC despite
-  being widely assumed free; **Bioinformatics** Application Notes would want
-  D-009 closed first.
+  `cs.CV`. Costs nothing, gatekeeps only through endorsement, and timestamps
+  the method. Not bioRxiv: the contribution is software verification, not a
+  biological finding, and bioRxiv's readership judges a novelty this does not
+  claim. Note arXiv requires endorsement for a first submission in a category.
+- **JOSS** — reviews the software, open review on GitHub, free, issues a DOI.
+  Right venue, second in order. Its blockers are listed below.
+- Considered and rejected: **SoftwareX**, ~$2,500 APC despite being widely
+  assumed free. **Bioinformatics** Application Notes would want D-009 closed.
+
+### If D-009 never closes
+
+The method paper still stands, and this is the point of the re-framing. Target
+venues where verification methodology and negative results are the subject
+rather than an embarrassment — empirical software engineering, research
+software engineering, or a reproducibility track. The paper's claim there is
+not "we ported QuPath" but "here is how to check a port, and here is what it
+catches that inspection and counts do not".
+
+**Do not wait for D-009 before posting the preprint.** Publishing invites the
+fix: a QuPath maintainer reading the stage ladder may recognise the flat 4.7%
+maxima excess on sight. The gap being open is evidence the method works, not
+evidence against it.
 
 ## Blockers for JOSS
 
@@ -165,23 +200,57 @@ Reuse, do not regenerate:
 
 ## Order of work
 
-1. ~~Draft `paper.md` against JOSS's required sections.~~ Done 2026-08-29,
-   779 words of body against the ~1000 ceiling.
+Drafting is done. What remains is one blocker, one courtesy, and the
+mechanics.
+
+1. ~~Draft `paper.md`.~~ Done; re-cut 2026-08-30 around the port-plus-harness
+   framing, 626 words.
 2. ~~Add `CONTRIBUTING.md` and `CODE_OF_CONDUCT.md`.~~ Done 2026-08-29.
-3. Resolve authorship and affiliation. **This is the gating item** — nothing
-   downstream (arXiv, Zenodo, JOSS) can be submitted under a handle, and it
-   is the one blocker no amount of repository work removes.
-4. Notify the QuPath maintainers.
-5. ~~Draft the preprint from `DIVERGENCES.md` D-009 and `docs/MEMO.md` §2.~~
-   Done 2026-08-29: ~10 pages, clean `make` from `make clean`, final pass with
-   no undefined reference and no overfull box.
-6. Post to arXiv.
-7. Tag a release, archive to Zenodo, submit to JOSS citing the preprint.
+3. ~~Draft the preprint.~~ Done; re-cut 2026-08-30 with the method as subject
+   and the port as case study. 11 pages, clean build.
+4. **Resolve authorship and affiliation.** The gating item. Nothing downstream
+   — arXiv, Zenodo, JOSS — can be submitted under a handle, and no amount of
+   repository work removes it.
+5. **Check `paper.bib` against doi.org.** Entries were written from memory and
+   the header says so. Two errors have already surfaced by using the file
+   rather than checking it (a key dated wrong, an article typed as a
+   conference paper), which is reason to expect more.
+6. **Diff `CODE_OF_CONDUCT.md` against the published Contributor Covenant 2.1.**
+   Reproduced from memory; the fetch was blocked.
+7. **Notify the QuPath maintainers.** Before submitting, not after. This
+   reimplements their algorithms, a JOSS reviewer may well be one of them, and
+   the courtesy costs nothing.
+8. **Post to arXiv** (`eess.IV`, cross-list `cs.CV`). Needs an endorsement for
+   a first submission in the category.
+9. **Audit the README and `CITATION.cff` against the paper's framing.** The
+   papers now lead with the method; the README still opens as a port with a
+   speed section. It is honest — the gap is above the fold — but it sells the
+   wrong thing to someone arriving from the preprint, and JOSS reviewers read
+   the repository, not the paper. This is real work, not a tidy-up.
+10. **Tag a release, archive to Zenodo** for the DOI, fill the two remaining
+    `\todo{}` markers in `main.tex` (author block, DOI), rebuild.
+11. **Submit to JOSS**, citing the preprint.
 
 ## What would change the framing
 
 If the three remaining stages (blur, Laplacian, regional maxima) are pinned on
-tissue at production size and D-009 closes, this becomes a parity paper and the
-venue calculation changes — a methods journal becomes reachable. Until then,
-the method is the contribution and the gap is a finding. Do not wait for it:
-the method paper stands on its own, and publishing invites the fix.
+tissue at production size and D-009 closes, three things change at once:
+
+- the port becomes a **usable substitute** rather than a documented
+  approximation, and the speed figure becomes a claim someone can act on;
+- the README's framing becomes true as written, and JOSS's review has nothing
+  to catch on;
+- a **parity result** joins the method result, which makes a methods journal
+  reachable in a way it is not today.
+
+That is the outcome worth wanting. It is not a reason to hold the preprint:
+the method paper stands on its own, the gap is evidence the method works, and
+publishing is the fastest way to get another pair of eyes on a 4.7% excess
+that has resisted this one. If it closes after the preprint is posted, that is
+a second paper, not a wasted first one.
+
+**What would *not* change**: the three bugs, the refuted merge/split
+hypothesis, and the argument that inspection and counts accept wrong output.
+Those are findings about validation practice and they survive D-009 either
+way. That is the test of whether the re-framing was right — the paper's
+central claims should not depend on how the case study ends.
