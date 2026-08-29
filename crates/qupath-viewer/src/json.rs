@@ -131,12 +131,57 @@ impl Value {
 pub fn parse(text: &str) -> Result<Value, String> {
     let bytes = text.as_bytes();
     let mut at = 0;
-    let value = value(bytes, &mut at)?;
+    let value = value(bytes, &mut at, 0)?;
     space(bytes, &mut at);
     if at != bytes.len() {
         return Err(problem(bytes, at, "trailing text after the document"));
     }
     Ok(value)
+}
+
+/// How deeply arrays and objects may nest before the reader gives up.
+///
+/// # Why there is a limit at all
+///
+/// [`value`] calls [`array`] and [`object`], and both call [`value`] back, so
+/// the reader's stack depth is the document's nesting depth. `project.qpproj`
+/// is written by *someone else's application*, and this module's header says
+/// so; a file that nests deeper than the stack is deep does not produce an
+/// error, it aborts the process. That was measured, not assumed: `[` repeated
+/// 40,000 times and closed again overflows an 8 MB main-thread stack and dies
+/// with `SIGABRT`, and 20,000 does not. A crash on a 40 KB file is not a
+/// failure mode a project browser can have — `Result` is the whole contract of
+/// [`parse`], and a stack overflow is not catchable, so the guard has to come
+/// before the recursion rather than around it.
+///
+/// # Why this number
+///
+/// Gson — which is what QuPath writes these files with — has had a nesting
+/// limit of 255 in its own reader since 2.8.6, so a document deeper than this
+/// is one Gson itself would refuse to read back. Matching that keeps the rule
+/// "what QuPath can write, this can read", while sitting three orders of
+/// magnitude below the depth that was measured to crash. A real
+/// `project.qpproj` nests about six deep.
+const MAX_DEPTH: u32 = 255;
+
+/// Enters one level of nesting, or refuses.
+///
+/// Every recursive step goes through here, so the check cannot be forgotten at
+/// a call site — which is the failure mode a plain `depth + 1` argument has.
+fn nest(
+    bytes: &[u8],
+    at: &mut usize,
+    depth: u32,
+    parse_container: fn(&[u8], &mut usize, u32) -> Result<Value, String>,
+) -> Result<Value, String> {
+    if depth >= MAX_DEPTH {
+        return Err(problem(
+            bytes,
+            *at,
+            &format!("nested deeper than {MAX_DEPTH} arrays and objects"),
+        ));
+    }
+    parse_container(bytes, at, depth + 1)
 }
 
 /// A message naming where in the text the reader stopped.
@@ -168,7 +213,7 @@ fn space(bytes: &[u8], at: &mut usize) {
 }
 
 /// One value, with leading whitespace skipped.
-fn value(bytes: &[u8], at: &mut usize) -> Result<Value, String> {
+fn value(bytes: &[u8], at: &mut usize, depth: u32) -> Result<Value, String> {
     space(bytes, at);
     match bytes.get(*at) {
         None => Err(problem(
@@ -176,8 +221,8 @@ fn value(bytes: &[u8], at: &mut usize) -> Result<Value, String> {
             *at,
             "a value was expected and the text ended",
         )),
-        Some(b'{') => object(bytes, at),
-        Some(b'[') => array(bytes, at),
+        Some(b'{') => nest(bytes, at, depth, object),
+        Some(b'[') => nest(bytes, at, depth, array),
         Some(b'"') => string(bytes, at).map(Value::String),
         Some(b't') => literal(bytes, at, "true", Value::Bool(true)),
         Some(b'f') => literal(bytes, at, "false", Value::Bool(false)),
@@ -348,7 +393,7 @@ fn hex4(bytes: &[u8], at: &mut usize) -> Result<u32, String> {
 }
 
 /// An array, already at its `[`.
-fn array(bytes: &[u8], at: &mut usize) -> Result<Value, String> {
+fn array(bytes: &[u8], at: &mut usize, depth: u32) -> Result<Value, String> {
     *at += 1;
     let mut items = Vec::new();
     space(bytes, at);
@@ -357,7 +402,7 @@ fn array(bytes: &[u8], at: &mut usize) -> Result<Value, String> {
         return Ok(Value::Array(items));
     }
     loop {
-        items.push(value(bytes, at)?);
+        items.push(value(bytes, at, depth)?);
         space(bytes, at);
         match bytes.get(*at) {
             Some(b',') => *at += 1,
@@ -371,7 +416,7 @@ fn array(bytes: &[u8], at: &mut usize) -> Result<Value, String> {
 }
 
 /// An object, already at its `{`.
-fn object(bytes: &[u8], at: &mut usize) -> Result<Value, String> {
+fn object(bytes: &[u8], at: &mut usize, depth: u32) -> Result<Value, String> {
     *at += 1;
     let mut fields = Vec::new();
     space(bytes, at);
@@ -387,7 +432,7 @@ fn object(bytes: &[u8], at: &mut usize) -> Result<Value, String> {
             return Err(problem(bytes, *at, "a `:` was expected"));
         }
         *at += 1;
-        fields.push((key, value(bytes, at)?));
+        fields.push((key, value(bytes, at, depth)?));
         space(bytes, at);
         match bytes.get(*at) {
             Some(b',') => *at += 1,
@@ -865,5 +910,62 @@ mod tests {
             .and_then(|value| value.get("e"))
             .and_then(Value::as_str);
         assert_eq!(leaf, Some("found"));
+    }
+
+    /// The depth that used to abort the process. `[` 40,000 times overflowed an
+    /// 8 MB stack and died with `SIGABRT`, which no `Result` can express — so
+    /// what this asserts is that a *value comes back at all*. Reaching the
+    /// assertion is the test; the process getting here is the regression.
+    #[test]
+    fn a_document_too_deep_to_recurse_through_is_an_error_and_not_a_crash() {
+        let n = 40_000;
+        let text = format!("{}{}", "[".repeat(n), "]".repeat(n));
+        let error = parse(&text).expect_err("40,000 deep is past the limit");
+        assert!(
+            error.contains("nested deeper than"),
+            "the error should name the limit, got {error:?}"
+        );
+    }
+
+    /// The same depth reached through objects, since [`object`] and [`array`]
+    /// recurse independently and a guard on one is not a guard on the other.
+    #[test]
+    fn objects_are_counted_as_well_as_arrays() {
+        let n = 40_000;
+        let text = format!(
+            "{}{}",
+            r#"{"a":"#.repeat(n),
+            "1".to_owned() + &"}".repeat(n)
+        );
+        let error = parse(&text).expect_err("40,000 deep is past the limit");
+        assert!(
+            error.contains("nested deeper than"),
+            "the error should name the limit, got {error:?}"
+        );
+    }
+
+    /// The limit is a ceiling on malformed input, not on real files. Gson's own
+    /// reader stops at 255, so anything QuPath can write back is inside it —
+    /// and a document exactly at the limit has to still parse, or the boundary
+    /// is off by one in the direction that rejects valid projects.
+    #[test]
+    fn nesting_up_to_the_limit_is_still_read() {
+        let deepest = MAX_DEPTH as usize;
+        let text = format!("{}{}", "[".repeat(deepest), "]".repeat(deepest));
+        let value = parse(&text).expect("a document at the limit is a valid one");
+
+        // And one level further is the first that is refused.
+        let text = format!("{}{}", "[".repeat(deepest + 1), "]".repeat(deepest + 1));
+        parse(&text).expect_err("one past the limit is refused");
+
+        // Walking what came back proves the whole document is there, not just
+        // that the outermost bracket parsed.
+        let mut here = &value;
+        let mut seen = 0;
+        while let Some(inner) = here.as_array().and_then(<[Value]>::first) {
+            here = inner;
+            seen += 1;
+        }
+        assert_eq!(seen, deepest - 1, "every level should have been kept");
     }
 }
