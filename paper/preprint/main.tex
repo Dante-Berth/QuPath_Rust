@@ -33,8 +33,8 @@
   \newcommand{\todo}[1]{}
 \fi
 
-\title{Verifying a port of a digital-pathology pipeline,\\
-       stage by stage}
+\title{What stage-boundary verification finds\\
+       that visual inspection misses}
 
 % TODO: real name, affiliation and ORCID. The repository currently carries
 % only the handle "Dante-Berth", which is not submittable.
@@ -46,76 +46,117 @@
 
 \begin{abstract}
 Reimplementations of scientific image-analysis software are common, and are
-usually validated either by eye or by agreement on a final count. Both accept
-wrong output. We describe a port of QuPath's watershed cell detection to Rust
-and, as the substantive contribution, the method used to verify it: the
-reference implementation's intermediate state is recorded at each stage
-boundary, the port is given the \emph{same} input at that boundary, and the two
-are compared pixel for pixel. Every fixture is itself mutation-checked, so a
-test that cannot fail is not trusted. The method found three defects that had
-been producing entirely plausible images --- a morphological opening
-substituted for a top hat, a DAB stain vector used under the name EOSIN, and a
-JPEG colour-transform error on Aperio tiles carrying no Adobe APP14 marker ---
-none of which visual inspection had caught. It also localises a discrepancy
-that remains open. Over ten regions of CMU-1 the port finds $1.065\times$
-QuPath's object count, and stage-boundary comparison separates this into a
-flat, density-independent $\sim$4.7\% excess already present in the regional
-maxima and a distinct density-dependent effect appearing at the mean-intensity
-filter. Seven of ten stages are ruled out against QuPath on real tissue, pixel
-for pixel; three remain. We report the gap as a localisation result rather than
-claiming parity, and we report the hypotheses the method refuted, including the
-one this work initially named as the likely cause.
+usually validated either by eye or by agreement on an aggregate count. We show
+that both routinely accept wrong output. Using a port of QuPath's watershed
+cell detection to Rust as a case study, we describe and evaluate a verification
+method: the reference implementation's intermediate state is recorded at each
+stage boundary, the port is supplied the \emph{same} input at that boundary,
+and the two are compared pixel for pixel. Every fixture is itself
+mutation-checked, so no test is trusted until it has been shown able to fail.
+The method found three defects that had been producing entirely plausible
+images --- a morphological opening substituted for a top hat, a DAB stain
+vector used under the name EOSIN, and a JPEG colour-transform error on Aperio
+tiles carrying no Adobe APP14 marker. All three passed visual inspection, and
+none would have been caught by comparing final counts. The method also
+localised a discrepancy that visual comparison could not see and that
+end-to-end counts could not attribute: the port finds $1.065\times$ QuPath's
+object count over ten regions of CMU-1, and stage-boundary comparison separates
+this into a flat, density-independent $\sim$4.7\% excess already present in the
+regional maxima and a distinct density-dependent effect appearing at the
+mean-intensity filter. Seven of ten stages are excluded on real tissue, pixel
+for pixel; three remain. We report this as a localisation result rather than a
+parity claim, together with the hypotheses the method refuted --- including the
+two stages that every aggregate statistic implicated and that the method
+exonerated exactly. We argue that a port's verification method, not its
+speedup, is the transferable result, and that reporting an unresolved
+discrepancy precisely is more useful than reporting agreement loosely.
 \end{abstract}
 
 \section{Introduction}
 \label{sec:intro}
 
-QuPath \cite{bankhead2017qupath} is among the most widely used open platforms
-for whole-slide image analysis, and its watershed cell detection is a standard
-first step in quantitative digital pathology. Built on ImageJ
-\cite{schneider2012nih}, it is designed around interactive use: a pathologist
-opens a slide, adjusts parameters, and inspects the result. Its object model
-follows from that. Each detected object carries its measurements in a
-string-keyed map, which is a reasonable choice when a human is examining
-objects one at a time.
+Scientific software is frequently reimplemented. A pipeline is ported to a
+faster language, restructured for a different data layout, or reimplemented on
+a new platform, and the new implementation is then used to produce research
+results. The question that decides whether those results are trustworthy is
+whether the port computes what the original computed --- and that question is
+usually answered badly.
 
-It is the wrong layout for bulk analysis. Running over hundreds of slides, the
-per-object map costs an allocation and a hash lookup per measurement, and
-scatters values that are read together across memory. Reorganising detections
-as a struct of arrays --- one contiguous column per feature, one row per object
---- removes that cost. This is the main source of the speedup reported in
-Section~\ref{sec:results}, and we are explicit that it is a consequence of the
-data layout rather than of the implementation language.
+In our experience it is answered in one of two ways. Either the output is
+inspected visually, which for image analysis means looking at a segmentation
+overlay and judging it reasonable; or the two implementations are compared on
+an aggregate statistic, typically a count of detected objects. This paper's
+starting claim is that \textbf{both routinely accept output that is wrong}, and
+we give evidence rather than assert it: three defects in our own port, each of
+which survived visual inspection by producing entirely plausible images, and a
+discrepancy which agreement on counts could neither detect at the stage where
+it arises nor attribute to any stage at all.
 
-The difficulty is not writing the port. It is establishing that the port
-computes the same thing, because output that is subtly wrong is
-indistinguishable from output that is right when the only check is a
-segmentation overlay that looks reasonable. Our central methodological claim is
-that \textbf{agreement on final object counts is the weakest available
-evidence}: two implementations can agree on how many objects they found and
-disagree about where every one of them is. Counts are a one-dimensional
-projection of a segmentation, and errors in opposite directions cancel within
-it.
+Counts are weak for a structural reason. A count is a one-dimensional
+projection of a segmentation, so two implementations can agree on how many
+objects they found while disagreeing about where every one of them is, and
+errors in opposite directions cancel within the projection. Visual inspection
+is weak for a different reason: a domain expert judging an overlay is checking
+whether the output is \emph{plausible}, not whether it is \emph{the same}, and
+the two come apart precisely where a reimplementation is most likely to go
+wrong --- a slightly wrong filter radius, a transposed stain vector, a colour
+transform applied under the wrong convention.
 
-This paper's contributions are:
+\subsection*{This paper}
+
+We describe a verification method that avoids both failure modes, and we
+evaluate it by applying it to a substantial real port. The method is to record
+the reference implementation's intermediate state at every stage boundary, feed
+the port that recorded state as input at the same boundary, and compare the two
+outputs pixel for pixel. Because both implementations then receive identical
+input at a defined point, a difference is attributable to one stage rather than
+to everything downstream of it. Each fixture is additionally mutation-checked:
+the code it covers is deliberately broken and the test confirmed to fail,
+because a test that has never been observed to fail is not evidence.
+
+The case study is a port of QuPath's watershed cell detection to Rust. QuPath
+\cite{bankhead2017qupath} is among the most widely used open platforms for
+whole-slide image analysis and is built on ImageJ \cite{schneider2012nih}; its
+detection chain is a standard first step in quantitative digital pathology, is
+non-trivial (ten stages, several of them data-dependent), and has a reference
+implementation we can instrument. Our port reorganises detected objects into a
+columnar layout for batch analysis, and runs several times faster than QuPath
+on the same region. \textbf{We treat that speedup as a property of the case
+study rather than as a result}, for the reason developed in
+Section~\ref{sec:gap}: the port does not yet reproduce QuPath's output, and a
+faster implementation that computes something different is not yet useful to
+anyone. The interesting output of this work is what the verification method
+found while we tried to make it agree.
+
+\subsection*{Contributions}
 
 \begin{enumerate}
-  \item A \textbf{stage-boundary fixture method} for verifying a port against
-    a reference implementation, which isolates each stage by supplying both
-    implementations with byte-identical input at the boundary
+  \item A \textbf{stage-boundary fixture method} for verifying a port against a
+    reference implementation, which isolates each stage by supplying both
+    implementations with byte-identical input at the boundary, together with the
+    practical requirements for making it work --- in particular that a fixture
+    must run at the size the pipeline gives the stage
     (Section~\ref{sec:method}).
-  \item \textbf{Mutation testing applied to the fixtures themselves}, so that
-    every parity test is demonstrated capable of failing before its passing is
-    treated as evidence. This is the step most ports omit, and it is what makes
-    the negative results here credible.
-  \item \textbf{Three defects found} that had passed visual inspection, each
-    producing images a domain expert would accept
-    (Section~\ref{sec:results}).
-  \item \textbf{A localisation result} for a discrepancy that remains open:
-    seven of ten stages excluded on real tissue, the gap separated into two
-    independent effects, and a previously named suspect refuted
-    (Section~\ref{sec:gap}).
+  \item \textbf{Mutation testing applied to the verification fixtures
+    themselves}, so that no parity test is trusted until it has been shown able
+    to fail. This is the step that makes the negative results here credible, and
+    it is the step we have not seen applied to port verification elsewhere.
+  \item \textbf{Evidence that the usual validation practices fail}: three
+    defects that passed visual inspection, each producing images a domain
+    expert would accept, and none detectable by count comparison
+    (Section~\ref{sec:bugs}).
+  \item \textbf{A localisation result for an unresolved discrepancy}: seven of
+    ten stages excluded on real tissue pixel for pixel, the remaining gap
+    separated into two independent effects with different signatures, and two
+    stages exonerated that every aggregate statistic had implicated
+    (Section~\ref{sec:gap}). We report the open gap in full, because a method
+    for finding subtle discrepancies is best evidenced by one it found.
 \end{enumerate}
+
+We argue in Section~\ref{sec:discussion} that the transferable result of a
+porting effort is its verification method rather than its speedup, and that an
+unresolved discrepancy reported precisely is more useful to a reader than
+agreement reported loosely.
 
 \section{The verification method}
 \label{sec:method}
@@ -189,7 +230,7 @@ other comparison. Most stages here are compared exactly --- integer masks and
 label maps admit no tolerance at all, and float buffers are compared by their
 bit patterns where the operation is deterministic.
 
-\section{The port}
+\section{The case study: porting QuPath's cell detection}
 \label{sec:port}
 
 \subsection{Columnar objects}
@@ -225,6 +266,68 @@ lesson the fixtures teach.
 Aperio SVS and tiled TIFF are read by a pure-Rust decoder checked against
 OpenSlide \cite{goode2013openslide}. JPEG 2000 compressed slides are not
 supported and are refused by name rather than mis-decoded.
+
+\subsection{Performance, and why it is not the result}
+\label{sec:perf}
+
+The port is faster, which is why it was written, but the figure carries
+conditions that matter more than its size. On the 4000$\times$4000 region at
+(27776, 5952) of \texttt{CMU-1.svs}, with default parameters, it takes
+3.359\,s single-threaded and 1.019\,s on twenty threads against QuPath's
+15.87\,s --- $4.7\times$ and $15.6\times$ respectively.
+
+\textbf{This is an upper bound, and we do not claim it as a result.} QuPath's
+time includes computing per-object measurements, which this port does not
+implement, so an unknown part of the difference is work not yet done rather
+than work done faster. More importantly, the port does not yet reproduce
+QuPath's output (Section~\ref{sec:gap}); a faster implementation that computes
+something measurably different is not a usable substitute, and its speed is not
+yet a claim anyone can act on. We report the number because it is the reason
+the port exists and because withholding it would be coy, not because it is
+what this paper is offering.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.75\textwidth]{figures/compare-endtoend.pdf}
+  \caption{End-to-end cell detection against QuPath, same slide, same region,
+           same default parameters. The single-threaded bar is the one to read
+           when the question is whether the port is faster: QuPath's reference
+           time was measured single-threaded, and QuPath parallelises across
+           tiles in ordinary use. Both figures are an \emph{upper bound},
+           because QuPath's time includes computing measurements, which this
+           port does not yet implement. Some of the gap is therefore work not
+           yet done rather than work done faster.}
+  \label{fig:endtoend}
+\end{figure}
+
+Two features of the profile are worth reporting because they bear on method
+rather than on speed, and because both are cautionary. First, the two implementations' profiles have different
+shapes: QuPath's single largest cost is a \texttt{PriorityQueue} of boxed pixel
+objects compared through an interface call, at 29.4\% of self time, whereas the
+corresponding flood here is 12.1\% and uses a flat bucket array. The port's own
+largest stage, the background reconstruction, accounts for only 5.1\% of
+QuPath's profile. Neither profile predicts the other, so optimisation targets
+must be chosen from a measurement of the port itself.
+
+Second, scaling is governed by tile count rather than core count.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.75\textwidth]{figures/compare-threads.pdf}
+  \caption{Wall clock against thread count. The 4000$\times$4000 region is four
+           tiles and saturates at four threads; everything beyond six is idle.
+           The 9000$\times$9000 region is twenty-five tiles and continues to
+           improve to twenty threads. A stage share quoted without its tile
+           count and thread count is not a number anyone can use.}
+  \label{fig:threads}
+\end{figure}
+
+At the component level, the rank filter runs $3.1$--$9.7\times$ faster than
+ImageJ's \texttt{RankFilters}, settling near $3.4\times$ at the radii detection
+actually uses. The shape of that curve matters more than its peak: a naive
+per-pixel kernel scan was $7.6$--$35.6\times$ \emph{slower} than ImageJ before a
+rectangle decomposition replaced it. The algorithm was the variable, not the
+language.
 
 \subsection{What is not claimed}
 
@@ -265,56 +368,6 @@ tissue, with colours a reader has no baseline to reject.
 
 No test comparing against anything other than QuPath's own recorded output
 could have found any of the three.
-
-\subsection{Performance}
-\label{sec:perf}
-
-On the 4000$\times$4000 region at (27776, 5952) of \texttt{CMU-1.svs}, with
-default parameters, the port runs $4.7\times$ faster single-threaded and
-$15.6\times$ faster on twenty threads than QuPath's 15.87\,s.
-
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=0.75\textwidth]{figures/compare-endtoend.pdf}
-  \caption{End-to-end cell detection against QuPath, same slide, same region,
-           same default parameters. The single-threaded bar is the one to read
-           when the question is whether the port is faster: QuPath's reference
-           time was measured single-threaded, and QuPath parallelises across
-           tiles in ordinary use. Both figures are an \emph{upper bound},
-           because QuPath's time includes computing measurements, which this
-           port does not yet implement. Some of the gap is therefore work not
-           yet done rather than work done faster.}
-  \label{fig:endtoend}
-\end{figure}
-
-Two features of the profile are worth reporting because they bear on method
-rather than on speed. First, the two implementations' profiles have different
-shapes: QuPath's single largest cost is a \texttt{PriorityQueue} of boxed pixel
-objects compared through an interface call, at 29.4\% of self time, whereas the
-corresponding flood here is 12.1\% and uses a flat bucket array. The port's own
-largest stage, the background reconstruction, accounts for only 5.1\% of
-QuPath's profile. Neither profile predicts the other, so optimisation targets
-must be chosen from a measurement of the port itself.
-
-Second, scaling is governed by tile count rather than core count.
-
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=0.75\textwidth]{figures/compare-threads.pdf}
-  \caption{Wall clock against thread count. The 4000$\times$4000 region is four
-           tiles and saturates at four threads; everything beyond six is idle.
-           The 9000$\times$9000 region is twenty-five tiles and continues to
-           improve to twenty threads. A stage share quoted without its tile
-           count and thread count is not a number anyone can use.}
-  \label{fig:threads}
-\end{figure}
-
-At the component level, the rank filter runs $3.1$--$9.7\times$ faster than
-ImageJ's \texttt{RankFilters}, settling near $3.4\times$ at the radii detection
-actually uses. The shape of that curve matters more than its peak: a naive
-per-pixel kernel scan was $7.6$--$35.6\times$ \emph{slower} than ImageJ before a
-rectangle decomposition replaced it. The algorithm was the variable, not the
-language.
 
 \subsection{Object-level agreement}
 \label{sec:dice}
@@ -544,6 +597,30 @@ mean-intensity filter.
 
 \section{Discussion}
 \label{sec:discussion}
+
+\subsection{The method is the transferable result, not the speedup}
+
+A porting effort typically reports its speedup. We think that is the least
+transferable thing it produces. A speedup is contingent on the hardware, the
+workload, the baseline's own maturity and how much of the original the port
+actually implements --- ours, as Section~\ref{sec:perf} sets out, is an upper
+bound of unknown tightness against a reference that computes more than we do.
+A reader cannot act on it, and cannot reproduce it without reproducing the
+whole apparatus.
+
+What does transfer is how the port was checked, and what that checking found.
+The three defects of Section~\ref{sec:bugs} are not QuPath-specific mistakes;
+they are the shape of mistake a reimplementation makes --- an operation
+replaced by a similar one, a parameter transposed, a file-format convention
+assumed rather than read --- and each was invisible to the two validation
+practices in ordinary use. That is a result about validation practice, and it
+holds for readers with no interest in cell detection.
+
+We would go further, on the strength of this case study: \textbf{a port that
+reports a speedup without reporting how equivalence was established has not
+reported its main risk}. Ours was 4.7$\times$ faster while producing 6.5\%
+more objects than the reference, and for most of the project's history the
+second fact was not visible from anything we were measuring.
 
 \subsection{What transfers}
 
