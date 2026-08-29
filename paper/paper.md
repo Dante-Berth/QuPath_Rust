@@ -79,7 +79,7 @@ Because a stage that faithfully processes a different input still produces
 different output, this is what makes a discrepancy attributable to one stage
 instead of to everything downstream of it.
 
-Every fixture is then **mutation-checked** [@jia2021mutation]: the code under
+Every fixture is then **mutation-checked** [@jia2011mutation]: the code under
 test is deliberately broken and the test confirmed to fail before its passing is
 trusted. A parity test that cannot fail is not evidence, and there are several
 ways for one to be silently vacuous — a truncated fixture still parses, and a

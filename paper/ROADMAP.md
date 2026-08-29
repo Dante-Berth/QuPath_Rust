@@ -11,6 +11,16 @@ Two artifacts, one body of evidence:
 They are not two papers. The preprint is the full argument; `paper.md` is the
 software summary that points at it.
 
+**Both are drafted as of 2026-08-29.** What is still marked `\todo{}` in the
+LaTeX is not writing: the author block and the Zenodo DOI. Everything else is
+prose. Figures are converted from the tracked SVGs in `docs/benchmarks/` by
+the Makefile and gitignored, so there is no second copy of a recording.
+
+The numbers in both were copied from `DIVERGENCES.md` D-009, `docs/MEMO.md`
+§2 and the README rather than re-derived. **If a number in the papers ever
+disagrees with the repository, the repository is right** — the papers are
+downstream, and `main.tex` says so in its header.
+
 ## The framing decision, which everything else follows from
 
 **This is not a "we reproduced QuPath" paper, and must not be written as one.**
@@ -86,10 +96,10 @@ Checked against the repository on 2026-08-29.
 - [x] **`CODE_OF_CONDUCT.md`** — added 2026-08-29, Contributor Covenant 2.1,
       enforcement contact set. **Reproduced from memory** (the fetch was
       blocked): diff it against the published 2.1 text before submitting.
-- [ ] **Statement of need** — required section of `paper.md`. Who is this for?
-      Bulk/batch analysis where QuPath's per-object layout is the bottleneck.
-      Be precise that the speedup is the columnar layout, not Rust as such;
-      the README already makes this distinction and the paper must not lose it.
+- [x] **Statement of need** — written. Two halves: the columnar layout for
+      batch workloads (stated as the layout's doing, not Rust's), and the
+      general one — reimplementations are usually validated by eye or by
+      aggregate count, and both accept wrong output.
 - [ ] **A tagged release with a DOI** (Zenodo), created at submission time.
 - [x] **Installation instructions a stranger can follow** — verified
       2026-08-29 by cloning to a fresh directory with no `data/` and following
@@ -155,17 +165,16 @@ Reuse, do not regenerate:
 
 ## Order of work
 
-1. Draft `paper.md` against JOSS's required sections (summary, statement of
-   need, references). ~700 words is a hard constraint; the preprint carries
-   the rest.
+1. ~~Draft `paper.md` against JOSS's required sections.~~ Done 2026-08-29,
+   779 words of body against the ~1000 ceiling.
 2. ~~Add `CONTRIBUTING.md` and `CODE_OF_CONDUCT.md`.~~ Done 2026-08-29.
 3. Resolve authorship and affiliation. **This is the gating item** — nothing
    downstream (arXiv, Zenodo, JOSS) can be submitted under a handle, and it
    is the one blocker no amount of repository work removes.
 4. Notify the QuPath maintainers.
-5. Draft the preprint from `DIVERGENCES.md` D-009 and `docs/MEMO.md` §2 —
-   both already contain the argument in prose; this is largely restructuring,
-   not new writing.
+5. ~~Draft the preprint from `DIVERGENCES.md` D-009 and `docs/MEMO.md` §2.~~
+   Done 2026-08-29: ~10 pages, clean `make` from `make clean`, final pass with
+   no undefined reference and no overfull box.
 6. Post to arXiv.
 7. Tag a release, archive to Zenodo, submit to JOSS citing the preprint.
 

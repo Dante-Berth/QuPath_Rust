@@ -7,9 +7,17 @@
 % submitting -- doi.org resolves each of these -- and delete this notice once
 % they have been.
 %
-% Known-suspect: the Jia & Harman mutation-testing survey is keyed
-% `jia2021mutation` but dated 2011; the year is believed correct and the key
-% is not. Fix the key when verifying.
+% Fixed since that notice was written, and NOT to be read as verification of
+% the rest. The Jia & Harman key was jia2021mutation on a 2011 entry and is
+% now jia2011mutation. And vincent1991watersheds was typed as a conference
+% paper with a journal name in its booktitle field, which is what made bibtex
+% warn about carrying both volume and number; it is an IEEE TPAMI article and
+% is now typed as one. Both were caught by using the file, not by checking it.
+% Every entry still needs the DOI check above.
+%
+% Note for editors of this header: bibtex parses an at-sign even inside a
+% percent-comment, so naming an entry type here with one starts a bogus entry
+% and fails the build. Spell them out in words instead.
 
 @article{bankhead2017qupath,
   title    = {{QuPath}: Open source software for digital pathology image analysis},
@@ -94,7 +102,7 @@
   doi     = {10.2307/1932409}
 }
 
-@article{jia2021mutation,
+@article{jia2011mutation,
   title   = {An Analysis and Survey of the Development of Mutation Testing},
   author  = {Jia, Yue and Harman, Mark},
   journal = {IEEE Transactions on Software Engineering},
