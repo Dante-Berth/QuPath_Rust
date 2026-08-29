@@ -1,16 +1,17 @@
 % =============================================================================
 %  QuPath_Rust preprint -- arXiv (eess.IV, cross-list cs.CV)
 %
-%  Build:  latexmk -pdf main.tex
-%     or:  pdflatex main && bibtex main && pdflatex main && pdflatex main
+%  Build:  make          (pdflatex + bibtex + two more passes)
+%     or:  make quick    (one pass, no bibliography)
 %
-%  STATUS: skeleton. Every section is an outline with the evidence it must
-%  carry named in a \todo{}. Nothing here is written prose yet.
+%  STATUS: drafted. Every section carries prose. Two \todo{} markers remain,
+%  and neither is writing: the author block (real name, affiliation, ORCID)
+%  and the Zenodo DOI, which does not exist until a release is tagged.
 %
-%  The argument and most of the numbers already exist in the repository, in
-%  DIVERGENCES.md (D-009) and docs/MEMO.md section 2. Drafting this is largely
-%  restructuring those, not new analysis. Copy numbers from there rather than
-%  re-deriving them, and cite the reproduction command for each.
+%  Numbers are copied from DIVERGENCES.md (D-009), docs/MEMO.md section 2 and
+%  the README rather than re-derived. Each headline figure names the command
+%  that reproduces it. If a number here disagrees with the repository, the
+%  repository is right and this file is stale.
 % =============================================================================
 \documentclass[11pt,a4paper]{article}
 
@@ -44,192 +45,594 @@
 \maketitle
 
 \begin{abstract}
-\todo{Write last. The frame: a port of QuPath's watershed cell detection to
-Rust, and --- the actual contribution --- a stage-boundary fixture method for
-verifying such a port against the reference implementation. Say plainly in the
-abstract that a density-dependent count difference of 1.065x remains open and
-is localised to three of ten stages. Claiming parity here would be refuted by
-the repository's own DIVERGENCES.md, which a reviewer will read.}
+Reimplementations of scientific image-analysis software are common, and are
+usually validated either by eye or by agreement on a final count. Both accept
+wrong output. We describe a port of QuPath's watershed cell detection to Rust
+and, as the substantive contribution, the method used to verify it: the
+reference implementation's intermediate state is recorded at each stage
+boundary, the port is given the \emph{same} input at that boundary, and the two
+are compared pixel for pixel. Every fixture is itself mutation-checked, so a
+test that cannot fail is not trusted. The method found three defects that had
+been producing entirely plausible images --- a morphological opening
+substituted for a top hat, a DAB stain vector used under the name EOSIN, and a
+JPEG colour-transform error on Aperio tiles carrying no Adobe APP14 marker ---
+none of which visual inspection had caught. It also localises a discrepancy
+that remains open. Over ten regions of CMU-1 the port finds $1.065\times$
+QuPath's object count, and stage-boundary comparison separates this into a
+flat, density-independent $\sim$4.7\% excess already present in the regional
+maxima and a distinct density-dependent effect appearing at the mean-intensity
+filter. Seven of ten stages are ruled out against QuPath on real tissue, pixel
+for pixel; three remain. We report the gap as a localisation result rather than
+claiming parity, and we report the hypotheses the method refuted, including the
+one this work initially named as the likely cause.
 \end{abstract}
 
 \section{Introduction}
 \label{sec:intro}
 
-\todo{QuPath's role in digital pathology \cite{bankhead2017qupath}, and the
-bulk-analysis bottleneck: a per-object string-keyed measurement map is the
-wrong layout for batch work over many slides.}
+QuPath \cite{bankhead2017qupath} is among the most widely used open platforms
+for whole-slide image analysis, and its watershed cell detection is a standard
+first step in quantitative digital pathology. Built on ImageJ
+\cite{schneider2012nih}, it is designed around interactive use: a pathologist
+opens a slide, adjusts parameters, and inspects the result. Its object model
+follows from that. Each detected object carries its measurements in a
+string-keyed map, which is a reasonable choice when a human is examining
+objects one at a time.
 
-\todo{The real problem: a port must \emph{prove} it computes the same thing
-before anyone can use its output in research. State the thesis here --- that
-agreeing final object counts are the weakest available evidence, because two
-runs can agree on how many objects they found and disagree about where every
-one of them is.}
+It is the wrong layout for bulk analysis. Running over hundreds of slides, the
+per-object map costs an allocation and a hash lookup per measurement, and
+scatters values that are read together across memory. Reorganising detections
+as a struct of arrays --- one contiguous column per feature, one row per object
+--- removes that cost. This is the main source of the speedup reported in
+Section~\ref{sec:results}, and we are explicit that it is a consequence of the
+data layout rather than of the implementation language.
 
-\todo{Contributions, as a list: (i) the stage-boundary fixture method;
-(ii) mutation testing applied to the fixtures themselves; (iii) three bugs
-found that produced entirely plausible images; (iv) a localisation result for
-the remaining discrepancy.}
+The difficulty is not writing the port. It is establishing that the port
+computes the same thing, because output that is subtly wrong is
+indistinguishable from output that is right when the only check is a
+segmentation overlay that looks reasonable. Our central methodological claim is
+that \textbf{agreement on final object counts is the weakest available
+evidence}: two implementations can agree on how many objects they found and
+disagree about where every one of them is. Counts are a one-dimensional
+projection of a segmentation, and errors in opposite directions cancel within
+it.
+
+This paper's contributions are:
+
+\begin{enumerate}
+  \item A \textbf{stage-boundary fixture method} for verifying a port against
+    a reference implementation, which isolates each stage by supplying both
+    implementations with byte-identical input at the boundary
+    (Section~\ref{sec:method}).
+  \item \textbf{Mutation testing applied to the fixtures themselves}, so that
+    every parity test is demonstrated capable of failing before its passing is
+    treated as evidence. This is the step most ports omit, and it is what makes
+    the negative results here credible.
+  \item \textbf{Three defects found} that had passed visual inspection, each
+    producing images a domain expert would accept
+    (Section~\ref{sec:results}).
+  \item \textbf{A localisation result} for a discrepancy that remains open:
+    seven of ten stages excluded on real tissue, the gap separated into two
+    independent effects, and a previously named suspect refuted
+    (Section~\ref{sec:gap}).
+\end{enumerate}
 
 \section{The verification method}
 \label{sec:method}
 
-\todo{The core idea, and the one figure worth drawing from scratch: record the
-reference implementation's intermediate state at each stage boundary, feed the
-port the \emph{same} input at that boundary, and compare pixel for pixel. This
-isolates each stage --- a stage that faithfully processes a different input
-produces different output, so end-to-end comparison cannot tell you which
-stage is wrong.}
+\subsection{Stage-boundary fixtures}
 
-\todo{Recording: parity/java/*.java run inside a live QuPath build. Say which
-recorders need a slide (parity/README.md documents this).}
+A pipeline stage that faithfully processes a different input produces different
+output. This is why end-to-end comparison cannot attribute a discrepancy: once
+two implementations diverge at stage $k$, every downstream stage receives
+different data, and each will differ from its counterpart whether or not it
+contains a defect.
 
-\todo{Mutation testing \cite{jia2021mutation} as the check on the checks --- the
-part most ports skip. A parity test that cannot fail proves nothing, so every
-one here was shown to fail under a deliberate perturbation before being
-trusted. Give the concrete examples: dropping the hole fill (246 pixels),
-narrowing the dilation to five neighbours (97 pixels), moving the maximum
-finder's tolerance from 0.5 to 0.6 (55 pixels).}
+The method follows directly. For each boundary between consecutive stages, we
+record the reference implementation's intermediate state --- the actual pixel
+buffers, as floats by their bit patterns, not summary statistics --- and
+serialise it. The port is then given that recorded state as input at the same
+boundary and its output compared against the reference's output, pixel for
+pixel. Each stage is thereby tested on the input the reference actually gave
+it, and a difference at stage $k$ implicates stage $k$ alone.
 
-\todo{Tolerances, and why they are stated per fixture rather than globally.}
+Recording is done by small Java programs run inside a live QuPath build, so
+what is captured is the behaviour of the reference implementation as it
+executes, not our reading of its source. This distinction is not pedantic: two
+of the three defects in Section~\ref{sec:results} were introduced by
+reimplementing from a careful reading of the Java, which appeared correct and
+was not. The recorded fixtures are committed as JSON, which lets the Rust test
+suite run without a JVM and makes any behavioural change on either side appear
+as a diff under version control.
+
+Fixtures that require a whole-slide image are driven separately from those that
+do not, since slides are too large to commit; tests depending on them skip when
+the slide is absent. Because a skipped test in Rust reports success, the suite
+can also be run in a mode that converts every such skip into a failure naming
+the input it wanted, which is what allows a green run to be read as evidence of
+coverage.
+
+\subsection{Mutation testing of the fixtures}
+
+A parity test that cannot fail proves nothing, and there are several ways for
+one to be silently vacuous. A fixture truncated during recording still parses.
+A comparison with a tolerance wide enough to accommodate an observed difference
+will accommodate the next one too. A test region containing no tissue cannot
+disagree about anything --- an early version of our region-selection script
+chose six regions by eye, and four contained so little tissue as to be
+uninformative.
+
+We therefore require that every parity test be demonstrated to fail under a
+deliberate perturbation of the code it covers before its passing is trusted
+\cite{jia2021mutation}. Concretely, for the merge-and-split fixture discussed
+in Section~\ref{sec:gap}, three mutations were applied and each was caught on
+the most clumped crop: dropping the hole fill (246 differing pixels), narrowing
+the dilation to five neighbours (97 pixels), and moving the maximum finder's
+tolerance from 0.5 to 0.6 (55 pixels). For the background-estimate fixture, a
+1\% smaller erosion radius fails on 4.96\% of pixels and omitting a
+\texttt{NEG\_INFINITY} assignment fails on 70.93\%; corrupting a single float
+in the middle of a recorded output fails at exactly that pixel, 1 differing of
+4{,}177{,}936.
+
+This discipline also documents what a passing test does \emph{not} cover. In
+the background-estimate fixture, narrowing the mask's dilation from
+$2.0\times$ to $1.5\times$ the radius leaves the test passing, because at the
+recorded limits the mask saturates its crop and both radii cover the same
+region. Rather than leave that reading as stronger than it is, the test records
+the unpinned detail explicitly.
+
+\subsection{Tolerances}
+
+Tolerances are stated per fixture rather than globally. A global tolerance is
+necessarily the loosest one any stage requires, which silently weakens every
+other comparison. Most stages here are compared exactly --- integer masks and
+label maps admit no tolerance at all, and float buffers are compared by their
+bit patterns where the operation is deterministic.
 
 \section{The port}
 \label{sec:port}
 
-\todo{The columnar object layout: a struct of arrays, one contiguous column
-per feature, one row per object. Be precise, as the README already is, that
-this --- not the choice of language --- is the main source of the speedup. Do
-not let the paper lose that distinction.}
+\subsection{Columnar objects}
 
-\todo{The detection chain, following QuPath's WatershedCellDetection: colour
-deconvolution \cite{ruifrok2001quantification}, background estimation by
-morphological reconstruction \cite{vincent1993morphological}, Laplacian of
-Gaussian, regional maxima, labelling, watershed flood
-\cite{vincent1991watersheds}, region tracing, the mean-intensity filter, the
-merge, the shape split, refineBoundary, the area filter.}
+Detections are stored as a struct of arrays: one contiguous column per feature,
+one row per object, in place of QuPath's per-object string-keyed measurement
+map. Measurements are addressed by column index resolved once, rather than by
+string hash per access. We emphasise again that this layout, not the choice of
+Rust, is what accounts for the bulk of the performance difference; a
+column-oriented reimplementation in another language would obtain most of the
+same benefit.
 
-\todo{Slide reading: a pure-Rust Aperio SVS/tiled-TIFF reader, checked against
-OpenSlide \cite{goode2013openslide}.}
+\subsection{The detection chain}
 
-\todo{What is deliberately \emph{not} claimed: the viewer claims no parity and
-no speedup, and smooth\_boundary / expand\_labels / cell\_areas are ported and
-pinned but uncalled. Saying so costs nothing and is what makes the rest
-credible.}
+The port follows QuPath's \texttt{WatershedCellDetection}: colour deconvolution
+into stain channels \cite{ruifrok2001quantification}; background estimation by
+morphological opening by reconstruction \cite{vincent1993morphological},
+subtracted from the channel; a Laplacian of Gaussian; regional maxima
+extraction; connected-component labelling; a watershed flood
+\cite{vincent1991watersheds}; region tracing; a mean-intensity filter; a merge
+of candidates sharing a positive-LoG region; a shape-based split on the
+Euclidean distance map; boundary refinement; and an area filter.
+
+One stage was initially absent from our reading of the source. Between the
+shape split and the area filter, QuPath runs \texttt{refineBoundary} --- a
+second Gaussian and a second Laplacian at $\sigma = 1$ on the raw deconvolved
+channel, guarded by a hard-coded \texttt{true}. A list of stages compiled from
+reading is not a reading of the source, which is a small instance of the same
+lesson the fixtures teach.
+
+\subsection{Slide reading}
+
+Aperio SVS and tiled TIFF are read by a pure-Rust decoder checked against
+OpenSlide \cite{goode2013openslide}. JPEG 2000 compressed slides are not
+supported and are refused by name rather than mis-decoded.
+
+\subsection{What is not claimed}
+
+Measurements are not ported. The interactive viewer claims neither parity nor
+speedup. Three stages --- \texttt{smooth\_boundary}, \texttt{expand\_labels}
+and \texttt{cell\_areas} --- are implemented and pinned against QuPath in
+isolation but are not yet called by the pipeline. And, as
+Section~\ref{sec:gap} sets out, end-to-end object counts do not match. Stating
+these plainly costs nothing and is what makes the remaining claims credible.
 
 \section{Results: what the method found}
 \label{sec:results}
 
-\subsection{Three bugs behind plausible images}
-\todo{The strongest argument for the method, because visual inspection passed
-all three: (i) a morphological opening in place of a top hat --- wrong
-operation, wrong radius (2px vs 16), wrong direction; (ii) the DAB stain vector
-used under the name EOSIN, a 52\% error on the leading coefficient; (iii)
-Aperio JPEG tiles carrying no Adobe APP14 marker, so a conforming decoder
-picks the wrong colour transform.}
+\subsection{Three defects behind plausible images}
+\label{sec:bugs}
+
+The strongest evidence for the method is that all three of the following passed
+visual inspection. Each produced segmentation overlays and intermediate images
+that a reader would accept as correct.
+
+\paragraph{A morphological opening in place of a top hat.} QuPath estimates
+background by opening by reconstruction and \emph{subtracts} the result. The
+port instead replaced the image with its opening, which retains the background
+and discards the nuclei --- the opposite operation. Wrong operation, wrong
+radius (2\,px against 16), and wrong direction. The resulting images still
+showed nucleus-like structures in plausible positions.
+
+\paragraph{A stain vector used under the wrong name.} The port used the
+\textbf{DAB} stain vector under the name \texttt{EOSIN}, presenting H-DAB
+deconvolution as H\&E. This is a 52\% error on the leading coefficient. The
+deconvolved channels remained visually reasonable, because both vectors
+separate a nuclear counterstain from a second chromogen.
+
+\paragraph{A JPEG colour-transform error.} Aperio's JPEG tiles carry no Adobe
+APP14 marker. A decoder following the JFIF convention therefore treats stored
+RGB data as though it were YCbCr. The slide still renders as plausible H\&E
+tissue, with colours a reader has no baseline to reject.
+
+No test comparing against anything other than QuPath's own recorded output
+could have found any of the three.
 
 \subsection{Performance}
-\todo{Reuse docs/benchmarks/compare-threads.svg. Carry its caveat: the
-4000x4000 region is four tiles and saturates at four threads; the 9000x9000
-region is twenty-five tiles and keeps improving to twenty. A stage share
-quoted without its tile and thread count is not a number anyone can use.}
+\label{sec:perf}
+
+On the 4000$\times$4000 region at (27776, 5952) of \texttt{CMU-1.svs}, with
+default parameters, the port runs $4.7\times$ faster single-threaded and
+$15.6\times$ faster on twenty threads than QuPath's 15.87\,s.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.75\textwidth]{figures/compare-endtoend.pdf}
+  \caption{End-to-end cell detection against QuPath, same slide, same region,
+           same default parameters. The single-threaded bar is the one to read
+           when the question is whether the port is faster: QuPath's reference
+           time was measured single-threaded, and QuPath parallelises across
+           tiles in ordinary use. Both figures are an \emph{upper bound},
+           because QuPath's time includes computing measurements, which this
+           port does not yet implement. Some of the gap is therefore work not
+           yet done rather than work done faster.}
+  \label{fig:endtoend}
+\end{figure}
+
+Two features of the profile are worth reporting because they bear on method
+rather than on speed. First, the two implementations' profiles have different
+shapes: QuPath's single largest cost is a \texttt{PriorityQueue} of boxed pixel
+objects compared through an interface call, at 29.4\% of self time, whereas the
+corresponding flood here is 12.1\% and uses a flat bucket array. The port's own
+largest stage, the background reconstruction, accounts for only 5.1\% of
+QuPath's profile. Neither profile predicts the other, so optimisation targets
+must be chosen from a measurement of the port itself.
+
+Second, scaling is governed by tile count rather than core count.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.75\textwidth]{figures/compare-threads.pdf}
+  \caption{Wall clock against thread count. The 4000$\times$4000 region is four
+           tiles and saturates at four threads; everything beyond six is idle.
+           The 9000$\times$9000 region is twenty-five tiles and continues to
+           improve to twenty threads. A stage share quoted without its tile
+           count and thread count is not a number anyone can use.}
+  \label{fig:threads}
+\end{figure}
+
+At the component level, the rank filter runs $3.1$--$9.7\times$ faster than
+ImageJ's \texttt{RankFilters}, settling near $3.4\times$ at the radii detection
+actually uses. The shape of that curve matters more than its peak: a naive
+per-pixel kernel scan was $7.6$--$35.6\times$ \emph{slower} than ImageJ before a
+rectangle decomposition replaced it. The algorithm was the variable, not the
+language.
 
 \subsection{Object-level agreement}
-\todo{The Dice table over three single-tile regions. The point that pooled Dice
-involves no matching decision, so it is read first; and that both sides are the
-pixels each pipeline labelled, not a rasterisation of our polygon, which would
-have measured our rasteriser instead.}
+\label{sec:dice}
+
+Counts alone cannot distinguish a segmentation that finds the right objects
+from one that finds the same number of wrong ones, so we compare nucleus masks
+directly. Both sides are the pixels each pipeline actually labelled; ours are
+taken from the label map rather than rasterised from our output polygons, which
+would have measured our rasteriser instead of our segmentation. We report
+pooled Dice \cite{dice1945measures} first, since it involves no matching
+decision and so cannot be influenced by the matcher.
 
 \begin{table}[t]
   \centering
   \caption{Nucleus-level agreement over three single-tile regions of CMU-1.
-           \todo{copy from DIVERGENCES.md D-009; add the caption's reading}}
+           Pooled Dice is computed over all labelled pixels and requires no
+           object correspondence. The matched column counts QuPath nuclei
+           finding a one-to-one partner at Dice $\geq 0.5$; the last column
+           gives objects with no partner on either side. Agreement on matched
+           pairs degrades only slightly with density, while the count of
+           unmatched objects on our side rises by a factor of five --- the gap
+           is a population of extra objects, not displaced boundaries.}
   \label{tab:dice}
+  \small
   \begin{tabular}{lrrrr}
     \toprule
-    region & ratio & pooled Dice & matched at Dice $\geq 0.5$ & unmatched \\
+    region & ratio & pooled Dice & matched at $\geq 0.5$ & unmatched (ours / theirs) \\
     \midrule
-    \todo{fill from D-009} & & & & \\
+    dense, 1597 c/Mpx  & 1.0121          & 0.9351          & 6{,}296 of 6{,}389 & 167 / 90 \\
+    dense, 1741 c/Mpx  & 1.0177          & 0.9340          & 6{,}871 of 6{,}965 & 217 / 94 \\
+    sparse, 931 c/Mpx  & \textbf{1.1130} & \textbf{0.8801} & 3{,}557 of 3{,}725 & \textbf{557} / 136 \\
     \bottomrule
   \end{tabular}
 \end{table}
+
+Table~\ref{tab:dice} separates two things a count ratio conflates. Pooled 97.9\%
+of QuPath's 17{,}079 nuclei find a one-to-one partner at Dice $\geq 0.5$, with
+mean Dice 0.921 over matched pairs. Mean Dice over matched pairs moves little
+across the density range (0.929, 0.928, 0.894), whereas objects with no partner
+at all run 2.6\%, 3.1\% and 13.4\% of our objects against 1.4\%, 1.4\% and 3.7\%
+of QuPath's --- a fivefold rise on our side against under threefold on theirs,
+from a much lower base.
+
+This is diagnostic. A stage that traced or split boundaries differently would
+degrade Dice on the matched pairs, and it does not. A background estimate that
+differed would shift every candidate's mean intensity at once, changing
+\emph{which} faint candidates survive the mean-intensity filter, and would
+therefore appear as unmatched extra objects on top of boundaries that otherwise
+agree. That is what is observed.
 
 \section{The open gap}
 \label{sec:gap}
 
-\todo{State it plainly and early: 1.065x pooled over ten regions of CMU-1,
-156{,}979 objects against 147{,}351 cells, 1.012--1.129 by region, always
-over-counting. This is the paper's honest centre, not a limitation buried at
-the end.}
+\subsection{The measurement}
 
-\todo{What it is not. Seven stages ruled out against QuPath on real tissue,
-pixel for pixel: the merge, the shape split, the colour deconvolution, the
-JPEG decode beneath it, the labelling, the flood, and the background estimate
---- the last at the 2048x2048 the pipeline actually runs it at, after the
-160x160 fixture was shown to be too small to see the effect.}
+Over ten regions of CMU-1 the port finds 156{,}979 objects against QuPath's
+147{,}351 cells --- a ratio of $1.065\times$, ranging from 1.012 to 1.129 by
+region, and always in the same direction. The port over-counts. The variation
+is not noise: it tracks tissue density, with the largest ratios on the sparsest
+regions.
 
-\todo{The refuted hypothesis, kept because it is a result: the merge/split pair
-was the named suspect, and MergeAndSplitTile.java exonerated it --- the merged
-mask, MaximumFinder's segmentation and the mask toWatershed leaves are
-identical pixel for pixel on all eight crops, in both density regimes. The
-stages where a gap is \emph{visible} are not the stages where it is
-\emph{made}.}
+We report this as the paper's honest centre rather than as a limitation at the
+end. A $6.5\%$ density-dependent over-count is not a rounding difference, and
+the port should not be described as reproducing QuPath's output while it
+stands.
 
-\todo{The stage ladder, which is the strongest single table: it splits the gap
-in two. A flat, density-\emph{independent} $\sim$4.7\% excess already present
-in the regional maxima, and a separate density-\emph{dependent} jump appearing
-at the mean-intensity filter (sparse 1.149 against dense 1.049 and 1.040).
-Conflating these was what the too-small crops forced.}
+\subsection{What has been excluded}
+
+Seven of the ten stages have been compared against QuPath on real tissue, pixel
+for pixel, and match: the merge, the shape split, the colour deconvolution, the
+JPEG decode beneath it, the labelling, the watershed flood, and the background
+estimate. The last of these was checked at the 2048$\times$2048 size the
+pipeline actually runs it at, after the original 160$\times$160 fixture was
+shown to be too small to exhibit the effect --- of which more below.
+
+\subsection{A refuted hypothesis, reported as a result}
+
+Stage-by-stage counts over three single-tile regions showed the merge and the
+shape split behaving differently on the region that disagrees: the merge keeps
+0.557 and 0.560 of its input on the two dense regions but 0.439 on the sparse
+one, and the shape split then recovers $1.57\times$, $1.57\times$ and
+$2.16\times$ respectively. This pair was accordingly named as the likely cause,
+with a plausible mechanism: on clumped tissue more candidates fall within one
+positive-LoG region, so the merge bridges more of them and the split cuts more,
+amplifying any difference in where the split lands.
+
+A fixture was recorded to test this, running QuPath's chain over eight
+319$\times$319 crops of real tissue --- four from the region disagreeing at
+1.1130, four from one agreeing at 1.0177 --- capturing the merge's input, the
+merged mask, the segmentation and the split.
+
+\textbf{The hypothesis is wrong.} Given the same input mask, the merged mask,
+\texttt{MaximumFinder}'s segmentation and the mask left by \texttt{toWatershed}
+are identical pixel for pixel on all eight crops, in both density regimes, with
+matching object counts on each. The crops do reproduce the regional signature
+--- pooled, the merge keeps 0.425 of its input on sparse crops against 0.591 on
+dense, and the split recovers $1.65\times$ against $1.24\times$ --- so the two
+stages genuinely do more work on clumped tissue. They do QuPath's work while
+doing it.
+
+The merge and the split are therefore where the gap becomes \emph{visible}, not
+where it is \emph{made}. Their ratios move because their input moves. We report
+this because the refutation is itself a result: it is the clearest illustration
+of why stage-boundary comparison is necessary, since every end-to-end statistic
+pointed at these two stages.
+
+\subsection{The stage ladder}
+
+Walking upstream and comparing object counts at four boundaries splits the gap
+into two independent effects.
 
 \begin{table}[t]
   \centering
   \caption{Object counts at four stage boundaries, QuPath $\rightarrow$ this
-           port. \todo{copy from D-009}}
+           port, over three regions recorded whole at 2048$\times$2048. The
+           ``candidates'' rung is the count after the labelling and the
+           watershed flood; it is identical to the maxima rung on all three
+           regions, which rules both stages out. The first rung's excess is flat across density; the
+           density-dependent effect appears only at the mean-intensity filter.}
   \label{tab:ladder}
-  \begin{tabular}{lrrr}
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{lrrrrrrrrr}
     \toprule
-    rung & sparse & dense-2 & dense \\
+    & \multicolumn{3}{c}{sparse} & \multicolumn{3}{c}{dense-2}
+    & \multicolumn{3}{c}{dense} \\
+    \cmidrule(lr){2-4}\cmidrule(lr){5-7}\cmidrule(lr){8-10}
+    rung & QuPath & ours & ratio & QuPath & ours & ratio
+         & QuPath & ours & ratio \\
     \midrule
-    \todo{fill from D-009} & & & \\
+    regional maxima     & 16376 & 17101 & \textbf{1.044}
+                        & 18472 & 19337 & \textbf{1.047}
+                        & 17899 & 18819 & \textbf{1.051} \\
+    candidates          & 16375 & 17101 & \textbf{1.044}
+                        & 18472 & 19337 & \textbf{1.047}
+                        & 17899 & 18819 & \textbf{1.051} \\
+    mean-intensity filter & 7455 & 8568 & \textbf{1.149}
+                        & 11530 & 12095 & \textbf{1.049}
+                        & 10555 & 10974 & \textbf{1.040} \\
+    after the merge     & 3303 & 3761 & \textbf{1.139}
+                        & 6493 & 6771 & \textbf{1.043}
+                        & 5949 & 6116 & \textbf{1.028} \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-\todo{The clumping measurement, read off the image rather than inferred:
-maxima per thresholded-LoG blob is 1.84 on the sparse region against 1.46 and
-1.42 on the dense ones.}
+Three conclusions follow from Table~\ref{tab:ladder}.
 
-\todo{Frame the section's conclusion as a localisation result: three stages
-remain --- the blur, the Laplacian and the regional maxima --- each with a
-synthetic fixture and none with one on tissue at the size it runs at. That
-pattern (agreement on constructed input, untested on real input at production
-size) is the one this project has repeatedly found worth distrusting.}
+\textbf{The flood adds nothing.} The maxima and candidate rungs are identical on
+all three regions (16376/16375, 18472/18472, 17899/17899), so whatever produces
+the first rung's excess is already fully present in the regional maxima. The
+labelling and the flood are excluded.
+
+\textbf{There are two effects, and only one is density-dependent.} The first
+rung is flat across density --- 1.044, 1.047, 1.051 --- so the $\sim$4.7\%
+excess in the maxima cannot be what the density-dependent gap tracks. The
+density split appears at the mean-intensity filter, where sparse jumps to 1.149
+while the two dense regions remain at 1.049 and 1.040. QuPath keeps 0.455 of its
+candidates on sparse against this port's 0.501, while on dense the two agree to
+within a thousandth (0.624 against 0.626).
+
+\textbf{The filter is not the cause; what it measures is.} The mean-intensity
+filter is itself pinned against QuPath on 17 recorded images. Since the filter
+thresholds the background-subtracted image, a difference in that image moves
+every candidate's mean at once and changes which faint candidates survive ---
+producing unmatched extra objects rather than displaced ones, exactly the
+signature Table~\ref{tab:dice} shows.
+
+An earlier version of this ladder was run on sixteen 320$\times$320 windows and
+could not reproduce the density regime at all, returning 1.058 sparse against
+1.079 dense where whole regions differ by eleven points. It was re-recorded over
+the three regions whole, at the 2048$\times$2048 size \texttt{tile\_preferred}
+derives. That the merge now keeps 0.443 of its input on sparse against 0.563 on
+dense --- against 0.439 and 0.557/0.560 end to end --- is what establishes that
+these rungs measure the same phenomenon the end-to-end numbers do. The earlier
+ones did not.
+
+\subsection{Clumping, measured rather than inferred}
+
+The recorder also counts the thresholded LoG's connected components, inside
+which maxima are found. Maxima per LoG blob is 1.84 on the sparse region against
+1.46 and 1.42 on the dense ones. The clumping this section appeals to is thus
+read off the image itself rather than deduced from how hard the merge and split
+had to work.
+
+\subsection{A fixture that was too small}
+
+The background estimate was the natural next suspect, and a fixture comparing it
+pixel-for-pixel already passed. That fixture was nonetheless worth distrusting,
+for a specific reason: its crops were 160$\times$160, and the 320\,px ladder
+crops had just been shown unable to see the effect at all.
+\texttt{morphologicalReconstruction} is not a local operation like the erosion
+beside it --- it is a queue-driven propagation across the whole image, and it
+switches strategy on \texttt{nChanges / nPixels > 0.1}, a condition on the
+\emph{fraction} of pixels still changing and therefore a function of field size.
+That is precisely the shape of operation that can agree at one size and diverge
+at another.
+
+Re-recorded at production size, it agrees there too: the three regions at
+2048$\times$2048 match QuPath bit for bit on all 12.5 million pixels, three
+crops of 4{,}177{,}936 each, verified by the single-float mutation described in
+Section~\ref{sec:method}.
+
+\subsection{A withdrawn measurement}
+
+One further rung was printed and withdrawn, and the error is worth recording
+because it is the same one this paper warns about. Pairing the port's nucleus
+count with the fixture's object count yields $1.77$--$1.89\times$, which reads
+as a dramatic divergence. It is not: nuclei are counted after boundary
+refinement, whereas the recorder stops at the split. Two different quantities
+were compared and the result looked like a finding.
+
+\subsection{Where this leaves the search}
+
+Three stages remain: the blur, the Laplacian, and the regional maxima. Each has
+a synthetic fixture and passes it; none has a fixture on real tissue at the size
+the pipeline runs it at. That pattern --- agreement on constructed input,
+untested on real input at production size --- is the one this project has
+repeatedly found worth distrusting, and it is what the background estimate
+turned out to require before it could be excluded.
+
+We therefore state the outcome as a localisation: a discrepancy invisible to
+visual comparison and unattributable by end-to-end counts has been confined to
+three named stages of ten, and separated into a density-independent component
+present in the maxima and a density-dependent component appearing at the
+mean-intensity filter.
 
 \section{Discussion}
 \label{sec:discussion}
 
-\todo{What transfers to other scientific-software ports: stage-boundary
-fixtures, mutation-checked; recording negative results; and the specific
-lesson that a fixture must run at the size the pipeline gives the stage, since
-an operation switching strategy on a global condition can agree at one size
-and diverge at another.}
+\subsection{What transfers}
 
-\todo{Limits, stated without hedging: one slide (CMU-1), one detection
-algorithm, one reference version of QuPath. State CMU-1's provenance and
-licence --- it is from the OpenSlide freely-distributable test set --- since
-every headline number depends on it.}
+Three elements of this method are not specific to QuPath or to cell detection.
 
-\todo{Future work: closing D-009 by pinning the three remaining stages on
-tissue at production size.}
+\textbf{Stage-boundary fixtures recorded from the running reference.} The
+essential property is that both implementations receive byte-identical input at
+a defined boundary. Any pipeline decomposable into stages with serialisable
+intermediate state admits this, and the alternative --- reimplementing from a
+reading of the source and comparing final output --- produced two of the three
+defects reported here.
+
+\textbf{Mutation-checking the fixtures.} A verification suite is itself
+software, and an unexercised assertion is a defect in it. The cost is small
+relative to recording the fixture in the first place, and without it a passing
+suite is not evidence.
+
+\textbf{Fixtures must run at the size the pipeline gives the stage.} This is the
+sharpest specific lesson. An operation that switches strategy on a global
+condition --- a fraction of changed pixels, a queue-length heuristic, a tile
+boundary --- can agree on a small crop and diverge at production size. Both the
+320\,px ladder crops and the 160\,px background fixture were too small to see
+the effect they were meant to test, and each passed while doing so. A fixture's
+input size is part of what it tests.
+
+We would add a fourth, less technical point: recording refuted hypotheses is
+worth the space. The merge-and-split refutation consumed considerable effort and
+produced no fix, but it excluded the two stages every aggregate statistic
+pointed at, and it is the clearest demonstration in this work of why
+stage-boundary comparison is necessary.
+
+\subsection{Limitations}
+
+The evaluation uses one slide (CMU-1), one detection algorithm, and one
+reference version of QuPath. CMU-1 is Aperio-scanned H\&E; scanner-specific
+decode paths such as the APP14 defect in Section~\ref{sec:bugs} would not
+necessarily be exercised by another vendor's format, and the density-dependent
+behaviour central to Section~\ref{sec:gap} may present differently on other
+tissue types. Ten regions of one slide is a narrow basis for the $1.065\times$
+figure, though the consistency of its direction across all ten is itself
+informative.
+
+The port is incomplete: measurements are not implemented, three stages are
+pinned but uncalled, and the viewer claims no parity. The performance figures in
+Section~\ref{sec:perf} are consequently upper bounds, since QuPath's measured
+time includes computing measurements this port does not yet produce.
+
+CMU-1 is from the OpenSlide freely-distributable test set, released under
+CC0 1.0 and declared per file in the distribution index. Every headline number
+in this paper depends on it, and it requires no registration to obtain.
+
+\subsection{Future work}
+
+The immediate task is closing the gap: recording the blur, the Laplacian and the
+regional maxima on real tissue at production size, in the manner that was
+required before the background estimate could be excluded. Given the separation
+in Table~\ref{tab:ladder}, the density-independent $\sim$4.7\% excess in the
+maxima and the density-dependent effect at the mean-intensity filter are
+plausibly distinct defects and may be addressable independently.
 
 \section*{Data and code availability}
-\todo{Repository URL, the archived release DOI (Zenodo), the licence
-(GPL-3.0-or-later, matching QuPath as a derivative work), and the slide's
-source. Name the reproduction command for each headline number, as the README
-already does.}
+
+The source, the recorded fixtures and the benchmark data are in the project
+repository, released under GPL-3.0-or-later --- matching QuPath, of which this
+is a derivative work, having been written by reading QuPath's source in order to
+reproduce its behaviour. Divergences from QuPath, including the open gap of
+Section~\ref{sec:gap}, are recorded in \texttt{DIVERGENCES.md}.
+
+Each headline number names the command that reproduces it. The stage ladder of
+Table~\ref{tab:ladder} is \texttt{cargo run -{}-release -p qupath-pipeline
+-{}-example stage\_ladder}; the mask comparison of Table~\ref{tab:dice} is
+\texttt{-{}-example object\_masks}; the ten-region count is
+\texttt{-{}-example cell\_counts} against
+\texttt{parity/record-cell-counts.sh}. Regenerating the QuPath side of any
+fixture requires JDK 25 and a QuPath checkout, as documented in
+\texttt{parity/README.md}.
+
+The slide, \texttt{CMU-1.svs}, is from the OpenSlide freely-distributable test
+data (CC0 1.0).
+
+\todo{Add the archived release DOI (Zenodo) and the repository URL once the
+release is tagged.}
 
 \section*{Acknowledgements}
-\todo{The QuPath authors. Notify them before submitting --- this is a
-derivative work reimplementing their algorithms, and a reviewer may well be
-one of them.}
+
+We thank the authors and maintainers of QuPath \cite{bankhead2017qupath}, whose
+algorithms this work reimplements and against whose implementation every result
+here is measured, and the OpenSlide project \cite{goode2013openslide} for the
+freely-distributable test data on which the evaluation depends.
 
 \bibliographystyle{plain}
 \bibliography{../paper}
