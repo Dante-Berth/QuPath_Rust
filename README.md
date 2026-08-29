@@ -396,13 +396,22 @@ Set `QUPATH_RUST_REQUIRE_DATA=1` to turn every such skip into a failure that
 names the file it wanted:
 
 ```sh
-QUPATH_RUST_REQUIRE_DATA=1 cargo test --workspace --release
+QUPATH_RUST_REQUIRE_DATA=1 cargo test --workspace --release --no-fail-fast
 ```
+
+`--no-fail-fast` is part of the command, not decoration. Cargo otherwise stops
+at the first test *binary* that fails, and here every binary holding a
+slide-dependent test fails at once — so the run names only a prefix of what it
+skipped. On a checkout with no slides that is 7 tests named out of 18.
 
 Use it wherever a green run is being read as evidence — CI, a release check, or
 before quoting a figure the suite is meant to back. Leave it unset for ordinary
 local work, which is what lets the suite run at all without hundreds of
 megabytes of slides.
+
+On a clean checkout with no slides the suite is 594 tests, all passing, of
+which **18 did not run**: 14 want the 1.9 MB `CMU-1-Small-Region.svs` and 4
+want the 177 MB `CMU-1.svs`. Fetching the small one alone leaves 4 skipped.
 
 The parity recorders that open a slide *through QuPath* do use OpenSlide, and it
 needs no system package either: `qupath-extension-openslide` depends on a jar

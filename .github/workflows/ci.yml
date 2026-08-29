@@ -127,11 +127,18 @@ jobs:
       # here — so its exit status is discarded and only what it names is kept.
       # Without this the job is green in a checkout that skipped tests, which is
       # exactly what green is not supposed to mean.
+      #
+      # `--no-fail-fast` is load-bearing, and its absence was a real bug here.
+      # Cargo stops at the first test *binary* that fails, and under
+      # QUPATH_RUST_REQUIRE_DATA every binary holding a slide-dependent test
+      # fails — so the log named only a prefix and the summary under-reported
+      # the very thing it exists to report. On a slideless checkout that is 7
+      # tests named out of 18.
       - name: Say which tests no input was available for
         if: always()
         run: |
           QUPATH_RUST_REQUIRE_DATA=1 cargo test --workspace --release --locked \
-            > required.log 2>&1 || true
+            --no-fail-fast > required.log 2>&1 || true
           {
             echo "### Coverage of this run"
             echo

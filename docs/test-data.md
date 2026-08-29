@@ -56,7 +56,7 @@ Tests that need a slide skip where it is absent, and a skipped test reports `ok`
 like a passing one. So a run in a checkout with no slides is green and means
 much less than it looks.
 
-    QUPATH_RUST_REQUIRE_DATA=1 cargo test --workspace --release
+    QUPATH_RUST_REQUIRE_DATA=1 cargo test --workspace --release --no-fail-fast
 
 turns every such skip into a failure naming the file it wanted. Run it once
 after fetching, to confirm the slides landed where the tests look for them —

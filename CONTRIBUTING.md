@@ -40,7 +40,7 @@ exercised materially less.
 Before you quote a number, or read green as evidence:
 
 ```sh
-QUPATH_RUST_REQUIRE_DATA=1 cargo test --workspace --release
+QUPATH_RUST_REQUIRE_DATA=1 cargo test --workspace --release --no-fail-fast
 ```
 
 That turns every such skip into a failure naming the file it wanted. Leave it
