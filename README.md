@@ -30,6 +30,14 @@ total imply they passed. See [Building](#building).
 GPLv3, matching QuPath. This code is written by reading QuPath's source in order
 to reproduce its behaviour, which makes it a derivative work.
 
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md) has the gate CI runs and the rule that
+matters here: a new parity claim needs a recorded fixture **and** a mutation
+check showing the fixture can fail. Checking against a reading of QuPath's
+source is not a test — three bugs that passed visual inspection are the reason
+that is written down.
+
 ## Design principles
 
 - **Objects are columnar.** Detections and their measurements are a struct of
