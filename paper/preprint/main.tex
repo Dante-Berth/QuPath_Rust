@@ -1,0 +1,237 @@
+% =============================================================================
+%  QuPath_Rust preprint -- arXiv (eess.IV, cross-list cs.CV)
+%
+%  Build:  latexmk -pdf main.tex
+%     or:  pdflatex main && bibtex main && pdflatex main && pdflatex main
+%
+%  STATUS: skeleton. Every section is an outline with the evidence it must
+%  carry named in a \todo{}. Nothing here is written prose yet.
+%
+%  The argument and most of the numbers already exist in the repository, in
+%  DIVERGENCES.md (D-009) and docs/MEMO.md section 2. Drafting this is largely
+%  restructuring those, not new analysis. Copy numbers from there rather than
+%  re-deriving them, and cite the reproduction command for each.
+% =============================================================================
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage[margin=1in]{geometry}
+\usepackage[hidelinks]{hyperref}
+
+% Draft notes. Set \draftnotesfalse for a clean read-through.
+\newif\ifdraftnotes
+\draftnotestrue
+\ifdraftnotes
+  \newcommand{\todo}[1]{{\color{red}\small[\textbf{TODO:} #1]}}
+\else
+  \newcommand{\todo}[1]{}
+\fi
+
+\title{Verifying a port of a digital-pathology pipeline,\\
+       stage by stage}
+
+% TODO: real name, affiliation and ORCID. The repository currently carries
+% only the handle "Dante-Berth", which is not submittable.
+\author{\todo{author, affiliation, ORCID}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\todo{Write last. The frame: a port of QuPath's watershed cell detection to
+Rust, and --- the actual contribution --- a stage-boundary fixture method for
+verifying such a port against the reference implementation. Say plainly in the
+abstract that a density-dependent count difference of 1.065x remains open and
+is localised to three of ten stages. Claiming parity here would be refuted by
+the repository's own DIVERGENCES.md, which a reviewer will read.}
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+\todo{QuPath's role in digital pathology \cite{bankhead2017qupath}, and the
+bulk-analysis bottleneck: a per-object string-keyed measurement map is the
+wrong layout for batch work over many slides.}
+
+\todo{The real problem: a port must \emph{prove} it computes the same thing
+before anyone can use its output in research. State the thesis here --- that
+agreeing final object counts are the weakest available evidence, because two
+runs can agree on how many objects they found and disagree about where every
+one of them is.}
+
+\todo{Contributions, as a list: (i) the stage-boundary fixture method;
+(ii) mutation testing applied to the fixtures themselves; (iii) three bugs
+found that produced entirely plausible images; (iv) a localisation result for
+the remaining discrepancy.}
+
+\section{The verification method}
+\label{sec:method}
+
+\todo{The core idea, and the one figure worth drawing from scratch: record the
+reference implementation's intermediate state at each stage boundary, feed the
+port the \emph{same} input at that boundary, and compare pixel for pixel. This
+isolates each stage --- a stage that faithfully processes a different input
+produces different output, so end-to-end comparison cannot tell you which
+stage is wrong.}
+
+\todo{Recording: parity/java/*.java run inside a live QuPath build. Say which
+recorders need a slide (parity/README.md documents this).}
+
+\todo{Mutation testing \cite{jia2021mutation} as the check on the checks --- the
+part most ports skip. A parity test that cannot fail proves nothing, so every
+one here was shown to fail under a deliberate perturbation before being
+trusted. Give the concrete examples: dropping the hole fill (246 pixels),
+narrowing the dilation to five neighbours (97 pixels), moving the maximum
+finder's tolerance from 0.5 to 0.6 (55 pixels).}
+
+\todo{Tolerances, and why they are stated per fixture rather than globally.}
+
+\section{The port}
+\label{sec:port}
+
+\todo{The columnar object layout: a struct of arrays, one contiguous column
+per feature, one row per object. Be precise, as the README already is, that
+this --- not the choice of language --- is the main source of the speedup. Do
+not let the paper lose that distinction.}
+
+\todo{The detection chain, following QuPath's WatershedCellDetection: colour
+deconvolution \cite{ruifrok2001quantification}, background estimation by
+morphological reconstruction \cite{vincent1993morphological}, Laplacian of
+Gaussian, regional maxima, labelling, watershed flood
+\cite{vincent1991watersheds}, region tracing, the mean-intensity filter, the
+merge, the shape split, refineBoundary, the area filter.}
+
+\todo{Slide reading: a pure-Rust Aperio SVS/tiled-TIFF reader, checked against
+OpenSlide \cite{goode2013openslide}.}
+
+\todo{What is deliberately \emph{not} claimed: the viewer claims no parity and
+no speedup, and smooth\_boundary / expand\_labels / cell\_areas are ported and
+pinned but uncalled. Saying so costs nothing and is what makes the rest
+credible.}
+
+\section{Results: what the method found}
+\label{sec:results}
+
+\subsection{Three bugs behind plausible images}
+\todo{The strongest argument for the method, because visual inspection passed
+all three: (i) a morphological opening in place of a top hat --- wrong
+operation, wrong radius (2px vs 16), wrong direction; (ii) the DAB stain vector
+used under the name EOSIN, a 52\% error on the leading coefficient; (iii)
+Aperio JPEG tiles carrying no Adobe APP14 marker, so a conforming decoder
+picks the wrong colour transform.}
+
+\subsection{Performance}
+\todo{Reuse docs/benchmarks/compare-threads.svg. Carry its caveat: the
+4000x4000 region is four tiles and saturates at four threads; the 9000x9000
+region is twenty-five tiles and keeps improving to twenty. A stage share
+quoted without its tile and thread count is not a number anyone can use.}
+
+\subsection{Object-level agreement}
+\todo{The Dice table over three single-tile regions. The point that pooled Dice
+involves no matching decision, so it is read first; and that both sides are the
+pixels each pipeline labelled, not a rasterisation of our polygon, which would
+have measured our rasteriser instead.}
+
+\begin{table}[t]
+  \centering
+  \caption{Nucleus-level agreement over three single-tile regions of CMU-1.
+           \todo{copy from DIVERGENCES.md D-009; add the caption's reading}}
+  \label{tab:dice}
+  \begin{tabular}{lrrrr}
+    \toprule
+    region & ratio & pooled Dice & matched at Dice $\geq 0.5$ & unmatched \\
+    \midrule
+    \todo{fill from D-009} & & & & \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{The open gap}
+\label{sec:gap}
+
+\todo{State it plainly and early: 1.065x pooled over ten regions of CMU-1,
+156{,}979 objects against 147{,}351 cells, 1.012--1.129 by region, always
+over-counting. This is the paper's honest centre, not a limitation buried at
+the end.}
+
+\todo{What it is not. Seven stages ruled out against QuPath on real tissue,
+pixel for pixel: the merge, the shape split, the colour deconvolution, the
+JPEG decode beneath it, the labelling, the flood, and the background estimate
+--- the last at the 2048x2048 the pipeline actually runs it at, after the
+160x160 fixture was shown to be too small to see the effect.}
+
+\todo{The refuted hypothesis, kept because it is a result: the merge/split pair
+was the named suspect, and MergeAndSplitTile.java exonerated it --- the merged
+mask, MaximumFinder's segmentation and the mask toWatershed leaves are
+identical pixel for pixel on all eight crops, in both density regimes. The
+stages where a gap is \emph{visible} are not the stages where it is
+\emph{made}.}
+
+\todo{The stage ladder, which is the strongest single table: it splits the gap
+in two. A flat, density-\emph{independent} $\sim$4.7\% excess already present
+in the regional maxima, and a separate density-\emph{dependent} jump appearing
+at the mean-intensity filter (sparse 1.149 against dense 1.049 and 1.040).
+Conflating these was what the too-small crops forced.}
+
+\begin{table}[t]
+  \centering
+  \caption{Object counts at four stage boundaries, QuPath $\rightarrow$ this
+           port. \todo{copy from D-009}}
+  \label{tab:ladder}
+  \begin{tabular}{lrrr}
+    \toprule
+    rung & sparse & dense-2 & dense \\
+    \midrule
+    \todo{fill from D-009} & & & \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\todo{The clumping measurement, read off the image rather than inferred:
+maxima per thresholded-LoG blob is 1.84 on the sparse region against 1.46 and
+1.42 on the dense ones.}
+
+\todo{Frame the section's conclusion as a localisation result: three stages
+remain --- the blur, the Laplacian and the regional maxima --- each with a
+synthetic fixture and none with one on tissue at the size it runs at. That
+pattern (agreement on constructed input, untested on real input at production
+size) is the one this project has repeatedly found worth distrusting.}
+
+\section{Discussion}
+\label{sec:discussion}
+
+\todo{What transfers to other scientific-software ports: stage-boundary
+fixtures, mutation-checked; recording negative results; and the specific
+lesson that a fixture must run at the size the pipeline gives the stage, since
+an operation switching strategy on a global condition can agree at one size
+and diverge at another.}
+
+\todo{Limits, stated without hedging: one slide (CMU-1), one detection
+algorithm, one reference version of QuPath. State CMU-1's provenance and
+licence --- it is from the OpenSlide freely-distributable test set --- since
+every headline number depends on it.}
+
+\todo{Future work: closing D-009 by pinning the three remaining stages on
+tissue at production size.}
+
+\section*{Data and code availability}
+\todo{Repository URL, the archived release DOI (Zenodo), the licence
+(GPL-3.0-or-later, matching QuPath as a derivative work), and the slide's
+source. Name the reproduction command for each headline number, as the README
+already does.}
+
+\section*{Acknowledgements}
+\todo{The QuPath authors. Notify them before submitting --- this is a
+derivative work reimplementing their algorithms, and a reviewer may well be
+one of them.}
+
+\bibliographystyle{plain}
+\bibliography{../paper}
+
+\end{document}

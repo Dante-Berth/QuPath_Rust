@@ -1,0 +1,8 @@
+# LaTeX build products. The .tex and .bib are the source; the PDF is rebuilt
+# by `make` and does not belong in the history.
+preprint/main.pdf
+preprint/*.aux
+preprint/*.bbl
+preprint/*.blg
+preprint/*.log
+preprint/*.out
