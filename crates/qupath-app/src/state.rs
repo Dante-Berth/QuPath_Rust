@@ -2852,6 +2852,45 @@ mod tests {
             .collect()
     }
 
+    /// A project too deeply nested to parse is a message, not a dead process.
+    ///
+    /// `json::parse` grew a depth limit because its recursion had none, and a
+    /// ~40 KB file aborted the process with `SIGABRT`. That is fixed in the
+    /// parser, but the parser returning `Err` is only half of it: what a person
+    /// does is *open a file*, and this asserts the other half — the error
+    /// reaches [`App::message`], and the project that was already open is still
+    /// open, which is the same rule a slide that will not load follows.
+    #[test]
+    fn a_project_too_deeply_nested_is_refused_without_losing_the_one_open() {
+        let scratch = Scratch::new("deep-project");
+        let good = scratch.project();
+        let mut app = opened(good.clone());
+        let before = app.project.as_ref().expect("a project").stored.images[0].id;
+
+        let deep = scratch.0.join("deep.qpproj");
+        let n = 40_000;
+        std::fs::write(&deep, format!("{}{}", "[".repeat(n), "]".repeat(n))).expect("a file");
+
+        app.open_project(deep);
+
+        assert!(
+            app.message.contains("nested deeper than"),
+            "the message should say what was wrong with the file, got {:?}",
+            app.message
+        );
+        let after = app
+            .project
+            .as_ref()
+            .expect("the project stayed open")
+            .stored
+            .images[0]
+            .id;
+        assert_eq!(
+            before, after,
+            "the project already open should be untouched"
+        );
+    }
+
     /// The gesture, end to end: type a key, save, and find it in the file.
     ///
     /// Through `set_metadata` rather than through `project::edited`, because
