@@ -243,25 +243,71 @@ fn literal(bytes: &[u8], at: &mut usize, word: &str, value: Value) -> Result<Val
 
 /// A number, kept as the text it was written as — see this module's header.
 ///
-/// The span is taken by the characters a JSON number may contain rather than by
-/// validating the grammar, and then checked by parsing it as an `f64`. That
-/// rejects `1.2.3` and `--1` for the same reason a grammar would, in one line
-/// that cannot disagree with the one that reads the value back.
+/// This walks JSON's number grammar rather than taking a span of number-ish
+/// characters and handing it to `f64::from_str`. The difference is not
+/// pedantry. `from_str` is a *Rust* float parser, and it accepts a great deal
+/// that JSON forbids: `00`, `01`, `+1`, `.5`, `-.25` and `1.` all parse as
+/// floats. It does reject `1.2.3` and `--1`, which is what made the shorter
+/// version look sufficient — but "rejects the two cases I tried" is not
+/// "implements the grammar", and the two were the ones written down.
+///
+/// Accepting the rest is a silent wrong answer rather than a lenient one,
+/// because [`Value::Number`] keeps the *text* and [`Value::as_u64`] parses it
+/// back later. `{"lastID": 0123}` would be read as the entry counter 123 —
+/// `u64::from_str` takes the leading zero too — so nothing downstream ever
+/// sees that the document was not JSON. This module's contract is that what
+/// QuPath can write, this can read; Gson writes none of these, so a document
+/// carrying one is not the format this claims to read.
+///
+/// The `f64` check stays, for the one thing the grammar cannot say: that the
+/// value is finite. `1e400` is a well-formed JSON number and an infinity, and
+/// a field that reads back as `inf` is not a count either.
 fn number(bytes: &[u8], at: &mut usize) -> Result<Value, String> {
     let start = *at;
-    while let Some(byte) = bytes.get(*at) {
-        if matches!(byte, b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9') {
-            *at += 1;
-        } else {
-            break;
-        }
+    // `-`, and only `-`: JSON has no leading `+`.
+    if bytes.get(*at) == Some(&b'-') {
+        *at += 1;
     }
+    // An integer part of a single `0`, or of digits not starting with one.
+    // That is the rule making `00` and `01` invalid.
+    match bytes.get(*at) {
+        Some(b'0') => *at += 1,
+        Some(b'1'..=b'9') => digits(bytes, at),
+        _ => return Err(problem(bytes, start, "a number was expected")),
+    }
+    // A fraction, which must have at least one digit after the point.
+    if bytes.get(*at) == Some(&b'.') {
+        *at += 1;
+        if !bytes.get(*at).is_some_and(u8::is_ascii_digit) {
+            return Err(problem(bytes, *at, "a `.` with no digit after it"));
+        }
+        digits(bytes, at);
+    }
+    // An exponent, whose sign is optional and whose digits are not.
+    if matches!(bytes.get(*at), Some(b'e' | b'E')) {
+        *at += 1;
+        if matches!(bytes.get(*at), Some(b'+' | b'-')) {
+            *at += 1;
+        }
+        if !bytes.get(*at).is_some_and(u8::is_ascii_digit) {
+            return Err(problem(bytes, *at, "an exponent with no digits"));
+        }
+        digits(bytes, at);
+    }
+    // Every byte accepted above is ASCII, so this never cuts a character.
     let text = std::str::from_utf8(&bytes[start..*at])
         .map_err(|_| problem(bytes, start, "a number was expected"))?;
-    if text.is_empty() || text.parse::<f64>().is_err() {
-        return Err(problem(bytes, start, "a value was expected"));
+    if !text.parse::<f64>().is_ok_and(f64::is_finite) {
+        return Err(problem(bytes, start, "a number too large to be finite"));
     }
     Ok(Value::Number(text.to_owned()))
+}
+
+/// Runs past ASCII digits, of which there may be none.
+fn digits(bytes: &[u8], at: &mut usize) {
+    while bytes.get(*at).is_some_and(u8::is_ascii_digit) {
+        *at += 1;
+    }
 }
 
 /// A string, with its escapes resolved.
@@ -723,6 +769,9 @@ mod tests {
         ] {
             assert!(parse(broken).is_err(), "read {broken:?} as valid");
         }
+        // The one that reaches `as_u64`, which is where a leading zero stops
+        // being cosmetic: this read back as the entry counter 123.
+        assert!(parse("{\"lastID\": 0123}").is_err());
     }
 
     /// Two values in a file is not one value, even when the first one parses.
@@ -766,6 +815,9 @@ mod tests {
         ] {
             assert!(parse(broken).is_err(), "read {broken:?} as valid");
         }
+        // The one that reaches `as_u64`, which is where a leading zero stops
+        // being cosmetic: this read back as the entry counter 123.
+        assert!(parse("{\"lastID\": 0123}").is_err());
     }
 
     /// A string that is not one is `None` rather than a coerced value, because
@@ -857,6 +909,76 @@ mod tests {
             "{\n  \"a\": 1.0,\n  \"b\": 1,\n  \"c\": 1.0E30,\n  \"d\": -0.0,\n  \
              \"e\": 9007199254740993\n}"
         );
+    }
+
+    /// The number grammar is JSON's, not `f64::from_str`'s.
+    ///
+    /// Every one of these parses happily as a Rust float, and none is a number
+    /// Gson can write. They were found by running this parser and Python's
+    /// `json` over the same few thousand documents and comparing only the
+    /// accept/reject decision, which is why the list is what it is rather than
+    /// what seemed likely.
+    #[test]
+    fn numbers_rust_accepts_but_json_does_not() {
+        for broken in [
+            "00",     // a leading zero
+            "01",     //
+            "-00.25", //
+            "+1",     // JSON has no leading `+`
+            "1.",     // a point with no digit after it
+            "-0.e5",  //
+            ".5",     // a point with no digit before it
+            "-.25",   //
+            "1e",     // an exponent with no digits
+            "1e+",    //
+            "[1.,5]", // the same, inside a container
+        ] {
+            assert!(parse(broken).is_err(), "read {broken:?} as valid");
+        }
+        // The one that reaches `as_u64`, which is where a leading zero stops
+        // being cosmetic: this read back as the entry counter 123.
+        assert!(parse("{\"lastID\": 0123}").is_err());
+    }
+
+    /// The grammar is not tightened past what JSON allows, either.
+    ///
+    /// `-0` and an exponent with an explicit sign are all legal, and a reader
+    /// that refused them would fail on files Gson does write.
+    #[test]
+    fn the_numbers_json_does_allow_are_still_read() {
+        for good in [
+            "0",
+            "-0",
+            "1",
+            "-1",
+            "1.5",
+            "-1.5",
+            "1e5",
+            "1E5",
+            "1e+5",
+            "1e-5",
+            "1.5e-5",
+            "-0.0",
+            "10000000000",
+            "0.0000000000000000001",
+        ] {
+            let value = parse(good).unwrap_or_else(|why| panic!("refused {good:?}: {why}"));
+            // The literal is kept exactly, which is the point of `Number`.
+            assert_eq!(value, Value::Number(good.to_owned()));
+        }
+    }
+
+    /// A number too large for an `f64` is refused rather than read as `inf`.
+    ///
+    /// The grammar alone cannot say this: `1e400` is well-formed JSON. A count
+    /// that reads back as an infinity is not one, so the `f64` check stays for
+    /// exactly this case.
+    #[test]
+    fn a_number_that_is_not_finite_is_refused() {
+        assert!(parse("1e400").is_err());
+        assert!(parse("-1e400").is_err());
+        // Underflow to zero is not the same thing, and stays readable.
+        assert!(parse("1e-400").is_ok());
     }
 
     /// Whatever this writes, it must read back the same.
