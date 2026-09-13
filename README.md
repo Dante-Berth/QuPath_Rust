@@ -25,6 +25,17 @@ one 1.9 MB slide. It does not cover the tests needing the 177 MB benchmark
 slide — each run's job summary names those explicitly rather than letting the
 total imply they passed. See [Building](#building).
 
+## Documentation
+
+[docs/guide/](docs/guide/) is the user guide: opening a slide, detecting cells,
+what the parameters mean, and getting the result into QuPath. Start there if you
+want to *use* this. [docs/guide/parity.md](docs/guide/parity.md) is the page to
+read before relying on any output.
+
+The rest of `docs/` answers why the code is the way it is —
+[MEMO.md](docs/MEMO.md) for orientation, [ROADMAP.md](docs/ROADMAP.md) for the
+plan, [DIVERGENCES.md](DIVERGENCES.md) for every deliberate difference.
+
 ## Licence
 
 GPLv3, matching QuPath. This code is written by reading QuPath's source in order
