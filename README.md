@@ -32,6 +32,9 @@ what the parameters mean, and getting the result into QuPath. Start there if you
 want to *use* this. [docs/guide/parity.md](docs/guide/parity.md) is the page to
 read before relying on any output.
 
+[presentation/](presentation/) is a 20-slide deck on the port, the parity gap
+and the verification method, regenerable from the scripts beside it.
+
 The rest of `docs/` answers why the code is the way it is —
 [MEMO.md](docs/MEMO.md) for orientation, [ROADMAP.md](docs/ROADMAP.md) for the
 plan, [DIVERGENCES.md](DIVERGENCES.md) for every deliberate difference.
