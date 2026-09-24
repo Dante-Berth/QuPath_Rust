@@ -128,9 +128,9 @@ Checked against the repository on 2026-08-29.
       not a full run. Linked from the README's own §Contributing, since
       GitHub only surfaces it at the pull-request box — after the code is
       written, which is too late for the rule it carries.
-- [x] **`CODE_OF_CONDUCT.md`** — added 2026-08-29, Contributor Covenant 2.1,
-      enforcement contact set. **Reproduced from memory** (the fetch was
-      blocked): diff it against the published 2.1 text before submitting.
+- [x] **No `CODE_OF_CONDUCT.md`**, by the author's decision on 2026-09-25.
+      JOSS's checklist asks for contribution, issue and support guidelines,
+      which `CONTRIBUTING.md` carries; it does not require a code of conduct.
 - [x] **Statement of need** — written. Two halves: the columnar layout for
       batch workloads (stated as the layout's doing, not Rust's), and the
       general one — reimplementations are usually validated by eye or by
@@ -205,7 +205,8 @@ mechanics.
 
 1. ~~Draft `paper.md`.~~ Done; re-cut 2026-08-30 around the port-plus-harness
    framing, 626 words.
-2. ~~Add `CONTRIBUTING.md` and `CODE_OF_CONDUCT.md`.~~ Done 2026-08-29.
+2. ~~Add `CONTRIBUTING.md`.~~ Done 2026-08-29. No code of conduct, by
+   decision.
 3. ~~Draft the preprint.~~ Done; re-cut 2026-08-30 with the method as subject
    and the port as case study. 11 pages, clean build.
 4. **Resolve authorship and affiliation.** The gating item. Nothing downstream
@@ -215,8 +216,8 @@ mechanics.
    the header says so. Two errors have already surfaced by using the file
    rather than checking it (a key dated wrong, an article typed as a
    conference paper), which is reason to expect more.
-6. **Diff `CODE_OF_CONDUCT.md` against the published Contributor Covenant 2.1.**
-   Reproduced from memory; the fetch was blocked.
+6. ~~Diff `CODE_OF_CONDUCT.md` against Contributor Covenant 2.1.~~ Moot: the
+   file was removed.
 7. **Notify the QuPath maintainers.** Before submitting, not after. This
    reimplements their algorithms, a JOSS reviewer may well be one of them, and
    the courtesy costs nothing.

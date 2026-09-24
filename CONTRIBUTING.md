@@ -112,7 +112,3 @@ no hand-picking rule.
 
 GPL-3.0-or-later, as a derivative work of QuPath. Contributions are accepted
 under the same terms.
-
-## Conduct
-
-By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
