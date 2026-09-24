@@ -1,7 +1,7 @@
 //! The overview map's click-to-jump, driven by a pointer rather than by
 //! arithmetic.
 //!
-//! `docs/VIEWER.md` §8.4 states the property this pane has to have — the two
+//! `docs/dev/VIEWER.md` §8.4 states the property this pane has to have — the two
 //! mappings must agree, so clicking the centre of the drawn rectangle does not
 //! move the view — and `overview.rs` has a unit test for it. That test checks
 //! `Overview`'s arithmetic. It cannot see the pane, and the pane is where two

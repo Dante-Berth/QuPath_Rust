@@ -18,7 +18,7 @@ is still marked `\todo{}` in the LaTeX is not writing: the author block and
 the Zenodo DOI. Everything else is prose. Figures are converted from the tracked SVGs in `docs/benchmarks/` by
 the Makefile and gitignored, so there is no second copy of a recording.
 
-The numbers in both were copied from `DIVERGENCES.md` D-009, `docs/MEMO.md`
+The numbers in both were copied from `DIVERGENCES.md` D-009, `docs/dev/MEMO.md`
 §2 and the README rather than re-derived. **If a number in the papers ever
 disagrees with the repository, the repository is right** — the papers are
 downstream, and `main.tex` says so in its header.

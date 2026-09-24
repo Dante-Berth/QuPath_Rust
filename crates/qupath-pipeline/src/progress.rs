@@ -1,7 +1,7 @@
 //! Watching a run, and stopping one.
 //!
 //! [`crate::run_collecting`] over a whole slide is tens of seconds — 33.5 s for
-//! CMU-1 at level 0 — and `docs/VIEWER.md` §8.8 puts a run that long with no way
+//! CMU-1 at level 0 — and `docs/dev/VIEWER.md` §8.8 puts a run that long with no way
 //! to stop it and no sense of how far along it is at the top of what is missing.
 //! This is what a caller passes to get both.
 //!
@@ -26,7 +26,7 @@
 //! glass are far cheaper than tiles over tissue, so the fraction advances in
 //! jumps and a linear extrapolation to a finish time would be a fiction. The
 //! denominator is known before the first tile starts, which is what makes the
-//! fraction real rather than a bar advancing on a timer — `docs/VIEWER.md` §6 is
+//! fraction real rather than a bar advancing on a timer — `docs/dev/VIEWER.md` §6 is
 //! about exactly that distinction.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

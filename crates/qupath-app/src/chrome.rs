@@ -940,7 +940,7 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
     // The side panels go in *before* `available_rect` is read below, which is
     // the whole contract that keeps `cursor_over_slide` honest: a panel added
     // after that line would sit over the slide's rectangle, and every gesture
-    // would treat a click on it as a click on the tissue. `docs/VIEWER.md` §3.7
+    // would treat a click on it as a click on the tissue. `docs/dev/VIEWER.md` §3.7
     // records what that class of bug cost the last time.
     // Each panel is also capped, because a `default_width` is a request made
     // without knowledge of the other panels: 260 + 240 + 280 is 780 of an 800px
@@ -1391,7 +1391,7 @@ fn overview_pane(ui: &mut egui::Ui, app: &App, command: &mut Command) {
     ui.label(egui::RichText::new("Click to jump").weak().small());
 }
 
-/// The brightness/contrast controls: `docs/VIEWER.md` §8.7, which was §8.8's
+/// The brightness/contrast controls: `docs/dev/VIEWER.md` §8.7, which was §8.8's
 /// first missing item until it was done.
 ///
 /// QuPath puts these in a floating dialog. They go in this pane instead, for
@@ -3585,7 +3585,7 @@ mod tests {
 
     /// With every panel open, the slide must still keep its share of the window.
     ///
-    /// This is the rough edge `docs/VIEWER.md` §6 predicted and could not check:
+    /// This is the rough edge `docs/dev/VIEWER.md` §6 predicted and could not check:
     /// three side panels are opened independently, none of them knows about the
     /// others, and on a small window they can add up to more than there is.
     /// Whether they *look* right is still not asserted — but "the slide is left
@@ -3654,7 +3654,7 @@ mod tests {
     /// If it does not, every gesture treats a click on a slider as a click on
     /// the tissue: dragging a parameter would pan the slide underneath it, and
     /// a scroll to reach a control further down the panel would zoom. That is
-    /// the same class of bug `docs/VIEWER.md` §3.7 records, which is why the
+    /// the same class of bug `docs/dev/VIEWER.md` §3.7 records, which is why the
     /// panels are laid out before `available_rect` is read and why this asserts
     /// on it rather than trusting the ordering.
     #[test]

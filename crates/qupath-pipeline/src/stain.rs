@@ -143,7 +143,7 @@ impl Stains {
     ///
     /// Exposed for the same reason [`Self::coefficients`] is, and for one more:
     /// the viewer's display path duplicates this arithmetic rather than
-    /// depending on this crate (`docs/VIEWER.md` §7), so the numbers it copies
+    /// depending on this crate (`docs/dev/VIEWER.md` §7), so the numbers it copies
     /// have to be *readable* from here. A background typed as `[255.0; 3]`
     /// because that is what it usually is would be right for the default stains
     /// and silently wrong for a slide carrying its own.

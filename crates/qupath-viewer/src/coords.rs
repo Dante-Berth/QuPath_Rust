@@ -1,6 +1,6 @@
 //! The four coordinate spaces a viewer works in, kept apart by the type system.
 //!
-//! `docs/VIEWER.md` §4 calls mixing these "the source of essentially every
+//! `docs/dev/VIEWER.md` §4 calls mixing these "the source of essentially every
 //! viewer bug", and §5 says to write the types before the second space appears
 //! rather than after. There are four:
 //!
@@ -160,7 +160,7 @@ impl TileIndex {
     /// TIFF stores edge tiles full-sized with padding and
     /// [`qupath_slide::Slide::read_tile_into`] returns them that way, so a
     /// viewer drawing a tile quad must not draw the padding. This is the
-    /// cropped extent to draw; see [`crate::coords`] and `docs/VIEWER.md` §1.
+    /// cropped extent to draw; see [`crate::coords`] and `docs/dev/VIEWER.md` §1.
     #[must_use]
     pub fn visible_size(self, level: &Level) -> (u32, u32) {
         let origin_x = self.column * level.tile_width;
@@ -331,7 +331,7 @@ mod tests {
     #[test]
     fn an_edge_tile_reports_only_its_real_pixels() {
         // 1000 px across is 3 full tiles and a 232 px remainder. Drawing the
-        // full 256 would draw JPEG padding, which is `docs/VIEWER.md` §1's
+        // full 256 would draw JPEG padding, which is `docs/dev/VIEWER.md` §1's
         // "decide once, in step 2" — decided here.
         let level = level(0, 1000, 500, 1.0);
         assert_eq!(TileIndex::new(0, 0, 0).visible_size(&level), (256, 256));

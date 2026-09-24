@@ -4,7 +4,7 @@
 //!
 //! # A machine with no adapter
 //!
-//! `docs/VIEWER.md` §2b says the window "needs a display and a GPU", and until
+//! `docs/dev/VIEWER.md` §2b says the window "needs a display and a GPU", and until
 //! now the second half was load-bearing: no adapter meant a panic at startup.
 //! That is not a rare machine — a headless server, a VM with no passthrough, an
 //! X11 session over ssh, or anything without a Vulkan or GL driver installed.
@@ -18,7 +18,7 @@
 //!
 //! # It makes the composite assertable
 //!
-//! `docs/VIEWER.md` §6 is built around this repository's rule to assert on
+//! `docs/dev/VIEWER.md` §6 is built around this repository's rule to assert on
 //! counts and recorded output rather than on appearance, and it concedes one
 //! gap: what the shader does with a tile is checked by looking at it. Composing
 //! on the CPU closes that gap for the geometry, because these are byte
@@ -70,7 +70,7 @@ pub struct Framebuffer {
 /// The window clears to `(0.08, 0.08, 0.09)` and `wgpu` takes that as *linear*,
 /// then stores it into an `Rgba8UnormSrgb` surface — so what is actually in
 /// memory is the sRGB *encoding* of those, which is `(80, 80, 85)` and not
-/// `(20, 20, 23)`. Guessing that number is precisely the bug `docs/VIEWER.md`
+/// `(20, 20, 23)`. Guessing that number is precisely the bug `docs/dev/VIEWER.md`
 /// §6 records: `render`'s coverage check compared against the linear form,
 /// never matched, and reported a fully undrawn frame as fully drawn for two
 /// milestones.
@@ -175,7 +175,7 @@ impl Framebuffer {
 
     /// [`Framebuffer::draw_tile`] with a display transform applied per pixel.
     ///
-    /// `docs/VIEWER.md` §8.2. The transform is the last thing that happens to a
+    /// `docs/dev/VIEWER.md` §8.2. The transform is the last thing that happens to a
     /// pixel before it is written, which is what makes it *display only*: the
     /// tile in the cache is untouched, so turning a stain channel off restores
     /// the original colour with no reload, and nothing a detection reads has
@@ -184,7 +184,7 @@ impl Framebuffer {
     /// An identity [`crate::Display`] takes the same path as
     /// [`Framebuffer::draw_tile`] and is **byte-identical** to it — the branch
     /// is hoisted out of the loop rather than tested per pixel, so the default
-    /// display costs nothing and `docs/VIEWER.md` §3.4b's agreement between the
+    /// display costs nothing and `docs/dev/VIEWER.md` §3.4b's agreement between the
     /// two backends is not conditional on a display being set.
     pub fn draw_tile_with(
         &mut self,
@@ -296,7 +296,7 @@ impl Framebuffer {
     /// implementation-defined — the specification allows a *range* of rules, so
     /// two drivers may light different pixels for the same segment and neither
     /// is wrong. Tiles are byte-identical across the two backends
-    /// (`docs/VIEWER.md` §3.4b) and outlines are **not**, and that is a
+    /// (`docs/dev/VIEWER.md` §3.4b) and outlines are **not**, and that is a
     /// property of lines rather than a defect here. What stays assertable is
     /// where an outline lands, which is what the tests below check.
     pub fn draw_segments(&mut self, segments: &[crate::ScreenPoint], colour: u32) {
@@ -365,7 +365,7 @@ impl Framebuffer {
     /// The fraction of the frame holding `colour`, in `0.0..=1.0`.
     ///
     /// Against [`CLEAR`] this is "how much of this frame was never drawn", which
-    /// is what `docs/VIEWER.md` §3.4 measures the underlay with. On this path it
+    /// is what `docs/dev/VIEWER.md` §3.4 measures the underlay with. On this path it
     /// is an exact equality rather than a threshold, because nothing encodes the
     /// colour between the clear and the read-back.
     #[must_use]
@@ -492,7 +492,7 @@ impl Texture {
 impl Framebuffer {
     /// Draws an indexed triangle mesh, clipped to `clip` and to the frame.
     ///
-    /// This is what makes `docs/VIEWER.md` §3.4b's promise survive the app
+    /// This is what makes `docs/dev/VIEWER.md` §3.4b's promise survive the app
     /// having chrome: `egui` tessellates its whole interface to triangles with a
     /// position, a texture coordinate and a premultiplied colour, so a machine
     /// with no adapter gets the same interface rather than a bare window.
@@ -800,7 +800,7 @@ mod tests {
     }
 
     /// The identity display must take the original path exactly, which is what
-    /// lets `draw_tile` delegate without `docs/VIEWER.md` §3.4b's byte-exact
+    /// lets `draw_tile` delegate without `docs/dev/VIEWER.md` §3.4b's byte-exact
     /// agreement between the two backends becoming conditional on it.
     #[test]
     fn an_identity_display_draws_the_same_bytes_as_no_display() {
@@ -832,7 +832,7 @@ mod tests {
 
     #[test]
     fn a_tile_drawn_at_its_own_size_reproduces_its_own_bytes() {
-        // `docs/VIEWER.md` §6's golden check, carried to the frame: at 1:1 and
+        // `docs/dev/VIEWER.md` §6's golden check, carried to the frame: at 1:1 and
         // on an integer offset the compositor must be a copy. Anything else —
         // a half-pixel in the sampling, an off-by-one in the span — shows up
         // here as a shifted image, and this is the only test in the crate that
@@ -1153,7 +1153,7 @@ mod tests {
 
     #[test]
     fn an_outline_lands_on_the_tile_pixels_it_covers() {
-        // The claim `docs/VIEWER.md` §6 can actually make about an overlay:
+        // The claim `docs/dev/VIEWER.md` §6 can actually make about an overlay:
         // not that it looks right, but that it is *where the slide says*. A
         // tile is drawn at 1:1 and a segment is drawn along the slide
         // coordinate of one of its rows; the lit pixels must be the ones the

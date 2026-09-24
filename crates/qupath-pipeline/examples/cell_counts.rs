@@ -1,7 +1,7 @@
 //! Counts this pipeline's objects over the regions `parity/fixtures/CellCounts.json`
 //! records QuPath's cells for, and reports the gap.
 //!
-//! `docs/MEMO.md` §2 quotes 26,647 objects against QuPath's 25,757 cells on one
+//! `docs/dev/MEMO.md` §2 quotes 26,647 objects against QuPath's 25,757 cells on one
 //! 4000x4000 region — one region, measured once. A ratio from a single sample
 //! cannot tell a systematic offset from a coincidence, and `DIVERGENCES.md`
 //! D-008 predicts a *systematic* one: seam overlaps are resolved here on nucleus

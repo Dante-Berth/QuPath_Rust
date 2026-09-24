@@ -2,7 +2,7 @@
 # Record the pyramid QuPath gets from OpenSlide, for `Slide::levels` to be
 # checked against.
 #
-# This is the recorder `docs/VIEWER.md` §8.8 asks for. The stored image metadata
+# This is the recorder `docs/dev/VIEWER.md` §8.8 asks for. The stored image metadata
 # block replaces what QuPath would otherwise have read — `setMetadata` is called
 # with it when the image is opened — so a level table that disagrees with
 # OpenSlide's is QuPath reading the wrong pixels, silently. Nothing could say

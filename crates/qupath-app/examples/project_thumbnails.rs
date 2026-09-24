@@ -6,7 +6,7 @@
 //!
 //! The companion of `qupath-viewer`'s `project_sample`, and separate from it for
 //! one reason: the encoder lives here. `qupath-viewer` depends on `qupath-slide`
-//! alone — `docs/VIEWER.md` §7 settled that, and a JPEG encoder is not a reason
+//! alone — `docs/dev/VIEWER.md` §7 settled that, and a JPEG encoder is not a reason
 //! to reopen it — so the crate that writes the format cannot encode the picture,
 //! and the crate that runs the application can. `project::files` says as much in
 //! its own documentation: it returns the JSON and leaves this file to its

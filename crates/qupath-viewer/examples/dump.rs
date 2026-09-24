@@ -1,6 +1,6 @@
 //! Writes what the viewer would show, as a PNG, without opening a window.
 //!
-//! Two jobs. It is the reference `docs/VIEWER.md` §3.2 says to check the
+//! Two jobs. It is the reference `docs/dev/VIEWER.md` §3.2 says to check the
 //! on-screen tile against — same slide, same level, same pixels, through a path
 //! that has no GPU in it — so a colour or orientation bug can be localised to
 //! the render code rather than the read code. And it is how to look at a slide

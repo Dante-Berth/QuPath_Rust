@@ -1,6 +1,6 @@
 //! Pointer gestures delivered to `chrome::draw`, with no window and no GPU.
 //!
-//! `docs/VIEWER.md` §8.8 drew its hole around the wrong thing: what [`App`]
+//! `docs/dev/VIEWER.md` §8.8 drew its hole around the wrong thing: what [`App`]
 //! cannot reach is not the click but the *pixel position*, and `chrome::draw`
 //! returns the `Command` a press produced, so the whole chain from a coordinate
 //! to what the application is asked to do closes without a window. This is that

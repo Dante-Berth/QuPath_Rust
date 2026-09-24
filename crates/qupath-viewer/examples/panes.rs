@@ -1,6 +1,6 @@
 //! Renders §8.2's new pieces to PNGs, so they can be looked at.
 //!
-//! `docs/VIEWER.md` §6 says appearance is checked by looking, and that nobody
+//! `docs/dev/VIEWER.md` §6 says appearance is checked by looking, and that nobody
 //! had looked until the README images. This is the same treatment for the
 //! overview thumbnail and the display transforms: no window, no GPU, and the
 //! output on disk to open.

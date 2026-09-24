@@ -43,7 +43,7 @@
 //! against QuPath in `qupath-watershed`; "called" means it affects the counts.
 //!
 //! So [`Outcome::objects`] is now a count of the same objects QuPath's
-//! `roisNuclei` holds after its area filter — see `docs/ROADMAP.md` §1.5 for
+//! `roisNuclei` holds after its area filter — see `docs/dev/ROADMAP.md` §1.5 for
 //! what that is worth and what it is not.
 //!
 //! What this does establish is the path: real pixels, real decode, every ported

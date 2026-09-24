@@ -1,6 +1,6 @@
 //! `run_collecting` against `run`, on a real slide.
 //!
-//! `docs/VIEWER.md` §3.5 needs object geometry out of a run, and the way that
+//! `docs/dev/VIEWER.md` §3.5 needs object geometry out of a run, and the way that
 //! goes wrong is not a crash — it is a set of objects that is *nearly* right.
 //! One dropped seam duplicate, one detection kept whose candidate died, one
 //! outline traced from the wrong region index, and the viewer draws something

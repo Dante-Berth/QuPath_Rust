@@ -8,7 +8,7 @@ import java.nio.file.Path;
 
 /**
  * Records the pyramid QuPath gets from OpenSlide, so that the metadata block
- * {@code docs/VIEWER.md} §8.8 asks about can be compared against it rather than
+ * {@code docs/dev/VIEWER.md} §8.8 asks about can be compared against it rather than
  * reasoned about.
  *
  * <p>The entry this closes is not "write the block". A stored metadata block

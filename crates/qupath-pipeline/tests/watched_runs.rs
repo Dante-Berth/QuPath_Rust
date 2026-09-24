@@ -1,6 +1,6 @@
 //! Watching a run and stopping one, against a real slide.
 //!
-//! `docs/VIEWER.md` §8.8 asks for these two because a whole-slide run is tens
+//! `docs/dev/VIEWER.md` §8.8 asks for these two because a whole-slide run is tens
 //! of seconds. What can go wrong is not a crash:
 //!
 //! - a watched run that quietly detects something *different* from an unwatched

@@ -1,6 +1,6 @@
 //! Writing detected objects out as GeoJSON, in the dialect QuPath reads.
 //!
-//! `docs/VIEWER.md` §8.2's last item, and a **deliberate revision of §0's
+//! `docs/dev/VIEWER.md` §8.2's last item, and a **deliberate revision of §0's
 //! stated non-goal** rather than a gap being filled: §0 says nothing the
 //! application finds is saved, editable or exported, and this changes the third
 //! of those. It was confirmed wanted before it was written. The other two stand

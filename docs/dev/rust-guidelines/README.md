@@ -229,7 +229,7 @@ These exist because they are the observed failure modes, not hypothetical ones.
 - Work on a branch, one logical change per commit,
   `cargo test && cargo clippy -- -D warnings && cargo fmt --check` green before
   every commit. Never `--no-verify`.
-- **Record the lesson, not the change, in `docs/EVOLUTION.md`.** Not every
+- **Record the lesson, not the change, in `docs/dev/EVOLUTION.md`.** Not every
   commit, and not every N commits — a fixed cadence produces filler on a quiet
   week and misses the one that mattered on a busy one. `git log` already holds
   what changed; that file holds what would change what the next person *tries*.

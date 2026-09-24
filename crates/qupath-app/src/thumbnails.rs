@@ -1,6 +1,6 @@
 //! Small pictures of whole slides: the overview's, and the browser's rows.
 //!
-//! `docs/VIEWER.md` §8.2 needed one picture — the slide that is open, under the
+//! `docs/dev/VIEWER.md` §8.2 needed one picture — the slide that is open, under the
 //! metadata pane — and it is read once when the slide opens. §8.3's project
 //! browser needs one per row, which is a different problem: fifty of them, of
 //! slides nothing has opened, wanted while the window stays live.
@@ -138,7 +138,7 @@ const THUMBNAIL_QUALITY: u8 = 75;
 /// three does not fail — it reads the fourth byte of each pixel as the first of
 /// the next, so every row shears by one channel and the picture comes out in
 /// false colour, sliding further out of register the further down it goes. That
-/// is a `docs/VIEWER.md` §6 failure exactly: plausible output, wrong. The alpha
+/// is a `docs/dev/VIEWER.md` §6 failure exactly: plausible output, wrong. The alpha
 /// is dropped here explicitly, and `a_thumbnail_round_trips_through_a_decoder`
 /// checks the result against the source pixels rather than merely checking that
 /// bytes were produced.
@@ -456,7 +456,7 @@ mod tests {
     /// RGBA to an encoder that wants RGB does not fail: it reads each pixel's
     /// fourth byte as the next pixel's first, so the image shears by one
     /// channel and slides further out of register down the picture. The result
-    /// is a plausible-looking JPEG in false colour — `docs/VIEWER.md` §6's
+    /// is a plausible-looking JPEG in false colour — `docs/dev/VIEWER.md` §6's
     /// recurring failure. Comparing corners against the source is what sees it;
     /// checking that bytes were produced is not.
     ///

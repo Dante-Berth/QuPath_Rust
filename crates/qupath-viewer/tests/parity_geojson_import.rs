@@ -1,6 +1,6 @@
 //! Checks a GeoJSON file *this project wrote* against QuPath's own reader.
 //!
-//! `docs/VIEWER.md` §8.8 listed this as the honest gap: both file formats had
+//! `docs/dev/VIEWER.md` §8.8 listed this as the honest gap: both file formats had
 //! been checked against a JSON parser and against the Java that writes them,
 //! which is a stronger claim than "it validates" and a weaker one than "QuPath
 //! opened it". This is the second claim, made once by a JVM and then asserted

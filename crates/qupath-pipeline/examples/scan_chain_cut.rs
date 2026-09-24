@@ -49,7 +49,7 @@
 //! gain this size reversed sign once nine streams per tile met DRAM.
 //!
 //! Against that: it needs `unsafe`, which the workspace denies outright and
-//! which `.claude/skills/ms-rust/SKILL.md` allows only behind "a committed
+//! which `docs/dev/rust-guidelines/README.md` allows only behind "a committed
 //! profile showing what it buys". This is that profile, and what it shows is
 //! that the change does not buy enough. Kept as a probe so the next person to
 //! reach for ROADMAP §4.9's last lever can see it was written, measured and

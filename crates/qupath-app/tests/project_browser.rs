@@ -1,6 +1,6 @@
 //! The project browser, driven through [`App`] rather than through a window.
 //!
-//! `docs/VIEWER.md` §6 says the picture is checked by looking and the state is
+//! `docs/dev/VIEWER.md` §6 says the picture is checked by looking and the state is
 //! checked by asserting, and this is the second half. Nothing here needs a
 //! window, a GPU or a slide: opening a project is reading a file and building a
 //! list, and every failure of it is a state the application is left in.
@@ -8,7 +8,7 @@
 //! Written against states rather than against return values on purpose. A
 //! project that will not open must leave the one already open alone, and a
 //! function that returns nothing is one whose only observable effect is where
-//! it leaves the application — see `docs/VIEWER.md` §3.4's three bugs, all of
+//! it leaves the application — see `docs/dev/VIEWER.md` §3.4's three bugs, all of
 //! which were about *when* state becomes visible.
 
 use std::path::{Path, PathBuf};
@@ -1038,7 +1038,7 @@ fn a_row_is_where_these_tests_think_it_is() {
 /// Pressing a row asks for that row's slide, and pressing one that cannot be
 /// opened asks for nothing.
 ///
-/// `docs/VIEWER.md` §8.8 recorded this as needing a hand on the machine —
+/// `docs/dev/VIEWER.md` §8.8 recorded this as needing a hand on the machine —
 /// "nothing has *clicked* a row" — alongside the hover states, and it needs one
 /// no more than they did. A click is a `PointerMoved` and two `PointerButton`
 /// events, and `chrome::draw` returns the `Command` the press produced, so the

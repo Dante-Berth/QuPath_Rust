@@ -2,7 +2,7 @@
 //!
 //! `main.rs` is the binary that opens a window and runs the event loop; this
 //! exposes the same modules so they can be driven without one. The reason is
-//! `docs/VIEWER.md` §6: appearance is checked by looking, and looking at a
+//! `docs/dev/VIEWER.md` §6: appearance is checked by looking, and looking at a
 //! panel means laying it out and rasterising it, which `examples/chrome` does
 //! with no window and no GPU.
 //!

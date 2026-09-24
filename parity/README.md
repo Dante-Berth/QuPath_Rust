@@ -375,7 +375,7 @@ report the numbers.
 **The end-to-end detection comparison is the standing example of that.**
 `ObjectMasks.json` and `examples/object_masks` measure pooled Dice of 0.935,
 0.934 and 0.880 over three regions, against the `>= 0.99` above. The criterion
-is not met, the numbers are published in `README.md`, `docs/ROADMAP.md` §1.5 and
+is not met, the numbers are published in `README.md`, `docs/dev/ROADMAP.md` §1.5 and
 `DIVERGENCES.md` D-009, and the tolerance stays where it is.
 `parity_object_masks.rs` gates at 0.80 — a **regression floor**, deliberately
 well below the measurement, so that it fails when something breaks rather than

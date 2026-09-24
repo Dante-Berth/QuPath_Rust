@@ -179,7 +179,7 @@ mod tests {
     /// The invariant that says the arithmetic is the right way up. An inverted
     /// downsample would still produce plausible round numbers at every single
     /// scale — 50 µm, 20 µm — and only a comparison across two scales catches
-    /// it. That is `docs/VIEWER.md` §3.3's level bug in miniature.
+    /// it. That is `docs/dev/VIEWER.md` §3.3's level bug in miniature.
     #[test]
     fn zooming_out_never_claims_a_shorter_length() {
         let mpp = 0.4990;
@@ -234,7 +234,7 @@ mod tests {
     /// A viewport that has not been sized yet must not produce a bar.
     ///
     /// `0.0` would divide to an infinite downsample and NaN its way into a
-    /// label; `docs/VIEWER.md` §8.1b records what a NaN reaching the viewport
+    /// label; `docs/dev/VIEWER.md` §8.1b records what a NaN reaching the viewport
     /// cost, and this is the same refusal applied at the other end.
     #[test]
     fn a_degenerate_scale_has_no_bar() {

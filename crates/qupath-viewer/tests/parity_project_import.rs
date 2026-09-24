@@ -1,7 +1,7 @@
 //! Checks a project directory *this project wrote* against QuPath's own reader.
 //!
 //! The companion of `parity_geojson_import.rs`, for the other half of
-//! `docs/VIEWER.md` §8.8. `parity/java/ProjectImport.java` opens the directory
+//! `docs/dev/VIEWER.md` §8.8. `parity/java/ProjectImport.java` opens the directory
 //! with `ProjectIO.loadProject` — what *Open project* reaches — and records
 //! what it found; this asserts that reading is the entries the project was
 //! written from.

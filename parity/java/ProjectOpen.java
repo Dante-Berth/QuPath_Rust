@@ -14,7 +14,7 @@ import java.nio.file.Path;
  * <p>{@link ProjectImport} deliberately stops before this: it records everything
  * QuPath can tell about an entry before the image is opened, and opening one
  * needs {@code qupath-extension-openslide} on the classpath. That was recorded
- * in {@code docs/VIEWER.md} §8.8 as blocked on "a native library, and there is
+ * in {@code docs/dev/VIEWER.md} §8.8 as blocked on "a native library, and there is
  * none on this machine" — which was true of {@code ldconfig} and false of the
  * thing QuPath loads. The extension's own dependency carries a
  * {@code libopenslide.so} inside a jar and JNA extracts it, so nothing needs
@@ -39,7 +39,7 @@ import java.nio.file.Path;
  * <p><b>Where the pixels are read matters, twice.</b> Not the centre of the
  * slide, and not its origin: both are background on these files, and two readers
  * both returning white would agree without either of them being right —
- * {@code docs/VIEWER.md} §6 records that mistake being made three times with
+ * {@code docs/dev/VIEWER.md} §6 records that mistake being made three times with
  * three different instruments. The region is the dense-tissue one
  * {@code SlideRegion} already profiles against, and the recorder asserts it did
  * not come back uniform, so a fixture recorded over background fails here rather

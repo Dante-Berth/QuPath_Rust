@@ -47,11 +47,11 @@ def save(fig, name):
 def density():
     """The count ratio against cell density, which is the deck's core claim.
 
-    docs/MEMO.md §2. Ten regions of CMU-1 ranked by the slide rather than by
+    docs/dev/MEMO.md §2. Ten regions of CMU-1 ranked by the slide rather than by
     hand; the three single-tile regions are marked because they carry no seams
     at all, which is what rules out D-008 as the whole cause.
     """
-    # (label, cells/Mpx, ratio, tiles) -- docs/MEMO.md §2 table, verbatim.
+    # (label, cells/Mpx, ratio, tiles) -- docs/dev/MEMO.md §2 table, verbatim.
     rows = [
         ("single-tile-no-seams-2", 1741, 1.0177, 1),
         ("profiled-99pc-tissue", 1688, 1.0346, 4),
@@ -111,7 +111,7 @@ def density():
 def ladder():
     """Counts at four stage boundaries, on three whole regions at 2048x2048.
 
-    docs/MEMO.md §2. Two effects, not one: the first rung is flat across
+    docs/dev/MEMO.md §2. Two effects, not one: the first rung is flat across
     density, and the split opens at the mean-intensity filter.
     """
     rungs = [
@@ -158,7 +158,7 @@ def ladder():
 def endtoend():
     """Wall clock on the region QuPath was profiled on.
 
-    docs/MEMO.md §3 and docs/profiles/README.md: QuPath 15.87 s, mean of 5
+    docs/dev/MEMO.md §3 and docs/profiles/README.md: QuPath 15.87 s, mean of 5
     timed iterations, single-threaded, 4000x4000 at (27776, 5952).
     """
     labels = ["QuPath\n1 thread", "QuPath_Rust\n1 thread", "QuPath_Rust\n20 threads"]
@@ -239,7 +239,7 @@ def stages():
 def dice():
     """Per-object agreement, against QuPath's own recorded masks.
 
-    docs/MEMO.md §2: pooled Dice 0.935 / 0.934 / 0.880 over three single-tile
+    docs/dev/MEMO.md §2: pooled Dice 0.935 / 0.934 / 0.880 over three single-tile
     regions, 97.9% of 17,079 QuPath nuclei matched one-to-one, mean 0.921.
     """
     fig, ax = plt.subplots(figsize=(7.6, 4.0))

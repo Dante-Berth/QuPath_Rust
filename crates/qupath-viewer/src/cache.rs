@@ -1,11 +1,11 @@
 //! Decoded tiles, kept under a hard byte budget.
 //!
-//! `docs/VIEWER.md` §4 names texture memory as one of the two things that will
+//! `docs/dev/VIEWER.md` §4 names texture memory as one of the two things that will
 //! bite: a viewer that uploads every tile it sees and never lets go dies within
 //! about ten seconds of panning. The budget belongs here rather than in the
 //! render loop, and it is a **hard** budget — [`TileCache::bytes`] never exceeds
 //! [`TileCache::budget`] after any operation, which is the property
-//! `docs/VIEWER.md` §6 asks to be asserted on a scripted pan.
+//! `docs/dev/VIEWER.md` §6 asks to be asserted on a scripted pan.
 //!
 //! Generic over the value so the library needs no GPU: the window stores a
 //! `wgpu::BindGroup` per tile and the tests store nothing at all, and both go

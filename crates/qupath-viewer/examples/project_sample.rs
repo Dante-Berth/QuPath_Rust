@@ -1,6 +1,6 @@
 //! Writes a QuPath project directory, for QuPath to open.
 //!
-//! `docs/VIEWER.md` §8.8's remaining half. The GeoJSON export has been through
+//! `docs/dev/VIEWER.md` §8.8's remaining half. The GeoJSON export has been through
 //! `PathIO.readObjects`; the project format had been checked against a JSON
 //! parser and against `DefaultProject.java` and never opened by
 //! `ProjectIO.loadProject`.
@@ -80,7 +80,7 @@ fn main() {
     // one whose output nothing had ever put in front of QuPath. A project
     // recorded without this exercises `files` and `added` only, so the field a
     // user actually types into would be checked against nothing but this
-    // project's own reader — which is the shape `docs/VIEWER.md` §8.6 calls a
+    // project's own reader — which is the shape `docs/dev/VIEWER.md` §8.6 calls a
     // format tested against the code that writes it.
     //
     // The keys are chosen to be awkward on purpose: one holds the `=` and `&`

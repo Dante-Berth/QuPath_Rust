@@ -22,7 +22,7 @@
 //! looked at on a machine with no display — and, unlike the window, checked by
 //! a program.
 //!
-//! `docs/VIEWER.md` §6 stands: this does not turn appearance into an assertion.
+//! `docs/dev/VIEWER.md` §6 stands: this does not turn appearance into an assertion.
 //! What it does is make the appearance inspectable without a display, and give
 //! the coverage numbers below something to run against.
 //!
@@ -114,7 +114,7 @@ fn main() {
     render_to_png(&mut renderer, &slide, overview, None, &out);
 
     let tissue = SlidePoint::new(27776.0 + 512.0, 5952.0 + 512.0);
-    // §3.5. The region is the one `docs/ROADMAP.md` profiles, and the detail
+    // §3.5. The region is the one `docs/dev/ROADMAP.md` profiles, and the detail
     // view below is centred on it, so every frame from here on has real
     // detections over real nuclei rather than an overlay drawn on glass.
     let overlay = detect(
@@ -266,8 +266,8 @@ const MIN_OVERLAY_PX: f32 = 2.0;
 
 /// Runs detection over `region` at level 0 and builds an overlay from it.
 ///
-/// This is `docs/VIEWER.md` §3.5's whole point made runnable: the outlines here
-/// are real nuclei from the real pipeline, on the region `docs/ROADMAP.md`
+/// This is `docs/dev/VIEWER.md` §3.5's whole point made runnable: the outlines here
+/// are real nuclei from the real pipeline, on the region `docs/dev/ROADMAP.md`
 /// profiles, and not a synthetic shape that would prove nothing about either
 /// end of the path.
 fn detect(path: &str, region: pipeline::Region) -> Option<Overlay> {

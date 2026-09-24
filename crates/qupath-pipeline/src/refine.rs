@@ -1,5 +1,5 @@
 //! The boundary refinement: the stage between the shape split and the area
-//! filter, and the one no plan in `docs/ROADMAP.md` knew existed.
+//! filter, and the one no plan in `docs/dev/ROADMAP.md` knew existed.
 //!
 //! ```java
 //! if (refineBoundary && sigma > 1.5) {

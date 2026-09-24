@@ -86,7 +86,7 @@ fn the_loader_delivers_the_pixels_a_direct_read_returns() {
 
 #[test]
 fn a_scripted_pan_stays_inside_the_budget() {
-    // `docs/VIEWER.md` §6's cache test, written as it is stated there: pan a
+    // `docs/dev/VIEWER.md` §6's cache test, written as it is stated there: pan a
     // scripted path and assert resident bytes never exceed the budget. The
     // budget here is deliberately smaller than the path's whole footprint, so
     // eviction actually runs rather than the test passing by never filling up.

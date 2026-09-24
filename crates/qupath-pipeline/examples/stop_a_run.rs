@@ -1,6 +1,6 @@
 //! Stops a whole-slide run partway, and reports where it got to.
 //!
-//! `docs/VIEWER.md` §8.10: the claim is that a run stops within about one
+//! `docs/dev/VIEWER.md` §8.10: the claim is that a run stops within about one
 //! tile. That is a claim about wall time on a real slide, which no unit test
 //! reaches -- the integration tests cancel before the run starts, deliberately,
 //! so they do not race. This is the other half.

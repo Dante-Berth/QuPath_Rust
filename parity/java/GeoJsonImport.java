@@ -12,7 +12,7 @@ import java.util.List;
  * can be checked against it. This one runs in the opposite direction: the input
  * is {@code parity/samples/detections.geojson}, produced by
  * {@code cargo run -p qupath-viewer --example geojson_sample}, and what is
- * recorded is QuPath's reading of it. {@code docs/VIEWER.md} §8.8 called this
+ * recorded is QuPath's reading of it. {@code docs/dev/VIEWER.md} §8.8 called this
  * out as the honest gap — both file formats had been checked against a JSON
  * parser and against the Java that writes them, which is a weaker claim than
  * "QuPath opened it".

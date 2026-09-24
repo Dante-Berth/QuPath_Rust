@@ -1,6 +1,6 @@
 //! Checks `Slide::levels` against the pyramid QuPath gets from OpenSlide.
 //!
-//! This is the comparison `docs/VIEWER.md` §8.8 spent a long time asking for
+//! This is the comparison `docs/dev/VIEWER.md` §8.8 spent a long time asking for
 //! and could not make. The entry there is not "write the stored metadata block"
 //! but "record what OpenSlide reports", because the block *replaces* what QuPath
 //! would otherwise have read: `AbstractServerBuilder.build` calls `setMetadata`

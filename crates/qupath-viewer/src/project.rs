@@ -1,7 +1,7 @@
 //! A QuPath project directory: writing the JSON parts of it, and reading one
 //! back.
 //!
-//! `docs/VIEWER.md` §8.3, and the **second and larger revision of §0's stated
+//! `docs/dev/VIEWER.md` §8.3, and the **second and larger revision of §0's stated
 //! non-goals**: §0 says no project format, and §8.3 says the item is "not to be
 //! started without settling that". It was settled deliberately, and the terms
 //! are worth keeping written down, because §8.3 argues both sides. For: a study
@@ -185,11 +185,11 @@ pub struct Output {
 ///
 /// Returns the relative paths and contents rather than writing them, so the
 /// whole format is testable with no directory on disk — the rule
-/// `docs/VIEWER.md` §6 applies to the viewport math, applied to a file format
+/// `docs/dev/VIEWER.md` §6 applies to the viewport math, applied to a file format
 /// for the same reason. The caller creates the directories and writes the
 /// bytes, and writes `thumbnail.jpg` itself, since this crate encodes no JPEG —
 /// `qupath-app::thumbnails::encode_jpeg` is what does, and it is there because
-/// this crate depends on `qupath-slide` alone (`docs/VIEWER.md` §7).
+/// this crate depends on `qupath-slide` alone (`docs/dev/VIEWER.md` §7).
 ///
 /// `project_path` is where `project.qpproj` will live; it becomes the `uri`
 /// field, which QuPath uses to tell a moved project from one in place.
@@ -435,7 +435,7 @@ fn placeholder_name(id: u64) -> String {
 /// the entry fails to open — the exact failure this module's header warns
 /// about, arrived at from the other side.
 ///
-/// It is not a hypothetical path either. `docs/VIEWER.md` documents starting
+/// It is not a hypothetical path either. `docs/dev/VIEWER.md` documents starting
 /// the application as `cargo run -p qupath-app -- data/CMU-1.svs`, so the path
 /// an entry would be written from is relative in the commonest invocation
 /// there is.
@@ -477,7 +477,7 @@ pub fn file_uri(path: &Path) -> String {
 ///
 /// That asymmetry is the useful fact rather than a gap: a browser learns a
 /// name and a path from the project, and everything about the pixels from
-/// opening the slide — which is exactly the division `docs/VIEWER.md` §8.3
+/// opening the slide — which is exactly the division `docs/dev/VIEWER.md` §8.3
 /// settled on when the metadata block was removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
@@ -1502,7 +1502,7 @@ mod tests {
     /// `file://data/CMU-1.svs` is host `data`, path `/CMU-1.svs`: QuPath looks
     /// for the slide on another machine and the entry fails to open, which is
     /// the failure this module's header is about. It is the commonest case
-    /// rather than an odd one — `docs/VIEWER.md` starts the application as
+    /// rather than an odd one — `docs/dev/VIEWER.md` starts the application as
     /// `cargo run -p qupath-app -- data/CMU-1.svs`.
     #[test]
     fn a_relative_path_is_resolved_rather_than_naming_a_host() {
@@ -1657,7 +1657,7 @@ mod tests {
     /// The dimensions are gone, because they were only ever in the metadata
     /// block that is not written. A browser learns a name and a path from the
     /// project and everything about the pixels from opening the slide, which is
-    /// the division `docs/VIEWER.md` §8.3 settled on.
+    /// the division `docs/dev/VIEWER.md` §8.3 settled on.
     #[test]
     fn a_project_this_module_wrote_reads_back() {
         let text = project_file(Path::new("/study/project.qpproj"), &[entry()], written());

@@ -1,6 +1,6 @@
 //! Writes the GeoJSON sample the QuPath-side parity recorder reads.
 //!
-//! `docs/VIEWER.md` §8.8's last item: both file formats had been checked
+//! `docs/dev/VIEWER.md` §8.8's last item: both file formats had been checked
 //! against a JSON parser and against the Java that writes them, and neither had
 //! ever been opened *by QuPath*. This produces the file that gets opened —
 //! deterministically, so `parity/java/GeoJsonImport.java` records QuPath's

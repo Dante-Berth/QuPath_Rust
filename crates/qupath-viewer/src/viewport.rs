@@ -1,7 +1,7 @@
 //! What the window is looking at, and which tiles that needs.
 //!
 //! Pure arithmetic over a [`Slide`]'s level table — no GPU, no window, no
-//! pixels read. That is deliberate: `docs/VIEWER.md` §6 says the viewport math
+//! pixels read. That is deliberate: `docs/dev/VIEWER.md` §6 says the viewport math
 //! is the part that can carry real assertions, because the rest of a viewer's
 //! output is an appearance and this repository's standing constraint is to
 //! assert on counts and recorded output rather than on how something looks.
@@ -291,7 +291,7 @@ impl Viewport {
     /// what `a_drag_along_an_edge_still_moves_along_it` pins.
     ///
     /// Takes the extent rather than the [`Slide`] because that is all it reads,
-    /// which keeps it unit-testable with no file on disk — `docs/VIEWER.md` §6's
+    /// which keeps it unit-testable with no file on disk — `docs/dev/VIEWER.md` §6's
     /// rule about the viewport math being the part that can carry assertions.
     /// [`Viewport::clamp_to`] is the convenience for callers that hold a slide.
     #[must_use]
@@ -416,7 +416,7 @@ impl Viewport {
     /// The level to draw *underneath* while [`Viewport::level`]'s tiles load,
     /// or `None` when there is nothing coarser to fall back to.
     ///
-    /// This is the third piece of `docs/VIEWER.md` §3.4, and the one that is
+    /// This is the third piece of `docs/dev/VIEWER.md` §3.4, and the one that is
     /// usually skipped: without it a pan flashes the clear colour wherever a
     /// tile has not landed yet, which reads as breakage rather than as loading.
     /// Drawn first, the fine tiles paint over it as they arrive, so the view

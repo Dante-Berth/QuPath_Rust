@@ -1,6 +1,6 @@
 //! What to do to a pixel between reading it and showing it.
 //!
-//! `docs/VIEWER.md` §8.2's third item. QuPath's brightness/contrast dialog
+//! `docs/dev/VIEWER.md` §8.2's third item. QuPath's brightness/contrast dialog
 //! adjusts **display only** — it never changes what a detection reads — and
 //! separately shows the deconvolved haematoxylin and eosin channels instead of
 //! the original colour. Both are one operation on one pixel, which is what this
@@ -21,7 +21,7 @@
 //! # Why the stain vectors arrive as numbers
 //!
 //! `qupath-pipeline::stain` already computes the deconvolution and this module
-//! does not call it, for the reason `docs/VIEWER.md` §7 gives about
+//! does not call it, for the reason `docs/dev/VIEWER.md` §7 gives about
 //! [`crate::Overlay`]: the library depends on `qupath-slide` alone, and taking
 //! a `Stains` would put the whole pipeline into every build of the viewer to
 //! reuse nine numbers and a logarithm. [`Display::with_stain`] takes the
@@ -153,7 +153,7 @@ impl Display {
     /// entirely rather than multiplying every pixel by one and adding zero,
     /// which is what keeps the default display exactly as fast as no display
     /// code at all — and byte-identical to it, which is the property
-    /// `docs/VIEWER.md` §3.4b's two backends depend on.
+    /// `docs/dev/VIEWER.md` §3.4b's two backends depend on.
     #[must_use]
     pub fn is_identity(self) -> bool {
         self.stain.is_none() && self.min == 0.0 && self.max == 255.0

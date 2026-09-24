@@ -127,7 +127,7 @@ fn main() {
          filter is here and pinned against QuPath's own output, on QuPath's own\n\
          tile grid. What is not here is the tail — ROI vertices, cell expansion\n\
          and the measurements — none of which changes how many objects there are.\n\
-         Compare this against QuPath's nucleus count, and read docs/MEMO.md §3\n\
+         Compare this against QuPath's nucleus count, and read docs/dev/MEMO.md §3\n\
          before comparing the time."
     );
 }

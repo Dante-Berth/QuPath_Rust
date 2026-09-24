@@ -1,4 +1,4 @@
-//! Milestones 3.1 to 3.4 of `docs/VIEWER.md`: a window showing a slide, with
+//! Milestones 3.1 to 3.4 of `docs/dev/VIEWER.md`: a window showing a slide, with
 //! pan, zoom, pyramid-level selection, and tiles loaded off the main thread
 //! into a cache with a hard byte budget.
 //!
@@ -46,7 +46,7 @@
 //!
 //! That the pixels `qupath-slide` decodes reach the screen unchanged, that a
 //! level change is invisible, and that a sustained pan neither stalls on decode
-//! nor grows without bound. `docs/VIEWER.md` §6 is explicit that appearance is
+//! nor grows without bound. `docs/dev/VIEWER.md` §6 is explicit that appearance is
 //! checked by looking rather than by a test, so the parts that *can* be
 //! asserted live in the library and are tested there — `TileCache`'s budget,
 //! `TileLoader`'s cancellation, the viewport geometry, and now where a tile

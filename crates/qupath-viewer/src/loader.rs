@@ -1,6 +1,6 @@
 //! Tile decoding off the main thread, with cancellation.
 //!
-//! `docs/VIEWER.md` §2 settled the shape: a thread pool and channels, not
+//! `docs/dev/VIEWER.md` §2 settled the shape: a thread pool and channels, not
 //! async, because decode is CPU-bound and what is actually needed is a request
 //! queue with **cancellation** — panning makes half the in-flight requests
 //! garbage before they land. A pool of its own, never a `par_iter` nested
@@ -424,7 +424,7 @@ fn work<S: TileSource>(shared: &Arc<Shared>, source: &S, done: &Sender<Loaded>) 
 ///
 /// Owns the [`Slide`] because the pool needs it for as long as the pool lives.
 /// `Slide` reads through positioned reads and so is `Sync`: the workers share
-/// one open file with no lock, which `docs/VIEWER.md` §1 counted on.
+/// one open file with no lock, which `docs/dev/VIEWER.md` §1 counted on.
 #[derive(Debug)]
 pub struct SlideTiles {
     slide: Slide,
@@ -475,7 +475,7 @@ impl TileSource for SlideTiles {
 /// RGB8 rows of `stride` pixels to tightly packed RGBA8 of `width` by `height`.
 ///
 /// Two jobs at once, and both are forced. The padding TIFF stores in edge tiles
-/// is dropped, which is `docs/VIEWER.md` §1's "decide once" decided in favour of
+/// is dropped, which is `docs/dev/VIEWER.md` §1's "decide once" decided in favour of
 /// the viewer cropping rather than the reader changing; and the alpha channel is
 /// added because no GPU takes a three-byte texture — `wgpu` has no `Rgb8Unorm`,
 /// and the detection pipeline reads the same tiles and wants no alpha.

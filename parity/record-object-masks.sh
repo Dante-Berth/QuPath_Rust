@@ -36,7 +36,7 @@ mkdir -p "$classes"
 # comparison this fixture feeds: any disagreement is detection disagreeing with
 # detection, not two different overlap-resolution rules disagreeing.
 #
-# These three are the ones docs/MEMO.md §2 measures, and they were chosen by the
+# These three are the ones docs/dev/MEMO.md §2 measures, and they were chosen by the
 # slide rather than by hand -- `cargo run --release --example tissue_scan -p
 # qupath-slide` ranks candidates by optical density. Their counts come back at
 # 1.0121, 1.0177 and 1.1130 against this pipeline, which is the spread the

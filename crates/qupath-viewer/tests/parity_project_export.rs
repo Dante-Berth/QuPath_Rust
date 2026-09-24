@@ -30,7 +30,7 @@
 //!   information and not as something to match against;
 //! - and the **metadata block is now written down** — `levels`, `channels` as
 //!   objects, `pixelCalibration` in microns, `preferredTileWidth`. That block
-//!   is what `docs/VIEWER.md` §8.3 removed for not knowing the pyramid, and
+//!   is what `docs/dev/VIEWER.md` §8.3 removed for not knowing the pyramid, and
 //!   §8.8 lists as needing one. This is the specification for it, in QuPath's
 //!   own hand.
 
@@ -156,7 +156,7 @@ fn qupath_names_an_unnamed_entry_after_a_null() {
 /// The added entry carries a metadata block, and the entry's own `uri` is read
 /// past it.
 ///
-/// This is the shape `docs/VIEWER.md` §8.3 removed for not knowing the pyramid
+/// This is the shape `docs/dev/VIEWER.md` §8.3 removed for not knowing the pyramid
 /// and §8.8 lists as needing one. The fixture is the specification: a `levels`
 /// array, `preferredTileWidth` and `preferredTileHeight`, `isRGB`, `channels`
 /// as objects, and a `pixelCalibration` of `{value, unit}` quantities whose

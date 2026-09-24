@@ -14,7 +14,7 @@ population of extra objects on sparse tissue rather than boundaries falling in
 different places. Seven pipeline stages have been ruled out against QuPath on
 real tissue, pixel for pixel; three remain. Tracked as D-009 in
 [DIVERGENCES.md](DIVERGENCES.md), with the numbers in
-[docs/MEMO.md](docs/MEMO.md) §2.
+[docs/dev/MEMO.md](docs/dev/MEMO.md) §2.
 
 Read that before the speed figures, not after: a 6.5% density-dependent
 over-count is not a rounding difference, and what is fast here is not yet
@@ -36,7 +36,7 @@ read before relying on any output.
 and the verification method, regenerable from the scripts beside it.
 
 The rest of `docs/` answers why the code is the way it is —
-[MEMO.md](docs/MEMO.md) for orientation, [ROADMAP.md](docs/ROADMAP.md) for the
+[MEMO.md](docs/dev/MEMO.md) for orientation, [ROADMAP.md](docs/dev/ROADMAP.md) for the
 plan, [DIVERGENCES.md](DIVERGENCES.md) for every deliberate difference.
 
 ## Licence
@@ -78,7 +78,7 @@ real QuPath build:
 | `qupath-pipeline` | Tiles a region QuPath's way and runs every detection stage over it | colour deconvolution; object filters, 17 images; merge and split; boundary refinement |
 
 And one that is not on it: `qupath-viewer`, a slide viewer with pan, zoom and
-pyramid-level selection, tracked in [docs/VIEWER.md](docs/VIEWER.md). **It
+pyramid-level selection, tracked in [docs/dev/VIEWER.md](docs/dev/VIEWER.md). **It
 claims no parity and no speedup** — QuPath's viewer is not what is being
 ported, and nothing in it makes the detection pipeline faster. It is built
 because the read side had nothing looking at it. See
@@ -133,7 +133,7 @@ decode beneath it, the labelling, the flood, and the background estimate, that
 last at the 2048x2048 the pipeline actually runs it at. What remains between the
 deconvolution and the first stage where the gap is visible is the blur, the
 Laplacian and the regional maxima. See D-009 in
-[DIVERGENCES.md](DIVERGENCES.md) and §2 of [docs/MEMO.md](docs/MEMO.md).
+[DIVERGENCES.md](DIVERGENCES.md) and §2 of [docs/dev/MEMO.md](docs/dev/MEMO.md).
 
 A matching count is also the weakest evidence of a match there is — two runs can
 agree on how many objects they found and disagree about where every one of them
@@ -235,12 +235,12 @@ Charts regenerate with `python3 docs/benchmarks/plot.py`; every figure in them
 is copied from a recording in [docs/benchmarks/](docs/benchmarks/) or
 [docs/profiles/](docs/profiles/). Component speedups and what they are worth in
 place are in [docs/benchmarks/README.md](docs/benchmarks/README.md); what comes
-next is in [docs/ROADMAP.md](docs/ROADMAP.md). Where the remaining count gap
+next is in [docs/dev/ROADMAP.md](docs/dev/ROADMAP.md). Where the remaining count gap
 enters, stage by stage, is `cargo run --release -p qupath-pipeline --example
 stage_ladder`. How the fixtures every parity
 claim rests on are recorded — and which recorders need a slide, which is not a
 detail — is in [parity/README.md](parity/README.md). **New here? Start with
-[docs/MEMO.md](docs/MEMO.md)** — what is finished, what is genuinely faster, and
+[docs/dev/MEMO.md](docs/dev/MEMO.md)** — what is finished, what is genuinely faster, and
 what to distrust, in one page.
 
 ## Viewing a slide
@@ -251,7 +251,7 @@ The viewer picks **level 2** for this and reads 108 tiles; level 0 would be
 
 ![The whole slide, fitted](docs/images/viewer.jpg)
 
-Zoomed to the region `docs/ROADMAP.md` profiles, with the detections from a
+Zoomed to the region `docs/dev/ROADMAP.md` profiles, with the detections from a
 `d` keypress drawn over it — **1272 objects**, the outline of each traced
 nucleus in orange:
 
@@ -261,7 +261,7 @@ Further in, at level 0 and past 1:1, where the outlines can be checked against
 individual nuclei. The boundaries are pixel-stepped because nothing smooths
 them yet — `smooth_boundary` is ported and pinned against QuPath in
 `qupath-watershed`, but nothing in the pipeline calls it
-([docs/VIEWER.md](docs/VIEWER.md) §8.1), so a control for it is deliberately
+([docs/dev/VIEWER.md](docs/dev/VIEWER.md) §8.1), so a control for it is deliberately
 absent rather than present and inert:
 
 ![Nuclear outlines at level 0](docs/images/viewer-zoom1.jpg)
@@ -269,7 +269,7 @@ absent rather than present and inert:
 Every image above is written by `examples/render`, which composes offscreen
 through the same shader the window uses — so they are the viewer's own output
 rather than screenshots, and they can be regenerated on a machine with no
-display. `docs/VIEWER.md` §6 is why that distinction is kept.
+display. `docs/dev/VIEWER.md` §6 is why that distinction is kept.
 
 ```sh
 # Drag to pan, scroll to zoom, f to fit, escape to quit. The title bar shows
@@ -325,7 +325,7 @@ Since then: the **overview thumbnail** is in, the **brightness/contrast
 controls** drive the display transform over the deconvolved stain channels,
 **GeoJSON export** writes the dialect QuPath reads, and the **project format** is
 written — JSON files, a browser that searches and sorts and edits entry metadata,
-and `thumbnail.jpg`. The last two revise [docs/VIEWER.md](docs/VIEWER.md) §0's
+and `thumbnail.jpg`. The last two revise [docs/dev/VIEWER.md](docs/dev/VIEWER.md) §0's
 stated non-goals, deliberately and on the record rather than by drift.
 `data.qpdata` is Java serialisation and is deliberately still not attempted: a
 guessed version is how a project becomes corrupt in a way someone finds out much
@@ -363,7 +363,7 @@ pan through each and two rasterisers that share no code agree on every number in
 the report, and on the detail view — level 0, 1:1, integer offsets — the two
 frames are **byte-identical across all 786,432 pixels**.
 
-[docs/VIEWER.md](docs/VIEWER.md) is the plan and the running account of what has
+[docs/dev/VIEWER.md](docs/dev/VIEWER.md) is the plan and the running account of what has
 gone wrong, including a level-selection bug that cost an 11x over-decode while
 every frame still looked correct.
 

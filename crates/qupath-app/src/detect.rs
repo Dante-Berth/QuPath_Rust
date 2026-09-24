@@ -1,6 +1,6 @@
 //! Running detection over what is on screen, without stopping the window.
 //!
-//! `docs/VIEWER.md` §3.6 left this as "a background thread and a progress bar
+//! `docs/dev/VIEWER.md` §3.6 left this as "a background thread and a progress bar
 //! rather than anything unknown", and the thread is the part that carries a
 //! decision. Everything else here — [`qupath_pipeline::run_collecting`],
 //! [`Overlay`] — already existed and is called rather than reimplemented.
@@ -631,7 +631,7 @@ fn detect(
 /// are in **level-0** pixels — `Overlay::push_level_ring` multiplies by the
 /// downsample, and `geojson`'s coordinates are level-0 by design — so an area
 /// left in level pixels would sit next to a polygon in another frame and be
-/// wrong by the square of the downsample. That is `docs/VIEWER.md` §8.6's
+/// wrong by the square of the downsample. That is `docs/dev/VIEWER.md` §8.6's
 /// "wrong in a way that looks right" exactly: a number of the right kind, in
 /// the wrong units, next to geometry that agrees with nothing.
 ///
@@ -1276,7 +1276,7 @@ mod tests {
     /// the run read, and the outlines beside it are pushed to level 0. Written
     /// unscaled, a run at level 1 would put an area sixteen times too small
     /// next to a polygon of the right size — a number of the right kind in the
-    /// wrong units, which is `docs/VIEWER.md` §8.6's own description of the
+    /// wrong units, which is `docs/dev/VIEWER.md` §8.6's own description of the
     /// failure GeoJSON invites.
     ///
     /// The mean is an optical density and converts by nothing, which is the

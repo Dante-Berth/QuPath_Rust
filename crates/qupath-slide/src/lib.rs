@@ -16,7 +16,7 @@
 //! being approximated or silently mis-decoded.
 //!
 //! So this crate is the pure-Rust fast path, not a replacement for the FFI
-//! work §9 describes. `docs/ROADMAP.md` tracks that.
+//! work §9 describes. `docs/dev/ROADMAP.md` tracks that.
 //!
 //! # Memory
 //!
@@ -182,7 +182,7 @@ impl Slide {
     /// CMU-1's 0.4990, so on a slide scanned at 0.25 µm/px every default was out
     /// by a factor of two — a background radius half the size QuPath would use,
     /// silently, with detection still returning plausible objects. That is the
-    /// failure mode `docs/VIEWER.md` §6 is written against, and it is why this
+    /// failure mode `docs/dev/VIEWER.md` §6 is written against, and it is why this
     /// reads the value rather than the pipeline assuming it.
     ///
     /// Aperio writes `MPP = 0.4990` as one of the `|`-separated fields of the

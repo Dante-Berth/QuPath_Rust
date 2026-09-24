@@ -1736,7 +1736,7 @@ The browser pane itself is ordinary: a list, thumbnails from a `TileCache`, and
 already written — `examples/dump.rs` produces exactly that overview PNG.
 
 **This is the largest item in this section and the least certain**, because
-`docs/VIEWER.md` §0 says *no project format* as a non-goal. Doing this revises
+`docs/dev/VIEWER.md` §0 says *no project format* as a non-goal. Doing this revises
 that, and the revision should be deliberate: the argument for it is that a
 project is how a pathologist actually works — a study is fifty slides, not one —
 and the argument against is that it is the point where "a viewer" becomes "a
@@ -2157,7 +2157,7 @@ there. The pane's heading stopped wrapping and the reason under a row ran off
 the edge — and the *cause* was three widgets away, in a row that had been given
 a picture. Same family as the clipped slider labels and the same fix: the
 content has to be able to be narrower than the panel. This is the third
-occurrence, which is what `docs/EVOLUTION.md` asks for an entry at.
+occurrence, which is what `docs/dev/EVOLUTION.md` asks for an entry at.
 
 #### Ordering it, and the sort that is not a string sort
 

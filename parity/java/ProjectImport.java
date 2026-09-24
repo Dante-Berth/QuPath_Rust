@@ -13,7 +13,7 @@ import java.nio.file.Path;
  * project wrote</em>.
  *
  * <p>The companion of {@code GeoJsonImport}, for the other half of
- * {@code docs/VIEWER.md} §8.8. The entry point is
+ * {@code docs/dev/VIEWER.md} §8.8. The entry point is
  * {@link ProjectIO#loadProject(File, Class)}, which is what <i>Open project</i>
  * in the GUI reaches.
  *

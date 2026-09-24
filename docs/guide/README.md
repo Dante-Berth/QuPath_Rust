@@ -8,10 +8,10 @@ which answers a different question — why the code is the way it is:
 
 | File | Answers |
 | --- | --- |
-| [`docs/MEMO.md`](../MEMO.md) | What the project is, what is finished, what to distrust |
-| [`docs/ROADMAP.md`](../ROADMAP.md) | The plan, stage by stage |
+| [`docs/dev/MEMO.md`](../dev/MEMO.md) | What the project is, what is finished, what to distrust |
+| [`docs/dev/ROADMAP.md`](../dev/ROADMAP.md) | The plan, stage by stage |
 | [`DIVERGENCES.md`](../../DIVERGENCES.md) | Every place this deliberately differs from QuPath |
-| [`docs/VIEWER.md`](../VIEWER.md) | The viewer's design record |
+| [`docs/dev/VIEWER.md`](../dev/VIEWER.md) | The viewer's design record |
 
 ## Before you rely on anything here
 

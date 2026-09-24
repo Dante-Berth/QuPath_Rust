@@ -37,7 +37,7 @@ use crate::thumbnails::{Pictures, Thumbnail};
 /// Texture budget, in bytes. Roughly two thousand tiles.
 const BUDGET: usize = 512 << 20;
 
-/// Decoding threads. Four is what `docs/VIEWER.md` §3.4 measured with.
+/// Decoding threads. Four is what `docs/dev/VIEWER.md` §3.4 measured with.
 const WORKERS: usize = 4;
 
 /// How many frame costs the status bar averages over.
@@ -264,7 +264,7 @@ struct Software {
     textures: Vec<(egui::TextureId, Texture)>,
     /// Reported once rather than every frame. A presentation that fails
     /// silently makes a broken window look exactly like a blank slide, which is
-    /// the bug `docs/VIEWER.md` §3.4b records finding in `present_cpu`.
+    /// the bug `docs/dev/VIEWER.md` §3.4b records finding in `present_cpu`.
     reported: bool,
     /// One mesh's vertices, converted from `egui`'s and reused across meshes
     /// and frames.
@@ -272,7 +272,7 @@ struct Software {
     /// `epaint::Vertex` and `compose::MeshVertex` have the same layout, so a
     /// cast would do — but a cast needs `bytemuck::Pod` on `MeshVertex`, which
     /// means a dependency the viewer library does not have and
-    /// `docs/VIEWER.md` §7 says it should not acquire. The copy is a few
+    /// `docs/dev/VIEWER.md` §7 says it should not acquire. The copy is a few
     /// thousand vertices of a few hundred kilobytes against a frame that costs
     /// milliseconds, and it allocates nothing after the first mesh.
     vertices: Vec<MeshVertex>,
@@ -312,7 +312,7 @@ impl Channel {
     /// original colour.
     ///
     /// Read from [`Stains`] rather than typed, which is the whole reason
-    /// `Stains::max_values` was exposed: `docs/VIEWER.md` §8.5 records that the
+    /// `Stains::max_values` was exposed: `docs/dev/VIEWER.md` §8.5 records that the
     /// first attempt at these numbers typed a plausible vector from the *stain*
     /// matrix where the inverted matrix's row was wanted, and that nothing
     /// failed — the channel looked like a working stain channel. Numbers that
@@ -1644,7 +1644,7 @@ impl App {
 
     /// Writes the last run's outlines as GeoJSON, through a save dialog.
     ///
-    /// `docs/VIEWER.md` §8.6 wrote the format and §8.2 recorded saving as done,
+    /// `docs/dev/VIEWER.md` §8.6 wrote the format and §8.2 recorded saving as done,
     /// and for several sessions **nothing called it**: `geojson::write` was a
     /// library function with no caller while the file's own opening paragraph
     /// said "what you find can be saved as GeoJSON that QuPath opens". This is
@@ -1745,7 +1745,7 @@ impl App {
     /// range being moved afterwards — not what one of them returns.
     ///
     /// Nothing here touches [`Detector`], and that is the point rather than an
-    /// omission: `docs/VIEWER.md` §8.5's display-only claim is structural in
+    /// omission: `docs/dev/VIEWER.md` §8.5's display-only claim is structural in
     /// the library and has to stay structural here.
     fn display_command(&mut self, command: &Command) {
         match command {
@@ -2106,7 +2106,7 @@ impl App {
             return;
         };
         // Drained before anything is requested, and while the loader is asked
-        // whether it is busy first — both are `docs/VIEWER.md` §3.4's rule
+        // whether it is busy first — both are `docs/dev/VIEWER.md` §3.4's rule
         // about a tile being neither claimed nor delivered.
         for loaded in open.loader.drain() {
             let bytes = loaded.pixels.len();
@@ -2247,7 +2247,7 @@ impl App {
         // nowhere earlier: the tiles in the cache are the slide's own pixels,
         // so changing the range costs a redraw and not a reload, and nothing
         // the detector reads has been through it. That is the structural half
-        // of `docs/VIEWER.md` §8.5's display-only claim — `Detector::start` is
+        // of `docs/dev/VIEWER.md` §8.5's display-only claim — `Detector::start` is
         // handed the view and the path, never a `Display`.
         let display = self.appearance.display();
         for (rect, tile) in &draws {
@@ -2499,7 +2499,7 @@ pub fn export_name(slide: Option<&Path>) -> String {
 /// The **last** of each wins. Saying "open this" twice means the second one,
 /// which is what a shell history full of appended arguments produces.
 ///
-/// Pure, and separate from [`App::new`], for `docs/VIEWER.md` §6's reason: it
+/// Pure, and separate from [`App::new`], for `docs/dev/VIEWER.md` §6's reason: it
 /// is the whole of what the command line decides, and a test of it needs no
 /// window.
 #[must_use]
@@ -2738,7 +2738,7 @@ impl ApplicationHandler for App {
         // precisely what `ControlFlow::Wait` is set to prevent.
         //
         // It is handled here, ahead of `egui`, rather than by testing the event
-        // twice. See `docs/VIEWER.md` §3.6.
+        // twice. See `docs/dev/VIEWER.md` §3.6.
         if matches!(event, WindowEvent::RedrawRequested) {
             self.render(&window);
             return;
@@ -3292,7 +3292,7 @@ mod tests {
     ///
     /// What that looked like: press `d`, wait for the run, and read "0 of 4027
     /// outlined" over a screen covered in outlines, until the mouse was moved.
-    /// Verified in a real window before and after — `docs/VIEWER.md` §6's
+    /// Verified in a real window before and after — `docs/dev/VIEWER.md` §6's
     /// "checked by looking", which is what a number in a status bar is.
     #[test]
     fn a_frame_whose_numbers_are_not_on_screen_yet_asks_for_another() {
@@ -3495,7 +3495,7 @@ mod tests {
 
     /// The stain coefficients must be the *inverted* matrix's row. Typing a
     /// plausible vector from the stain matrix is the mistake
-    /// `docs/VIEWER.md` §8.5 records, and nothing failed when it happened —
+    /// `docs/dev/VIEWER.md` §8.5 records, and nothing failed when it happened —
     /// the channel looked like a working stain channel. This asserts that what
     /// the panel builds is what the pipeline computes, which is the only check
     /// a plausible-but-wrong vector cannot pass.
@@ -3525,7 +3525,7 @@ mod tests {
 
     /// The default must be the identity, so opening the application draws
     /// exactly what a build without any of this draws — the property
-    /// `docs/VIEWER.md` §3.4b's two backends rest on.
+    /// `docs/dev/VIEWER.md` §3.4b's two backends rest on.
     #[test]
     fn the_default_appearance_changes_nothing() {
         assert!(Appearance::default().display().is_identity());

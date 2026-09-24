@@ -33,7 +33,7 @@ import java.util.Locale;
  * <p>Usage: {@code RecordObjectMasks <out.json> <slide> <x,y,w,h,name> ...},
  * with regions in full-resolution slide coordinates.
  *
- * <p><b>Why this exists.</b> {@code docs/MEMO.md} §5 puts the count at the top
+ * <p><b>Why this exists.</b> {@code docs/dev/MEMO.md} §5 puts the count at the top
  * of what to distrust, and says why in one line: a count is the weakest
  * evidence of a match there is, because two runs can agree on how many objects
  * they found and disagree about where every one of them is. Every fixture in
@@ -57,7 +57,7 @@ import java.util.Locale;
  * separately. Cells are what D-008 is about and want their own fixture.
  *
  * <p><b>Regions with no seams.</b> The defaults in {@code record-object-masks.sh}
- * are the three single-tile regions {@code docs/MEMO.md} §2 measures, at
+ * are the three single-tile regions {@code docs/dev/MEMO.md} §2 measures, at
  * 1.0121, 1.0177 and 1.1130. A region that fits one tile has no seam overlaps
  * to resolve, so nothing D-008 describes can enter the comparison, and any
  * disagreement is detection disagreeing with detection.

@@ -3,11 +3,11 @@
 Where the port stands, what comes next, and what each next thing needs before
 it can claim anything. Written to be picked up cold.
 
-**Start with `docs/MEMO.md`** if you have not read it — twenty minutes of
+**Start with `docs/dev/MEMO.md`** if you have not read it — twenty minutes of
 orientation, including an honest accounting of what is genuinely faster and what
 only looks it. This file is the detail underneath that.
 
-`docs/VIEWER.md` is a separate project — a slide viewer on top of
+`docs/dev/VIEWER.md` is a separate project — a slide viewer on top of
 `qupath-slide`. It is not on the parity path and claims no speedup; it is
 tracked apart from this file for that reason.
 
@@ -34,7 +34,7 @@ filter, the merge, the shape split, `refineBoundary` and the area filter.
 **On the profiled 4000x4000 region that is 26,647 objects against QuPath's
 25,757 cells — 1.035x, from 1.86x.** Read that as one region, not as the
 result: measured over ten regions the pooled gap is **1.065x** and the range is
-**1.012–1.129**, with this region the best of them. See `docs/MEMO.md` §2 for
+**1.012–1.129**, with this region the best of them. See `docs/dev/MEMO.md` §2 for
 the sweep and what the gap actually tracks, which is not the seam resolution
 D-008 predicted. Each figure below is the stage measured
 against the stage before it, never a prediction:
@@ -673,7 +673,7 @@ never computes.
 ### 1.6 The claim
 
 **Object counts: 26,647 against QuPath's 25,757, 1.035x** — one region, and the
-best of the ten later measured; the pooled figure is 1.065x, see `docs/MEMO.md`
+best of the ten later measured; the pooled figure is 1.065x, see `docs/dev/MEMO.md`
 §2 — on the profiled
 4000x4000 region at QuPath's own tiling. That is the first end-to-end count
 comparison this project has been able to make, and D-008 says where the residual
@@ -1052,7 +1052,7 @@ one part of this filter SIMD does not help. Two things follow, neither tried:
   survive in place.
 
   It also needs `unsafe`, which the workspace denies outright and which
-  `.claude/skills/ms-rust/SKILL.md` permits only behind "a committed profile
+  `docs/dev/rust-guidelines/README.md` permits only behind "a committed profile
   showing what it buys". The probe is that profile and it prices the change out.
   **The erosion's horizontal half is now closed**: the pass count was argued
   shut above, the block scheme's crossover was measured in `7270ed6`, and the

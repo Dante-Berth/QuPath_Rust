@@ -1,6 +1,6 @@
 //! Renders the application's own panels to PNGs, so they can be looked at.
 //!
-//! `docs/VIEWER.md` §6 says appearance is checked by looking, and §8.8 recorded
+//! `docs/dev/VIEWER.md` §6 says appearance is checked by looking, and §8.8 recorded
 //! that the panels were the part of this project nobody had looked at: the
 //! transforms had offscreen renders, the application launched, but the panes'
 //! own layout and colours had only ever been reasoned about.
@@ -397,7 +397,7 @@ impl Pointer {
 
 /// The same, with the pointer moved to `at` before the frame is drawn.
 ///
-/// For the fill under a hovered row, which `docs/VIEWER.md` §8.8 recorded as
+/// For the fill under a hovered row, which `docs/dev/VIEWER.md` §8.8 recorded as
 /// reasoned about and drawn and never seen. A hover is not a weaker click: the
 /// row `egui` fills is the one the *pointer* is over on the frame being drawn,
 /// so a click that has already been released still leaves the pointer there and

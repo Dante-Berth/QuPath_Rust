@@ -19,7 +19,7 @@
 //!
 //! # Why the interface is drawn twice
 //!
-//! `docs/VIEWER.md` §3.4b settled that a machine with no GPU still gets the
+//! `docs/dev/VIEWER.md` §3.4b settled that a machine with no GPU still gets the
 //! viewer, and §2 settled that the chrome is `egui`. Those conflict the moment
 //! there is any chrome at all, because `egui-wgpu` needs an adapter.
 //!

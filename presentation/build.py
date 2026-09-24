@@ -533,7 +533,7 @@ def build():
                     ["docs/guide/", "The user guide — opening a slide, detecting, exporting"],
                     ["docs/guide/parity.md", "What to trust, before relying on any output"],
                     ["DIVERGENCES.md", "Every deliberate difference from QuPath, D-001 to D-010"],
-                    ["docs/MEMO.md", "Twenty minutes of orientation; §2 is the gap"],
+                    ["docs/dev/MEMO.md", "Twenty minutes of orientation; §2 is the gap"],
                     ["CONTRIBUTING.md", "The fixture-and-mutation rule for a new parity claim"],
                 ],
                 [3.1, 6.9], size=15)

@@ -31,7 +31,7 @@
 //!
 //! Not the centre of the slide, and not its origin: both are background here,
 //! and two readers both returning white agree without either being right.
-//! `docs/VIEWER.md` §6 records that mistake being made three times with three
+//! `docs/dev/VIEWER.md` §6 records that mistake being made three times with three
 //! different instruments. The first version of this recorder made it a fourth
 //! time — it clamped a large slide's tissue coordinates into the small region
 //! and landed on its bottom-right corner, mean 243 against tissue's 99 — and the

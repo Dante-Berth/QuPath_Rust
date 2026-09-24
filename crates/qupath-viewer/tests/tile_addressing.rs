@@ -1,4 +1,4 @@
-//! The golden check `docs/VIEWER.md` §6 asks for: the tile the viewer decides
+//! The golden check `docs/dev/VIEWER.md` §6 asks for: the tile the viewer decides
 //! to draw must hold the pixels `read_region_rgb` returns for the same region.
 //!
 //! This is the assertion that catches an off-by-one in tile addressing, and it

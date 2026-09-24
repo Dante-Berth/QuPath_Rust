@@ -25,8 +25,8 @@ decision:
   QuPath accuracy — all reproduced deliberately. `DIVERGENCES.md` records each
   one and why. "More correct than QuPath" is a bug here.
 
-The speedup, when it comes, is not expected to come from Rust. `.claude/skills/
-ms-rust/SKILL.md` §0 puts it in order: doing less work, data layout, parallel
+The speedup, when it comes, is not expected to come from Rust.
+`docs/dev/rust-guidelines/README.md` §0 puts it in order: doing less work, data layout, parallel
 granularity, avoiding allocation, and only then SIMD. Rust-versus-Java on
 equivalent code is 1–3x and that is not the lever.
 
@@ -545,9 +545,9 @@ touching less memory per tile or not processing the tile at all.
 ## 7. Reading order
 
 1. This file.
-2. `.claude/skills/ms-rust/SKILL.md` — the rules, especially §0 and §10.
-3. `docs/ROADMAP.md` §5, the standing constraints — the accumulated scar tissue.
-4. `docs/ROADMAP.md` from the top, for the stage you are picking up.
+2. `docs/dev/rust-guidelines/README.md` — the rules, especially §0 and §10.
+3. `docs/dev/ROADMAP.md` §5, the standing constraints — the accumulated scar tissue.
+4. `docs/dev/ROADMAP.md` from the top, for the stage you are picking up.
 5. `DIVERGENCES.md` for that stage.
 6. **The QuPath call site itself**, in `qupath/`, before writing anything.
 

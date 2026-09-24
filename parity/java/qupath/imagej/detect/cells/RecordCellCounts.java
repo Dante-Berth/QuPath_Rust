@@ -28,7 +28,7 @@ import java.util.Collection;
  *
  * This exists because every parity fixture in this directory pins one *stage*
  * against QuPath, and none of them pins the number the whole pipeline exists to
- * produce. docs/MEMO.md §2 quotes 25,757 cells against 26,647 objects on one
+ * produce. docs/dev/MEMO.md §2 quotes 25,757 cells against 26,647 objects on one
  * 4000x4000 region -- one region, measured once. A ratio from a single sample
  * cannot distinguish a systematic offset from a coincidence, and D-008 predicts
  * a *systematic* one whose size should track how much tissue a region holds.

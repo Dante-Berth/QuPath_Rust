@@ -1,6 +1,6 @@
 //! Detected objects drawn over the slide.
 //!
-//! `docs/VIEWER.md` §3.5. Objects live in **slide coordinates** — level 0, the
+//! `docs/dev/VIEWER.md` §3.5. Objects live in **slide coordinates** — level 0, the
 //! canonical frame of §5 — because that is the only frame that survives the
 //! viewer changing level under them. A detection run reads one level and returns
 //! outlines in that level's pixels; converting once on the way in means a pan
@@ -12,7 +12,7 @@
 //! Nothing. [`Overlay::push_level_ring`] takes lattice corners and a downsample,
 //! which is what `qupath_pipeline::Detections` happens to hold, and would take
 //! them just as happily from a mask traced somewhere else or from a file. The
-//! library still depends on `qupath_slide` alone, which `docs/VIEWER.md` §7
+//! library still depends on `qupath_slide` alone, which `docs/dev/VIEWER.md` §7
 //! settled and this had no reason to unsettle.
 //!
 //! # Outlines, not fills

@@ -269,7 +269,7 @@ over ten cases at four checkpoints each.
 
 So the objects this entry says are wrong are now buildable here. What remains is
 not a missing capability but the work of routing the pipeline through them and
-resolving overlaps on the result, which is `docs/ROADMAP.md` §1.5b step 4b.
+resolving overlaps on the result, which is `docs/dev/ROADMAP.md` §1.5b step 4b.
 
 **Two things the port settled that reading the call site would not have.** Both
 would have been guessed wrong, and both are pinned:
@@ -326,10 +326,10 @@ them — the background estimate and its threshold — rather than on the tests.
 **Status:** known, quantified in direction, contributes but does not dominate.
 Both prerequisites have landed — boundary smoothing and cell expansion — so the
 entry is no longer blocked on a missing capability; what is left is routing the
-pipeline through them (`docs/ROADMAP.md` §1.5b step 4b). Closing it is expected
+pipeline through them (`docs/dev/ROADMAP.md` §1.5b step 4b). Closing it is expected
 to move the ratio by at most the 6.0% of objects the seam resolution touches,
 **not** to close the gap: the density-dependent remainder is a separate and
-currently unexplained divergence, and is the larger half. See `docs/MEMO.md` §2
+currently unexplained divergence, and is the larger half. See `docs/dev/MEMO.md` §2
 and D-009.
 
 ## D-009 — The count gap shows in the merge and the shape split, and is not made there
@@ -605,7 +605,7 @@ the pattern worth trusting: this project's stages agree on constructed input,
 and the question is always what they do on real input — at the size the
 pipeline actually gives them, which is the lesson the 320 px crops added. Do
 not treat the two dense regions' 1.012–1.018 as the project's parity figure any
-more than the old 1.035x — see `docs/MEMO.md` §2 for the pooled number.
+more than the old 1.035x — see `docs/dev/MEMO.md` §2 for the pooled number.
 
 ## D-010 — The project reader stops at 255 levels of nesting, where Gson stops at 255 too
 

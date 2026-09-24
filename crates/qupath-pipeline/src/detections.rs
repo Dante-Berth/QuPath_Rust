@@ -3,7 +3,7 @@
 //! [`crate::run`] returns [`crate::Outcome`], which is counts and timings, and
 //! that was the right thing to return for every milestone up to this one: the
 //! parity fixtures compare counts, and a pipeline that streams tiles through
-//! bounded memory must not accumulate an object set by default. `docs/VIEWER.md`
+//! bounded memory must not accumulate an object set by default. `docs/dev/VIEWER.md`
 //! §3.5 is the first caller that needs the objects themselves, and this is what
 //! it gets.
 //!

@@ -39,3 +39,7 @@ __pycache__/
 /overview-*.png
 /chrome-*.png
 /viewer-dump.png
+
+# Local Claude Code configuration. The project rules it used to carry are
+# tracked at docs/dev/rust-guidelines/.
+/.claude/
