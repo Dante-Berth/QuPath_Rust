@@ -1,0 +1,80 @@
+# Publishes the documentation site — the repository's Markdown as an mdBook,
+# with the rustdoc API reference under /api/ — to GitHub Pages on every push to
+# main. `python3 site/build.py` builds the same thing locally.
+#
+# One-time setup, which a workflow cannot do for itself: Settings → Pages →
+# Build and deployment → Source: **GitHub Actions**.
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  RUST_PINNED: "1.96.0"
+  MDBOOK_VERSION: "0.4.52"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # cargo doc builds qupath-app's dependencies, which need these; same list
+      # as ci.yml.
+      - name: System libraries for the windowing crates
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libx11-dev libxkbcommon-dev libwayland-dev \
+            libxcursor-dev libxrandr-dev libxi-dev
+
+      - name: Rust ${{ env.RUST_PINNED }}
+        run: |
+          rustup toolchain install "$RUST_PINNED" --profile minimal
+          rustup default "$RUST_PINNED"
+
+      - name: mdBook ${{ env.MDBOOK_VERSION }}
+        run: |
+          url=https://github.com/rust-lang/mdBook/releases/download
+          curl -fsSL "$url/v$MDBOOK_VERSION/mdbook-v$MDBOOK_VERSION-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.cargo/bin"
+          mdbook --version
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-pages-${{ env.RUST_PINNED }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-pages-${{ env.RUST_PINNED }}-
+
+      # Fails the job if any relative link in the built site does not resolve.
+      - name: Build the site
+        run: python3 site/build.py
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/site/book
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,20 @@
+# The documentation site. Its pages are the repository's own Markdown, staged
+# into target/site/src by build.py — nothing here is a second copy. Build with
+# `python3 site/build.py`; the result is target/site/book.
+[book]
+title = "QuPath_Rust"
+description = "An accelerated Rust implementation of parts of QuPath, checked against QuPath itself."
+authors = ["Dante-Berth"]
+language = "en"
+src = "../target/site/src"
+
+[build]
+build-dir = "../target/site/book"
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/Dante-Berth/QuPath_Rust"
+edit-url-template = "https://github.com/Dante-Berth/QuPath_Rust/edit/main/{path}"
+site-url = "/QuPath_Rust/"
+default-theme = "light"
+preferred-dark-theme = "navy"

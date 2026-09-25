@@ -108,6 +108,20 @@ tried and reverted. That history is worth keeping.
 The tree is `rustfmt`-clean and CI enforces it, so format everything; there is
 no hand-picking rule.
 
+## Documentation
+
+The site is built from the Markdown in the tree, not from a copy of it. A new
+page goes into the chapter list in [`site/build.py`](site/build.py); a page left
+out of it is not published. To see the site as it will deploy, with
+[mdBook](https://rust-lang.github.io/mdBook/) installed:
+
+```bash
+python3 site/build.py            # -> target/site/book/index.html
+```
+
+It fails naming any relative link in the built site that does not resolve,
+which is also what the Pages workflow runs.
+
 ## Licence
 
 GPL-3.0-or-later, as a derivative work of QuPath. Contributions are accepted

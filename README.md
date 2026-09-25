@@ -71,6 +71,10 @@ every figure here was measured on.
 
 ## Documentation
 
+All of it, with search and the API reference, is published at
+**<https://dante-berth.github.io/QuPath_Rust/>**, rebuilt from `main` on every
+push. The same pages, on GitHub:
+
 - [docs/guide/](docs/guide/README.md) — the user guide: viewing, detecting,
   projects, exporting, command-line tools.
 - [docs/STATUS.md](docs/STATUS.md) — the long form of this page: parity crate
