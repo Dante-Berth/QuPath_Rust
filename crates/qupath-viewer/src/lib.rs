@@ -30,6 +30,7 @@
 //! coordinates is where the viewer starts earning something back for the port.
 
 pub mod cache;
+pub mod colour_map;
 pub mod compose;
 pub mod coords;
 pub mod display;
