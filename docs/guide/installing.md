@@ -97,8 +97,8 @@ cargo run --release -p qupath-app -- data/CMU-1.svs
 
 | Format | Status |
 | --- | --- |
-| Aperio SVS, plain JPEG | **Supported.** Checked against OpenSlide over 5 regions, the level table and a tissue block. |
-| Tiled TIFF | **Supported.** |
+| Aperio SVS, plain JPEG | **Supported.** Pixels checked against QuPath's Bio-Formats decode over 5 regions; level table and a level-0 tissue block checked against OpenSlide. |
+| Other tiled TIFF | **Untested.** Classic (not Big) TIFF with 8-bit baseline-JPEG tiles is read the same way as SVS, but no non-Aperio file has been checked. |
 | Aperio SVS, JPEG 2000 (`CMU-1-JP2K-33005.svs`) | **Not supported.** A pure-Rust decoder matched OpenSlide exactly at level 0 in a trial; see [`FORMATS.md`](../dev/FORMATS.md). |
 | Hamamatsu, Philips, Ventana, Leica, Mirax, OME-TIFF, Zeiss, DICOM | **Not supported.** [`FORMATS.md`](../dev/FORMATS.md) costs each one. |
 

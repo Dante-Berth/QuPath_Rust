@@ -40,7 +40,7 @@ see [docs/benchmarks/](docs/benchmarks/README.md).
 | `qupath-objects` | Columnar detection/measurement table | recorded fixtures |
 | `qupath-watershed` | Marker-controlled flood, labelling, contour tracing, boundary smoothing, cell expansion | flood, labelling and tracing 3 + 13 + 17 cases; contour 9, smoothing 12, expansion 10 |
 | `qupath-filters` | Rank filter, ImageJ Gaussian blur, convolution, morphological reconstruction | 42 + 22 + 22 + 24 cases |
-| `qupath-slide` | Aperio SVS / tiled TIFF reader, pure Rust | 5 regions and the level table, against OpenSlide |
+| `qupath-slide` | Aperio SVS / tiled TIFF reader, pure Rust | 5 regions against Bio-Formats; the level table against OpenSlide |
 | `qupath-pipeline` | Tiles a region QuPath's way and runs every detection stage | per stage, and per object by Dice |
 | `qupath-viewer` | Pan, zoom, pyramid-level selection; GPU or CPU | no parity claimed |
 | `qupath-app` | The viewer with QuPath's panes: detection, projects, GeoJSON export | files opened by QuPath itself |

@@ -28,7 +28,7 @@ real QuPath build:
 | `qupath-objects` | Columnar detection/measurement table | recorded |
 | `qupath-watershed` | Marker-controlled flood, bucket queue, 4/8-connected labelling, filled-region tracing | recorded, 3 + 13 + 17 cases |
 | `qupath-filters` | MIN/MAX rank filter, ImageJ Gaussian blur, convolution, morphological reconstruction | recorded, 42 + 22 + 22 + 24 cases |
-| `qupath-slide` | Aperio SVS / tiled TIFF reader, pure Rust | recorded, 5 regions + the level table and a tissue block against OpenSlide |
+| `qupath-slide` | Aperio SVS / tiled TIFF reader, pure Rust | recorded, 5 regions against Bio-Formats; the level table and a level-0 tissue block against OpenSlide |
 | `qupath-pipeline` | Tiles a region QuPath's way and runs every detection stage over it | colour deconvolution; object filters, 17 images; merge and split; boundary refinement |
 
 And one that is not on it: `qupath-viewer`, a slide viewer with pan, zoom and
