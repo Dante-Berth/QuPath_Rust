@@ -1221,6 +1221,7 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../data/CMU-1-Small-Region.svs");
         if !path.exists() {
+            qupath_testing::skipped("data/CMU-1-Small-Region.svs not present");
             return;
         }
 

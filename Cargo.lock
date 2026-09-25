@@ -2443,6 +2443,7 @@ dependencies = [
  "pollster",
  "qupath-pipeline",
  "qupath-slide",
+ "qupath-testing",
  "softbuffer",
  "wgpu",
  "winit",

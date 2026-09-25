@@ -378,8 +378,11 @@ local work, which is what lets the suite run at all without hundreds of
 megabytes of slides.
 
 On a clean checkout with no slides the suite is 594 tests, all passing, of
-which **18 did not run**: 14 want the 1.9 MB `CMU-1-Small-Region.svs` and 4
-want the 177 MB `CMU-1.svs`. Fetching the small one alone leaves 4 skipped.
+which **48 did not run**: 41 want the 1.9 MB `CMU-1-Small-Region.svs` and 7
+want the 177 MB `CMU-1.svs`. Fetching the small one alone leaves 7 skipped.
+Until 2026-09-25 this said 18: thirty slide tests in `qupath-viewer`,
+`qupath-pipeline`, `qupath-slide` and `qupath-app` returned without calling
+the witness, so they skipped without being counted.
 
 The parity recorders that open a slide *through QuPath* do use OpenSlide, and it
 needs no system package either: `qupath-extension-openslide` depends on a jar

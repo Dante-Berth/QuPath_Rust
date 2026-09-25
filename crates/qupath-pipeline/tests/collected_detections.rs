@@ -34,11 +34,15 @@ use qupath_pipeline::{Detections, Params, Region, run, run_collecting, shoelace_
 use qupath_slide::Slide;
 
 /// The fixture, which is not in the repository. Returns `None` so the suite
-/// stays green on a checkout without it, as the other integration tests do.
+/// stays green on a checkout without it — and says so, failing instead, under
+/// `QUPATH_RUST_REQUIRE_DATA`, as the other integration tests do.
 fn slide() -> Option<Slide> {
     let path = Path::new("../../data/CMU-1-Small-Region.svs");
-    path.exists()
-        .then(|| Slide::open(path).expect("open fixture"))
+    if !path.exists() {
+        qupath_testing::skipped("data/CMU-1-Small-Region.svs not present");
+        return None;
+    }
+    Some(Slide::open(path).expect("open fixture"))
 }
 
 /// A region small enough to run quickly and large enough to be tiled, so the

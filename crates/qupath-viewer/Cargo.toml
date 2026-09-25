@@ -18,6 +18,9 @@ workspace = true
 # viewport math without wgpu, winit or their transitive tree — which is most of
 # this crate's build time, and none of what the tests cover.
 [dev-dependencies]
+# The witness that turns a skipped slide test into a failure under
+# QUPATH_RUST_REQUIRE_DATA; see crates/qupath-testing.
+qupath-testing = { path = "../qupath-testing" }
 # `examples/render.rs` draws real detections over a real slide, which is what
 # `docs/dev/VIEWER.md` §3.5 is. A dev-dependency and not a dependency: the overlay
 # in the library takes lattice corners and a downsample and knows nothing about

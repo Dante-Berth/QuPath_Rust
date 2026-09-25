@@ -78,6 +78,7 @@ fn slide(name: &str) -> Option<Slide> {
         .join("../../data")
         .join(name);
     if !path.is_file() {
+        qupath_testing::skipped(&format!("data/{name} not present"));
         return None;
     }
     Some(Slide::open(&path).expect("the slide opens"))

@@ -97,7 +97,7 @@ cargo test --workspace --release
 ```
 
 594 tests. No slides are committed ([docs/test-data.md](docs/test-data.md)), so
-the 18 that need one skip themselves — and a skipped Rust test still prints
+the 48 that need one skip themselves — and a skipped Rust test still prints
 `ok`. When a green run is evidence, make skips fail:
 
 ```bash

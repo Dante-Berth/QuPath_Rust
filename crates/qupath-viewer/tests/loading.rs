@@ -25,7 +25,11 @@ use qupath_viewer::{
 /// The small committed sample, if it is present.
 fn slide() -> Option<Slide> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/CMU-1-Small-Region.svs");
-    path.exists().then(|| Slide::open(&path).expect("open"))
+    if !path.exists() {
+        qupath_testing::skipped("data/CMU-1-Small-Region.svs not present");
+        return None;
+    }
+    Some(Slide::open(&path).expect("open"))
 }
 
 /// Waits for the *workers* to finish, failing rather than hanging.
