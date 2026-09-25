@@ -99,8 +99,8 @@ cargo run --release -p qupath-app -- data/CMU-1.svs
 | --- | --- |
 | Aperio SVS, plain JPEG | **Supported.** Checked against OpenSlide over 5 regions, the level table and a tissue block. |
 | Tiled TIFF | **Supported.** |
-| Aperio SVS, JPEG 2000 (`CMU-1-JP2K-33005.svs`) | **Not supported.** Needs an OpenJPEG binding this does not have. |
-| Hamamatsu, Leica, Mirax, Zeiss, DICOM | **Not supported.** |
+| Aperio SVS, JPEG 2000 (`CMU-1-JP2K-33005.svs`) | **Not supported.** A pure-Rust decoder matched OpenSlide exactly at level 0 in a trial; see [`FORMATS.md`](../dev/FORMATS.md). |
+| Hamamatsu, Philips, Ventana, Leica, Mirax, OME-TIFF, Zeiss, DICOM | **Not supported.** [`FORMATS.md`](../dev/FORMATS.md) costs each one. |
 
 A slide that will not open reports why in the window rather than exiting.
 

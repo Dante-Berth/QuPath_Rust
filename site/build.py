@@ -54,6 +54,7 @@ CHAPTERS = [
     ("Design records", None, 0),
     ("Memo", "docs/dev/MEMO.md", 0),
     ("Roadmap", "docs/dev/ROADMAP.md", 0),
+    ("Formats", "docs/dev/FORMATS.md", 0),
     ("The viewer", "docs/dev/VIEWER.md", 0),
     ("Evolution", "docs/dev/EVOLUTION.md", 0),
     ("Rust guidelines", "docs/dev/rust-guidelines/README.md", 0),

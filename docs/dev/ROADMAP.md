@@ -799,6 +799,10 @@ Writing it the old way cost two items in §8.8, marked blocked for several
 sessions on a library that was present; `EVOLUTION.md`'s "A blocker is a claim
 about a test that was run" has that account.
 
+`FORMATS.md` (2026-09-25) measured the pure-Rust options on this file:
+`openjp2` is byte-exact against OpenSlide at level 0 and `hayro-jpeg2000` is
+not, which reopens the choice above; it also costs the other formats.
+
 **Licensing, from §9, decide before the first commit:** OpenSlide is LGPL and
 QuPath is GPLv3. This code is derived from reading QuPath source and is already
 GPL-3.0-or-later in `Cargo.toml`. Confirm that stays correct once native
