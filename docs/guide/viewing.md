@@ -21,6 +21,7 @@ keyboard help**.
 | Gesture | Effect |
 | --- | --- |
 | **Left-drag** | Pan. The view stays on the slide. |
+| **Click** | Select the outline under the pointer; its values are in the Objects pane, under View. Click empty slide to clear. |
 | **Right-drag** | Draw a box; releasing zooms to it. |
 | **Escape** | Abandon a box mid-drag, or stop a detection run. |
 | **Scroll** | Zoom about the cursor. Two fingers on a trackpad. |
@@ -61,6 +62,7 @@ Two things that surprise people:
 | Analysis | The detection controls and results. |
 | Slide panel | The metadata pane, which carries the two below. |
 | Overview map | A thumbnail of the whole slide; click it to jump. |
+| Objects | The selected detection's values, and colouring the outlines by a measurement — see below. It opens by itself when you click an outline. |
 | Brightness and contrast | The display transform — see below. |
 | Mouse and keyboard help | The table above. |
 
@@ -69,6 +71,36 @@ Two things that surprise people:
 The scalebar is **snapped to a round number**, so it changes length as you zoom
 rather than changing what it says. Beside it sit the cursor's slide coordinates
 and the current pyramid level.
+
+## Selecting a detection, and colouring by a measurement
+
+After a run (`d`), **click an outline** to select it. It turns cyan and three
+pixels wide, and the **Objects** pane opens with that object's values: its
+number in the run, its centroid (in pixels, and in µm when the slide records a
+pixel size) and every measurement column the run carries. A click that moves
+more than a few pixels is a pan, not a selection. Clicking empty slide clears
+it, and a new run or a closed slide drops it — the row it named belongs to
+another object then.
+
+Under **Colour outlines by**, pick a column to colour every outline by it.
+The colours are QuPath's default map (Inferno, dark to pale yellow), checked
+against colours recorded from QuPath itself. The legend gives the range, which
+is the **2nd to 98th percentile** of the values rather than QuPath's full
+minimum to maximum, so one outlier does not turn every other object the same
+colour; objects beyond either end are drawn in the end colours, and the legend
+counts them. An object with no value is grey. *Nothing (plain)* goes back to
+the default outlines, which is also where it starts.
+
+**Whose numbers these are.** QuPath's per-cell measurements are not ported.
+The two columns a run has today are this project's:
+
+| Column | What it is |
+| --- | --- |
+| `Nucleus: Area (px)` | Pixels in the nucleus mask, in full-resolution (level 0) pixels. Not QuPath's calibrated nucleus area. |
+| `Nucleus: Haematoxylin OD mean` | Mean background-subtracted haematoxylin optical density over the nucleus — the value the detection threshold tests. Not QuPath's `Hematoxylin OD mean`. |
+
+Neither, nor the centroid, has been compared with a QuPath measurement, and
+the pane says so under each value. Hover a value for the details.
 
 ## Brightness, contrast and stains
 

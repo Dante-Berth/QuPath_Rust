@@ -149,6 +149,14 @@ pub enum Command {
     SetAppearance(Appearance),
     /// Put the display back to the slide as read.
     ResetAppearance,
+    /// Show or hide the Objects pane: the colour choice and the selected
+    /// object's values (`crate::inspect`).
+    ToggleObjects,
+    /// Colour outlines by this measurement column, or plainly for `None`.
+    ///
+    /// The column's name rather than its position, so a run that brings the
+    /// same columns in another order still colours by the one picked.
+    ColourBy(Option<String>),
 }
 
 /// Sets the look once, at startup.
@@ -560,6 +568,7 @@ fn open_panels(app: &App) -> u32 {
     u32::from(app.show_analysis)
         + u32::from(app.show_metadata)
         + u32::from(app.show_help)
+        + u32::from(app.show_objects)
         // Counted only when there is a project to list. The pane is not drawn
         // otherwise, and a cap divided by a panel that is not there is the
         // arithmetic that makes every other panel narrower than it needs to be.
@@ -753,6 +762,19 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
                     .clicked()
                 {
                     command = Command::ToggleProject;
+                    ui.close();
+                }
+                let mut objects = app.show_objects;
+                if ui
+                    .checkbox(&mut objects, "Objects")
+                    .on_hover_text(
+                        "Colour the outlines by a measurement, and the values \
+                         of the object clicked. Opens by itself when an \
+                         outline is clicked.",
+                    )
+                    .clicked()
+                {
+                    command = Command::ToggleObjects;
                     ui.close();
                 }
                 let mut help = app.show_help;
@@ -963,6 +985,18 @@ pub fn draw(context: &egui::Context, app: &App) -> (Command, (f32, f32, f32, f32
             .max_width(cap)
             .show(context, |ui| {
                 scrolled("analysis", ui, |ui| analysis(ui, app, &mut command))
+            });
+    }
+    // Inside the analysis pane when both are open: `SidePanel::right` stacks
+    // inwards, and the values of what was clicked belong next to the slide.
+    if app.show_objects {
+        egui::SidePanel::right("objects")
+            .default_width(220.0_f32.min(cap))
+            .max_width(cap)
+            .show(context, |ui| {
+                scrolled("objects", ui, |ui| {
+                    crate::inspect::pane(ui, app, &mut command);
+                });
             });
     }
     if app.show_metadata {
@@ -2617,6 +2651,11 @@ fn help(ui: &mut egui::Ui) {
         .show(ui, |ui| {
             for (gesture, effect) in [
                 ("Left-drag", "Pan. The view stays on the slide."),
+                (
+                    "Click",
+                    "Select the outline under the pointer; its values are in \
+                     the Objects pane, under View. Click empty slide to clear.",
+                ),
                 ("Right-drag", "Draw a box; releasing zooms to it."),
                 ("Escape", "Abandon a box mid-drag, or stop a detection run."),
                 (

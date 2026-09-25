@@ -360,6 +360,27 @@ from a null parameter rather than the field beside it, and that a project's own
 `uri` precedes every entry's, so the first `"uri"` in a project never names a
 slide.
 
+## And one that records a colour
+
+`ColourMap.json` is what `ColorMaps.getDefaultColorMap().getColor(value, min,
+max)` returns — the per-object half of QuPath's measurement map — over a sweep
+past both ends of a range, one value on every rounding tie, a reversed range
+and a range of no width. `crates/qupath-viewer/src/colour_map.rs` ships the
+table and the index rule, and the test holds them to every recorded colour.
+
+```bash
+./parity/record.sh                                       # ColourMap
+cargo test -p qupath-viewer --test parity_colour_map
+```
+
+It is compared **exactly**, which the rule below allows because nothing in it
+is `libm`: a colour is an integer table entry picked by one division and a
+round. The recording caught one thing on its first run — a range of no width
+sends every value to the *first* entry in the Java, where the Rust's clamp had
+sent values above it to the last — and records one difference that stays: the
+Java wraps `+∞` to the first entry through a `long`-to-`int` cast, and the Rust
+clamps it to the last. The test asserts that difference by name.
+
 ## Tolerances
 
 Exact equality with QuPath does not hold in general: Java dropped `strictfp`

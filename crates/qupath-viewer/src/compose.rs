@@ -305,6 +305,30 @@ impl Framebuffer {
         }
     }
 
+    /// Draws line segments each in its own object's colour.
+    ///
+    /// `owners` is what [`crate::Overlay::owned_segments_into`] produces, one
+    /// row per segment, and segment `k` is drawn in `colours[owners[k]]`. The
+    /// lines themselves are [`Framebuffer::draw_segments`]'s, one call per
+    /// segment, so a coloured overlay lands on exactly the pixels a plain one
+    /// does and differs from it in colour and nothing else.
+    ///
+    /// A segment whose owner has no entry in `colours` is skipped rather than
+    /// drawn in some colour: that is a colour table built for a different
+    /// overlay, and a guessed colour would be a wrong value on screen.
+    pub fn draw_owned_segments(
+        &mut self,
+        segments: &[crate::ScreenPoint],
+        owners: &[u32],
+        colours: &[u32],
+    ) {
+        for (pair, &owner) in segments.chunks_exact(2).zip(owners) {
+            if let Some(&colour) = colours.get(owner as usize) {
+                self.draw_line(pair[0], pair[1], colour);
+            }
+        }
+    }
+
     /// One clipped line, by a DDA over the longer axis.
     fn draw_line(&mut self, from: crate::ScreenPoint, to: crate::ScreenPoint, colour: u32) {
         if self.width == 0 || self.height == 0 {
@@ -1188,6 +1212,55 @@ mod tests {
                 "the outline bled onto frame column {column} of the row above"
             );
         }
+    }
+
+    #[test]
+    fn a_coloured_overlay_lights_the_pixels_a_plain_one_does_in_its_owners_colours() {
+        // Two states side by side: the same segments drawn plain and drawn by
+        // owner. Coverage must be identical — colouring by a measurement must
+        // not move an outline — and each lit pixel must carry its own object's
+        // colour, which a lookup by segment index instead of by owner fails
+        // (owner 1 has two segments, so segment 2 belongs to object 1, not 2).
+        let segments = [
+            point(1.5, 1.5),
+            point(8.5, 1.5), // object 0
+            point(1.5, 4.5),
+            point(8.5, 4.5), // object 2
+            point(1.5, 6.5),
+            point(8.5, 6.5), // object 2
+            point(12.5, 1.5),
+            point(12.5, 9.5), // object 1
+        ];
+        let owners = [0, 2, 2, 1];
+        let colours = [pack(10, 0, 0), pack(0, 20, 0), pack(0, 0, 30)];
+
+        let mut plain = Framebuffer::new(16, 12);
+        plain.draw_segments(&segments, pack(255, 255, 255));
+        let mut coloured = Framebuffer::new(16, 12);
+        coloured.draw_owned_segments(&segments, &owners, &colours);
+
+        let lit = |pixel: u32| pixel != CLEAR;
+        let mut compared = 0;
+        for (index, (&p, &c)) in plain.pixels().iter().zip(coloured.pixels()).enumerate() {
+            assert_eq!(lit(p), lit(c), "coverage differs at pixel {index}");
+            if lit(c) {
+                compared += 1;
+                let (column, row) = (index % 16, index / 16);
+                let expected = match (column, row) {
+                    (12, _) => colours[1],
+                    (_, 1) => colours[0],
+                    _ => colours[2],
+                };
+                assert_eq!(c, expected, "wrong owner at ({column}, {row})");
+            }
+        }
+        assert!(compared > 20, "the comparison found almost nothing lit");
+
+        // An owner past the table is skipped, not guessed.
+        let mut short = Framebuffer::new(16, 12);
+        short.draw_owned_segments(&segments, &owners, &colours[..1]);
+        assert_eq!(short.pixels()[16 + 4], colours[0]);
+        assert_eq!(short.pixels()[4 * 16 + 4], CLEAR);
     }
 
     /// A quad covering `(x0, y0)..(x1, y1)` in one flat colour, as the two

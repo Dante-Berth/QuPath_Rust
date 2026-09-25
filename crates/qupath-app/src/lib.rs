@@ -19,5 +19,6 @@
 
 pub mod chrome;
 pub mod detect;
+pub mod inspect;
 pub mod state;
 pub mod thumbnails;

@@ -45,10 +45,11 @@ use std::time::{Duration, Instant};
 
 use qupath_pipeline as pipeline;
 use qupath_slide::{Level, Slide};
+use qupath_viewer::colour_map::Range;
 use qupath_viewer::compose::{self, Framebuffer};
 use qupath_viewer::loader::expand_to_rgba_into;
 use qupath_viewer::{
-    Overlay, ScreenPoint, SlidePoint, SlideTiles, TileCache, TileIndex, TileLoader, Viewport,
+    Overlay, ScreenPoint, SlidePoint, SlideTiles, TileCache, TileIndex, TileLoader, Viewport, pick,
 };
 
 #[repr(C)]
@@ -69,6 +70,27 @@ struct Instance {
 /// target encodes from, and pretending they are the same number is the bug
 /// `compose::CLEAR` records.
 const OVERLAY_RGB: (u8, u8, u8) = (255, 128, 0);
+
+/// The colour a selected outline is drawn in: the application's
+/// `inspect::SELECTED_COLOUR`, so the pictures here are of what it draws.
+const SELECTED_RGB: (u8, u8, u8) = (0, 255, 255);
+
+/// How the outlines of one frame are coloured.
+///
+/// `docs/dev/VIEWER.md` §3.5b. Both backends are handed one packed colour per
+/// *segment*, worked out here once, so neither has a colour rule of its own
+/// to disagree with the other about: the GPU path carries it per vertex and
+/// decodes it in the shader, the CPU path writes it.
+#[derive(Clone, Copy)]
+enum Paint<'a> {
+    /// Every outline in [`OVERLAY_RGB`], as before §3.5b.
+    Plain,
+    /// Each object in its own colour, and one object selected over them.
+    Map {
+        colours: &'a [u32],
+        selected: Option<usize>,
+    },
+}
 
 /// The colour an undrawn pixel keeps, in the linear space `wgpu` takes.
 const CLEAR: wgpu::Color = wgpu::Color {
@@ -111,7 +133,7 @@ fn main() {
     // reached by `zoom_about` rather than by constructing a viewport directly,
     // so the pan/zoom arithmetic is what places these pixels.
     let overview = Viewport::fit(&slide, width, height);
-    render_to_png(&mut renderer, &slide, overview, None, &out);
+    render_to_png(&mut renderer, &slide, overview, None, Paint::Plain, &out);
 
     let tissue = SlidePoint::new(27776.0 + 512.0, 5952.0 + 512.0);
     // §3.5. The region is the one `docs/dev/ROADMAP.md` profiles, and the detail
@@ -126,6 +148,7 @@ fn main() {
             height: 1024,
         },
     );
+    let (overlay, means) = overlay.unzip();
     let overlay = overlay.as_ref();
     let detail = Viewport {
         centre: tissue,
@@ -138,8 +161,51 @@ fn main() {
         &slide,
         detail,
         overlay,
+        Paint::Plain,
         &out.replace(".png", "-detail.png"),
     );
+
+    // §3.5b: the same frame with no outlines, coloured by the mean optical
+    // density, and with the object nearest the middle selected. The bare one
+    // is what lets a comparison of two backends tell outline pixels from tile
+    // pixels: an outline pixel is one that differs from its own bare frame.
+    render_to_png(
+        &mut renderer,
+        &slide,
+        detail,
+        None,
+        Paint::Plain,
+        &out.replace(".png", "-detail-bare.png"),
+    );
+    if let (Some(overlay), Some(means)) = (overlay, means.as_ref()) {
+        let range = Range::robust(means).expect("a run over tissue has values");
+        let mut colours = Vec::new();
+        range.colours_into(means, &mut colours);
+        let selected = pick::object_at(overlay, tissue).or_else(|| {
+            (0..overlay.len()).min_by(|&a, &b| {
+                let distance = |row: usize| {
+                    pick::centroid(overlay.outline(row))
+                        .map_or(f64::INFINITY, |c| (c.x - tissue.x).hypot(c.y - tissue.y))
+                };
+                distance(a).total_cmp(&distance(b))
+            })
+        });
+        println!(
+            "\n  colour map: mean OD {:.3}..{:.3}, object {selected:?} selected",
+            range.low, range.high
+        );
+        render_to_png(
+            &mut renderer,
+            &slide,
+            detail,
+            Some(overlay),
+            Paint::Map {
+                colours: &colours,
+                selected,
+            },
+            &out.replace(".png", "-detail-map.png"),
+        );
+    }
 
     // The interaction as a user performs it: start fitted, then scroll in on a
     // point. Every frame here crosses at least one level boundary.
@@ -156,6 +222,7 @@ fn main() {
             &slide,
             zooming,
             overlay,
+            Paint::Plain,
             &out.replace(".png", &format!("-zoom{step}.png")),
         );
     }
@@ -204,6 +271,7 @@ fn render_to_png(
     slide: &Slide,
     view: Viewport,
     overlay: Option<&Overlay>,
+    paint: Paint<'_>,
     out: &str,
 ) {
     let level = view.level(slide).clone();
@@ -228,12 +296,36 @@ fn render_to_png(
     // module documentation declines to replace with a spatial index until there
     // is a number saying it should be, so the number is printed rather than
     // left to be guessed at.
-    let mut segments = Vec::new();
+    let (mut segments, mut owners) = (Vec::new(), Vec::new());
     let culling = Instant::now();
-    let drawn = overlay.map(|overlay| overlay.segments_into(view, MIN_OVERLAY_PX, &mut segments));
+    let drawn = overlay.map(|overlay| {
+        overlay.owned_segments_into(view, MIN_OVERLAY_PX, &mut segments, &mut owners)
+    });
     let culling = culling.elapsed();
 
-    let pixels = renderer.draw(&draws, &segments);
+    // One colour per segment, whichever way the frame is painted, then the
+    // selection's segments on the end so they are drawn last and on top.
+    let plain = compose::pack(OVERLAY_RGB.0, OVERLAY_RGB.1, OVERLAY_RGB.2);
+    let mut colours: Vec<u32> = match paint {
+        Paint::Plain => vec![plain; owners.len()],
+        Paint::Map { colours, .. } => owners.iter().map(|&row| colours[row as usize]).collect(),
+    };
+    if let (
+        Paint::Map {
+            selected: Some(row),
+            ..
+        },
+        Some(overlay),
+    ) = (paint, overlay)
+    {
+        let mut highlight = Vec::new();
+        pick::highlight_into(overlay, row, view, &mut highlight);
+        let selected = compose::pack(SELECTED_RGB.0, SELECTED_RGB.1, SELECTED_RGB.2);
+        colours.extend(std::iter::repeat_n(selected, highlight.len() / 2));
+        segments.extend(highlight);
+    }
+
+    let pixels = renderer.draw(&draws, &segments, &colours);
     write_png(out, &pixels, view.width, view.height);
 
     println!(
@@ -269,8 +361,9 @@ const MIN_OVERLAY_PX: f32 = 2.0;
 /// This is `docs/dev/VIEWER.md` §3.5's whole point made runnable: the outlines here
 /// are real nuclei from the real pipeline, on the region `docs/dev/ROADMAP.md`
 /// profiles, and not a synthetic shape that would prove nothing about either
-/// end of the path.
-fn detect(path: &str, region: pipeline::Region) -> Option<Overlay> {
+/// end of the path. The run's mean-optical-density column comes back beside
+/// it, which is what §3.5b's coloured frame is drawn by.
+fn detect(path: &str, region: pipeline::Region) -> Option<(Overlay, Vec<f32>)> {
     let slide = Slide::open(path).ok()?;
     let params = pipeline::Params {
         level: 0,
@@ -306,7 +399,8 @@ fn detect(path: &str, region: pipeline::Region) -> Option<Overlay> {
         overlay.vertex_count(),
         overlay.bytes() / 1024
     );
-    Some(overlay)
+    let means = detections.measurements().column(detections.mean()).to_vec();
+    Some((overlay, means))
 }
 
 /// Decodes every visible tile of `level` and appends it to `uploaded`.
@@ -523,7 +617,7 @@ fn pan_once(
             .iter()
             .filter_map(|(tile, instance)| Some((cache.peek(*tile)?, *instance)))
             .collect();
-        let pixels = renderer.draw(&draws, &[]);
+        let pixels = renderer.draw(&draws, &[], &[]);
         undrawn_per_frame.push(undrawn(&pixels));
 
         // One frame from the middle of each pass, where the pan is at speed and
@@ -709,10 +803,17 @@ impl Renderer {
     /// Both paths return the same thing in the same format, which is what lets
     /// `undrawn` and `write_png` stay backend-agnostic — and what makes the two
     /// coverage tables comparable line by line.
-    fn draw(&mut self, draws: &[(&Texture, Instance)], segments: &[ScreenPoint]) -> Vec<u8> {
+    ///
+    /// `colours` holds one packed colour per segment of `segments`.
+    fn draw(
+        &mut self,
+        draws: &[(&Texture, Instance)],
+        segments: &[ScreenPoint],
+        colours: &[u32],
+    ) -> Vec<u8> {
         let draws = &draws[..draws.len().min(MAX_TILES)];
         match self {
-            Self::Gpu(gpu) => gpu.draw(draws, segments),
+            Self::Gpu(gpu) => gpu.draw(draws, segments, colours),
             Self::Cpu(state) => {
                 let started = Instant::now();
                 state.frame.clear(compose::CLEAR);
@@ -735,8 +836,14 @@ impl Renderer {
                 // questions: the tile figure is what a frame costs at all, and
                 // this is what turning the overlay on adds to it.
                 let started = Instant::now();
-                let colour = compose::pack(OVERLAY_RGB.0, OVERLAY_RGB.1, OVERLAY_RGB.2);
-                state.frame.draw_segments(segments, colour);
+                // Each segment owns itself, so `draw_owned_segments` reads
+                // the colour of segment k at k.
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "bounded by MAX_OVERLAY_POINTS"
+                )]
+                let owners: Vec<u32> = (0..colours.len() as u32).collect();
+                state.frame.draw_owned_segments(segments, &owners, colours);
                 state.outlining += started.elapsed();
 
                 let mut rgba = Vec::new();
@@ -781,6 +888,11 @@ struct Gpu {
 struct LinePoint {
     pixel: [f32; 2],
     window: [f32; 2],
+    /// The segment's colour as the sRGB bytes the CPU path writes, `[r, g, b,
+    /// 255]`. Decoded to linear in the shader so the sRGB target encodes it
+    /// back to these bytes, rather than carried as a linear float that one
+    /// rounding step would move — `compose::CLEAR`'s lesson.
+    colour: [u8; 4],
 }
 
 /// How many tiles one frame can draw, underlay included.
@@ -918,7 +1030,7 @@ impl Gpu {
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<LinePoint>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Unorm8x4],
                 }],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
@@ -1032,7 +1144,12 @@ impl Gpu {
     /// Anything that is not a GPU texture is skipped rather than asserted on:
     /// the two backends never mix in practice, and a frame that silently loses
     /// a tile is easier to see in the coverage number than a panic is to read.
-    fn draw(&self, draws: &[(&Texture, Instance)], segments: &[ScreenPoint]) -> Vec<u8> {
+    fn draw(
+        &self,
+        draws: &[(&Texture, Instance)],
+        segments: &[ScreenPoint],
+        colours: &[u32],
+    ) -> Vec<u8> {
         // Every instance in one copy before the pass opens. `write_buffer`
         // queues its copy ahead of the whole submission rather than at the
         // point it appears in the recording, so interleaving writes with draws
@@ -1046,10 +1163,16 @@ impl Gpu {
         let window = [self.width as f32, self.height as f32];
         let points: Vec<LinePoint> = segments
             .iter()
+            .enumerate()
             .take(MAX_OVERLAY_POINTS)
-            .map(|point| LinePoint {
-                pixel: [point.x, point.y],
-                window,
+            .map(|(index, point)| {
+                let [_, red, green, blue] =
+                    colours.get(index / 2).copied().unwrap_or(0).to_be_bytes();
+                LinePoint {
+                    pixel: [point.x, point.y],
+                    window,
+                    colour: [red, green, blue, 255],
+                }
             })
             .collect();
         if !points.is_empty() {
@@ -1173,19 +1296,35 @@ const LINE_SHADER: &str = r"
 struct Vertex {
     @location(0) pixel: vec2<f32>,
     @location(1) window: vec2<f32>,
+    @location(2) colour: vec4<f32>,
 };
 
+struct Line {
+    @builtin(position) position: vec4<f32>,
+    // Flat: a segment is one colour end to end, as it is on the CPU path.
+    @location(0) @interpolate(flat) colour: vec4<f32>,
+};
+
+// The sRGB transfer function, inverted: the byte the CPU path writes becomes
+// the linear value the sRGB target encodes back into that byte.
+fn linear(encoded: vec3<f32>) -> vec3<f32> {
+    let low = encoded / 12.92;
+    let high = pow((encoded + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return select(high, low, encoded <= vec3<f32>(0.04045));
+}
+
 @vertex
-fn vertex(vertex: Vertex) -> @builtin(position) vec4<f32> {
+fn vertex(vertex: Vertex) -> Line {
     let clip = vertex.pixel / vertex.window * 2.0 - vec2<f32>(1.0, 1.0);
-    return vec4<f32>(clip.x, -clip.y, 0.0, 1.0);
+    return Line(
+        vec4<f32>(clip.x, -clip.y, 0.0, 1.0),
+        vec4<f32>(linear(vertex.colour.rgb), 1.0),
+    );
 }
 
 @fragment
-fn fragment() -> @location(0) vec4<f32> {
-    // The overlay colour, in the linear space the sRGB target encodes from.
-    // OVERLAY_RGB is the same colour as the byte triple the CPU path writes.
-    return vec4<f32>(1.0, 0.216, 0.0, 1.0);
+fn fragment(line: Line) -> @location(0) vec4<f32> {
+    return line.colour;
 }
 ";
 

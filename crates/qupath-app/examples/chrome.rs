@@ -179,7 +179,146 @@ fn main() {
 
         app.appearance.channel = qupath_app::state::Channel::Haematoxylin;
         render("chrome-slide-stain.png", &mut app);
+
+        objects(&PathBuf::from(
+            std::env::args().nth(1).expect("checked above"),
+        ));
     }
+}
+
+/// The Objects pane and the outlines it controls, over a real detection run.
+///
+/// `docs/dev/VIEWER.md` §3.5b. Four pictures of one view, because each claim
+/// here is a difference between two of them: plain against coloured (the
+/// outlines change colour and not place), coloured by one column against
+/// another (the legend's range and unit follow the column), and unselected
+/// against selected (one outline turns cyan and thick, and the pane fills
+/// with that object's values). The slide is composed under the interface so
+/// the outlines are over the nuclei they were traced from.
+fn objects(path: &std::path::Path) {
+    use qupath_viewer::{SlidePoint, Viewport};
+
+    let mut app = App::new(None);
+    app.open(path.to_path_buf());
+    let Some(open) = app.open.as_mut() else {
+        eprintln!("  {}: {}", path.display(), app.message);
+        return;
+    };
+    let (width, height) = (
+        open.slide().levels()[0].width,
+        open.slide().levels()[0].height,
+    );
+    // 1:1 on the middle of the slide, which on CMU-1-Small-Region is tissue.
+    open.view = Viewport {
+        centre: SlidePoint::new(f64::from(width) / 2.0, f64::from(height) / 2.0),
+        scale: 1.0,
+        width: WIDTH,
+        height: HEIGHT,
+    };
+    let view = open.view;
+    let level = view.level(open.slide()).clone();
+    let levels = open.slide().levels().to_vec();
+    let mpp = open.slide().microns_per_pixel();
+    // The detector the application runs, started as `Command::Detect` starts
+    // it, and waited for as the window would poll it.
+    app.detector
+        .start(path, &levels, &level, mpp, view, app.tuning);
+    while app.detector.is_running() {
+        app.detector.poll();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    println!(
+        "  detection: {}",
+        app.detector.message.as_deref().unwrap_or("no message")
+    );
+    let Some(overlay) = app.detector.overlay.clone() else {
+        return;
+    };
+
+    app.show_objects = true;
+    app.inspect.refresh(&app.detector);
+    render("chrome-objects-plain.png", &mut app);
+
+    // What `Command::ColourBy` does in `App::run`, which needs a window.
+    app.inspect
+        .set_colour_by(Some(qupath_pipeline::MEAN.to_owned()), &app.detector);
+    render("chrome-objects-mean.png", &mut app);
+    app.inspect
+        .set_colour_by(Some(qupath_pipeline::AREA.to_owned()), &app.detector);
+    render("chrome-objects-area.png", &mut app);
+
+    // The object nearest the middle of the part of the slide the panes leave
+    // uncovered, selected the way a click selects: at a slide point, through
+    // `pick`.
+    let target = view.to_slide(qupath_viewer::ScreenPoint::new(420.0, 380.0));
+    let nearest = (0..overlay.len())
+        .filter_map(|row| {
+            qupath_viewer::pick::centroid(overlay.outline(row)).map(|centre| (row, centre))
+        })
+        .min_by(|(_, a), (_, b)| {
+            let distance = |p: &SlidePoint| (p.x - target.x).hypot(p.y - target.y);
+            distance(a).total_cmp(&distance(b))
+        });
+    if let Some((row, centre)) = nearest {
+        app.inspect.click(&app.detector, centre);
+        println!(
+            "  selected object {row} at {:.0}, {:.0}: {:?}",
+            centre.x,
+            centre.y,
+            app.inspect.selected(&app.detector)
+        );
+        render("chrome-objects-selected.png", &mut app);
+    }
+}
+
+/// Draws the slide region the view shows, and the outlines over it, as the
+/// application's `draw` does before the interface goes on top.
+///
+/// Only for a frame with detections: the other pictures in this example are of
+/// the interface, and leaving their slide area clear keeps them what they were.
+fn compose_slide(frame: &mut Framebuffer, app: &mut App) {
+    let Some(open) = app.open.as_ref() else {
+        return;
+    };
+    if app.detector.overlay.is_none() {
+        return;
+    }
+    let view = open.view;
+    let (left, top, right, bottom) = view.bounds();
+    let level = &open.slide().levels()[0];
+    let (x, y) = (left.max(0.0).floor(), top.max(0.0).floor());
+    let (x1, y1) = (
+        right.min(f64::from(level.width)).ceil(),
+        bottom.min(f64::from(level.height)).ceil(),
+    );
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to the level's own u32 extent"
+    )]
+    let (rx, ry, rw, rh) = (x as u32, y as u32, (x1 - x) as u32, (y1 - y) as u32);
+    let Ok(rgb) = open.slide().read_region_rgb(0, rx, ry, rw, rh) else {
+        return;
+    };
+    let rgba: Vec<u8> = rgb
+        .chunks_exact(3)
+        .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
+        .collect();
+    let corner = view.to_screen(qupath_viewer::SlidePoint::new(x, y));
+    #[expect(clippy::cast_possible_truncation, reason = "screen space is f32")]
+    let rect = (
+        corner.x,
+        corner.y,
+        (f64::from(rw) * view.scale) as f32,
+        (f64::from(rh) * view.scale) as f32,
+    );
+    frame.draw_tile(rect, &rgba, rw, rh);
+
+    let mut segments = Vec::new();
+    app.inspect.project(&app.detector, view, 2.0, &mut segments);
+    // The application's plain colour, `state::OVERLAY_COLOUR`.
+    app.inspect
+        .paint(&app.detector, frame, &segments, compose::pack(200, 255, 0));
 }
 
 /// Writes a project to a temporary directory and returns its `.qpproj`.
@@ -566,6 +705,7 @@ fn render_pointing(path: &str, app: &mut App, pointer: Option<Pointer>) {
 
     let mut frame = Framebuffer::new(WIDTH, HEIGHT);
     frame.clear(compose::CLEAR);
+    compose_slide(&mut frame, app);
 
     let mut textures: Vec<(egui::TextureId, Texture)> = Vec::new();
     for (id, delta) in &deltas {
