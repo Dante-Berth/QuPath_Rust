@@ -649,6 +649,158 @@ so **both of D-008's halves are closed**: the rule compares two smoothed cell
 polygons, and both the cells and the smoothing are now computable here. What
 remains is routing the pipeline through them, not building them.
 
+### 3.5b Selecting an object, and colouring by a measurement — **done**
+
+Click an outline to select it and read its values; colour every outline by
+one measurement column with a legend — QuPath's *measurement map*. Four
+pieces, and each lives where the rule in §3.5 says it should: the overlay
+stays ignorant of measurements, the library knows nothing about the
+application, and the application's shared files change only where wiring
+requires.
+
+| Piece | Where | What it is |
+| --- | --- | --- |
+| hit test | `qupath-viewer/src/pick.rs` | `object_at`, even-odd and half-open, over level-0 outlines; the centroid; the highlight's segments |
+| per-object style | `Overlay::owned_segments_into`, `Framebuffer::draw_owned_segments` | the row index of each segment, from the same cull-and-project pass the plain path uses |
+| colour map | `qupath-viewer/src/colour_map.rs` | QuPath's Inferno and its index rule, pinned to a recording; a percentile range |
+| the pane and the click | `qupath-app/src/inspect.rs` | selection state, colour choice, the **Objects** pane |
+
+#### The click goes through the status bar's mapping
+
+A left press records the slide point under the pointer through
+`cursor_slide_position` — the function the status bar's coordinates come
+from — and a release that has not moved four physical pixels at any point is a
+click. Panning is not delayed: it still starts on the first pixel, so a click
+with a shaky hand pans by a pixel and still selects, and a drag that goes out
+and comes back is a drag. Clicking empty slide clears; nothing is selected
+while the outlines are hidden.
+
+`a_click_selects_the_outline_under_it_at_level_two_and_a_scale_factor_of_two`
+is the test, and every factor that is 1 in the development setup is not 1 in
+it: CMU-1 viewed at **pyramid level 2**, a slide rectangle converted at a
+**scale factor of 2**, and outlines traced at level 2's **downsample of 16**.
+The two objects are 40 and 80 screen pixels apart on the two axes, the clicks
+are witnessed over the slide and under the status bar's mapping, and a click
+read as points instead of pixels is shown to miss. Halving the cursor, or
+swapping the axes, fails all four selection tests.
+
+#### A row index that outlives its overlay
+
+A selection is a row number and a colour table is a colour per row, and after
+a new run row 312 is another nucleus. Showing the old values beside the new
+outline looks exactly like a result. `Detector::show` is now the one place an
+overlay arrives, and it and `Detector::clear` bump a revision that both the
+selection and the table carry; either is dropped when it moves. The selection
+also carries its row's bounding box, which catches a caller that assigns
+`detector.overlay` around `show` — the existing tests do exactly that.
+`a_selection_does_not_survive_the_objects_it_named` repeats select → new run →
+select three times, then the bypass, then a close, and checks what the pane
+would read after each; three mutations (never invalidating, no bounds check,
+`show` not bumping) each fail it.
+
+#### Hit-testing a whole slide is a linear scan, and the number says so
+
+`examples/pick_cost.rs`: 150,000 synthetic 36-vertex nuclei over a CMU-1-sized
+slide — the size of a whole-slide run, with ring lengths matched to a real
+one — cost **0.34 ms per click** (332–345 µs over three runs on a loaded
+machine), and 4 ms at 1.5 million. A click is one event, not one per frame, so
+that is a small fraction of the one frame it happens in and no spatial index
+was built. An `f32` box test instead of `f64` measured 318 µs, which is inside
+the noise of this machine and was not kept. Choosing a column to colour by
+costs 0.55 ms for the percentile range and 0.75 ms for the per-row colours,
+once per choice or run.
+
+#### The colours are QuPath's, and that is a recording rather than a reading
+
+The table is Inferno, QuPath's default (`ColorMaps.preferredDefaultColorMaps`
+lists it first), built from QuPath's own `colormaps/Inferno.tsv` the way
+`DefaultColorMap` builds it, and `index` is `ColorMaps.getInd`: ×256, Java's
+half-up rounding, clamped, a reversed range read backwards.
+`parity/java/ColourMap.java` records `getColor` over a 1,804-value sweep past
+both ends of a range, all 256 rounding ties, a reversed range and a zero-width
+one, and `tests/parity_colour_map.rs` holds every one of them exactly — no
+libm is involved, so exact is the right bar. The recording found a bug on its
+first run: a zero-width range sent values above it to the last entry here and
+to the first in QuPath. One difference stays and is asserted by name: QuPath
+gives `+∞` the *first* colour through a `long`-to-`int` wrap, this the last.
+
+**The range is not QuPath's, deliberately.** QuPath starts at the data's
+minimum and maximum, so one segmentation artefact at ten times the usual area
+turns the whole field one colour. This takes the 2nd and 98th percentiles; the
+legend states the range, the unit, how many objects fall beyond each end
+(drawn in the end colours, as QuPath's own clamp draws them) and how many have
+no value (grey, which is off the map; QuPath draws nothing for `NaN`).
+
+The selection is **cyan and three pixels wide**, not QuPath's yellow: the
+plain outlines here are yellow-green and the top of Inferno is pale yellow,
+so yellow would vanish into either. It is drawn as five one-pixel copies of
+the ring one pixel apart, because one-pixel lines are the only primitive both
+backends share.
+
+#### Which values, and whose
+
+The per-cell measurement tail is not ported, so the pane lists whatever
+columns the run carries — a column added later appears without the pane
+changing — and tags each value *ours · not checked against QuPath*, with its
+provenance on hover:
+
+- `Nucleus: Area (px)` — the nucleus mask's pixel count, in level-0 pixels.
+  QuPath's nucleus area is calibrated and is not ported. The masks behind the
+  count are compared with QuPath's (D-009); this column is not.
+- `Nucleus: Haematoxylin OD mean` — the background-subtracted haematoxylin
+  OD the intensity threshold tests. Not QuPath's `Hematoxylin OD mean`, which
+  is part of the unported tail.
+- The **centroid** — the traced outline's centre of area, in px and in µm
+  when the slide has a pixel size. QuPath reports its smoothed ROI's centroid;
+  not compared.
+
+A perimeter is *not* offered, and that is a decision: the traced outline
+follows pixel corners, so its length is a staircase — about 4/π of a round
+nucleus's true perimeter, and √2 of a diagonal edge's. That is a number that would look like
+QuPath's `Perimeter` and would not be it.
+
+#### Where the two backends agree, measured
+
+`examples/render.rs` hands both backends one colour per segment: the CPU path
+writes it, the GPU path carries the sRGB bytes per vertex and inverts the sRGB
+transfer in the shader so the target encodes them back. On the detail view of
+CMU-1 (1:1, level 0):
+
+| | Result |
+| --- | --- |
+| frames with no outlines | byte-identical, all 786,432 pixels |
+| plain outlines, pixels both light | 18,831 of 18,831 the same colour |
+| coloured outlines, GPU colours the CPU never drew | 0 of 50,177 |
+| coloured outlines, pixels both light in different colours | 186 of 18,888 |
+| pixels one backend lights and the other does not | 72,040, of which 72,005 within a pixel of the other's outline |
+
+The last row is §3.5's rasterisation tie, unchanged. The 186 are the same tie
+met from the other side, and all 186 were checked: each is a pixel where two
+touching outlines meet, and the other backend's colour sits one pixel away in
+each frame. Which object's line lands on a shared pixel decides which colour
+is on top, and that is the tie deciding overdraw order, not a colour being
+computed differently. The colour computation itself — byte to linear to sRGB
+— is exact on this driver: not one outline pixel off the CPU's palette.
+
+#### What is not verified
+
+- **A real click in the real window.** The application was launched on
+  CMU-1-Small-Region at `WINIT_X11_SCALE_FACTOR=2` and photographed, but
+  there is no `xdotool` here to deliver a press, and moving the user's own
+  pointer on their desktop is not something to do unasked. What the tests
+  reach is everything from a physical pixel position to the selection —
+  `cursor_moved` and `left_button` are out of `input` for that — and what they
+  do not reach is the two-line match arm in `input` that calls them, the same
+  residue §8.8 names for escape.
+- **The legend and the pane were looked at, not asserted.** `examples/chrome`
+  writes `chrome-objects-{plain,mean,area,selected}.png` from a real run over
+  CMU-1-Small-Region; the colours of the pixels are asserted in
+  `colouring_changes_colours_and_selecting_changes_one_object`, the words are
+  not.
+- **The dark end of Inferno is hard to see on a haematoxylin-dark nucleus.**
+  That is what a perceptually uniform sequential map costs, and QuPath's
+  default pays it too; it is said rather than fixed.
+
 ### 3.6 An application — **partly done**
 
 `crates/qupath-app`. The viewer with an interface rather than a title bar: a
@@ -1704,6 +1856,12 @@ having.
   be saved as GeoJSON that QuPath opens". It is File → **Save detections…**,
   and `s`. The *parameters* are still not saved, and no detection is
   editable.
+- **Selecting a detection and a measurement map — done, §3.5b.** QuPath's
+  click-to-select and its *Measurement map* pane, as a click on the slide and
+  the **Objects** pane: the selected object's values, and every outline
+  coloured by a chosen column with QuPath's own Inferno and a legend. What it
+  cannot show is QuPath's per-cell measurements, which are not ported; it
+  shows the columns a run carries and says whose they are.
 
 ### 8.3 Projects — the format is portable, the browser is not
 
