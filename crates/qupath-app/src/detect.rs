@@ -247,6 +247,15 @@ pub struct Detector {
     /// longer called — a new `Progress` is already clear, so the ordering rule
     /// `qupath_pipeline::Progress::reset` documents has nothing to catch here.
     progress: Arc<Progress>,
+    /// Bumped whenever [`Detector::overlay`] and [`Detector::measurements`]
+    /// are replaced or dropped together.
+    ///
+    /// What a row index taken from one overlay is checked against before it is
+    /// used on another: a selection or a colour table (`crate::inspect`)
+    /// remembers the revision it was made from, and one that no longer matches
+    /// is thrown away rather than read — the row it names is some other
+    /// object's now, and its values would be shown against the wrong outline.
+    revision: u64,
 }
 
 /// What a finished run sends back.
@@ -309,7 +318,25 @@ impl Detector {
             measurements: Vec::new(),
             message: None,
             progress: Arc::new(Progress::new()),
+            revision: 0,
         }
+    }
+
+    /// Which set of objects [`Detector::overlay`] holds; see the field.
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Replaces what the detector holds, as a finished run does.
+    ///
+    /// The one place a new overlay arrives, so the revision cannot be left
+    /// behind by a path that assigns one field and forgets the counter. Public
+    /// for tests and examples that show objects without running the pipeline.
+    pub fn show(&mut self, overlay: Overlay, measurements: Vec<Column>) {
+        self.overlay = Some(overlay);
+        self.measurements = measurements;
+        self.revision += 1;
     }
 
     /// Whether a run is in flight.
@@ -376,6 +403,7 @@ impl Detector {
         self.started = None;
         self.overlay = None;
         self.measurements.clear();
+        self.revision += 1;
         self.message = None;
     }
 
@@ -495,8 +523,7 @@ impl Detector {
         match message.result {
             Outcome::Found(overlay, measurements, summary) => {
                 self.message = Some(describe(&summary));
-                self.overlay = Some(overlay);
-                self.measurements = measurements;
+                self.show(overlay, measurements);
             }
             Outcome::Cancelled { done, total } => {
                 // Said plainly and without the word "failed": stopping was the

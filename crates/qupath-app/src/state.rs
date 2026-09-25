@@ -751,6 +751,31 @@ pub struct App {
     /// nothing at all, which is worse, since that is the path where the typing
     /// has to still be there.
     pub editing: Option<MetadataEditor>,
+    /// The selected detection and the colour-by choice; `crate::inspect`.
+    pub inspect: crate::inspect::Inspect,
+    /// Whether the Objects pane is showing.
+    pub show_objects: bool,
+    /// Where a left press over the slide began, while the button is down.
+    ///
+    /// What tells a click from a drag at release. Kept beside `dragging`
+    /// rather than replacing it: the pan still starts on the first pixel of
+    /// motion, and this only decides, afterwards, whether the gesture also
+    /// selects.
+    press: Option<Press>,
+}
+
+/// A left press over the slide, until its release.
+#[derive(Debug, Clone, Copy)]
+struct Press {
+    /// Where the pointer went down, in window pixels.
+    at: ScreenPoint,
+    /// The slide point under it at that moment. Taken at the press and not at
+    /// the release: a sub-slop pan keeps the same slide point under the pointer
+    /// anyway, and this does not depend on that.
+    slide: SlidePoint,
+    /// Whether the pointer has gone [`crate::inspect::CLICK_SLOP_PX`] or more
+    /// from `at` since, at any moment -- a drag that comes back is a drag.
+    moved: bool,
 }
 
 /// An entry's metadata, while somebody is changing it.
@@ -900,6 +925,9 @@ impl App {
             masked_order: Vec::new(),
             editing: None,
             filter: String::new(),
+            inspect: crate::inspect::Inspect::new(),
+            show_objects: false,
+            press: None,
         }
     }
 
@@ -1336,34 +1364,10 @@ impl App {
     pub fn input(&mut self, window: &Window, event: &WindowEvent, consumed: bool) -> bool {
         match event {
             WindowEvent::CursorMoved { position, .. } => {
-                let next = ScreenPoint::new(position.x as f32, position.y as f32);
-                let (dx, dy) = (
-                    f64::from(next.x - self.cursor.x),
-                    f64::from(next.y - self.cursor.y),
-                );
-                self.cursor = next;
-                if self.dragging
-                    && let Some(open) = &mut self.open
-                {
-                    open.look(open.view.pan(dx, dy));
-                    return true;
-                }
-                // A moved cursor still repaints, because the status bar carries
-                // the position under it — and because a band being dragged is
-                // redrawn to the new corner.
-                self.open.is_some()
+                self.cursor_moved(ScreenPoint::new(position.x as f32, position.y as f32))
             }
             WindowEvent::MouseInput { state, button, .. } if *button == MouseButton::Left => {
-                // A drag is only the slide's if it *began* over the slide.
-                // Testing this on every motion instead would drop the drag the
-                // moment the cursor crossed a panel, which is an ordinary thing
-                // to do halfway through a pan.
-                //
-                // The test is geometric for the reason the wheel arm above
-                // gives at length: `consumed` is true for a pointer anywhere
-                // over a panel, and the slide is one.
-                self.dragging = *state == ElementState::Pressed && self.cursor_over_slide();
-                false
+                self.left_button(*state == ElementState::Pressed)
             }
             WindowEvent::MouseInput { state, button, .. } if *button == MouseButton::Right => {
                 match state {
@@ -1459,6 +1463,81 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    /// The pointer moved to `next`, in window pixels; pans a drag, and says
+    /// whether a redraw is needed.
+    ///
+    /// Out of [`App::input`] for [`App::left_button`]'s reason.
+    fn cursor_moved(&mut self, next: ScreenPoint) -> bool {
+        let (dx, dy) = (
+            f64::from(next.x - self.cursor.x),
+            f64::from(next.y - self.cursor.y),
+        );
+        self.cursor = next;
+        if let Some(press) = &mut self.press
+            && ((next.x - press.at.x).abs() >= crate::inspect::CLICK_SLOP_PX
+                || (next.y - press.at.y).abs() >= crate::inspect::CLICK_SLOP_PX)
+        {
+            press.moved = true;
+        }
+        if self.dragging
+            && let Some(open) = &mut self.open
+        {
+            open.look(open.view.pan(dx, dy));
+            return true;
+        }
+        // A moved cursor still repaints, because the status bar carries
+        // the position under it — and because a band being dragged is
+        // redrawn to the new corner.
+        self.open.is_some()
+    }
+
+    /// A left press or release at the cursor, and whether a redraw is needed.
+    ///
+    /// Out of [`App::input`] so that a test can press and release with no
+    /// window, which is the only thing that function needs one for.
+    ///
+    /// A press over the slide starts a pan, as it always has. A release that
+    /// has not moved [`crate::inspect::CLICK_SLOP_PX`] from the press is also
+    /// a **click**, which selects the outline under the press point -- or
+    /// clears the selection over empty slide -- and opens the Objects pane when
+    /// it selects something. Nothing is selected while the outlines are hidden:
+    /// a click on an outline nobody can see is a click on the tissue.
+    fn left_button(&mut self, pressed: bool) -> bool {
+        if pressed {
+            // A drag is only the slide's if it *began* over the slide.
+            // Testing this on every motion instead would drop the drag the
+            // moment the cursor crossed a panel, which is an ordinary thing
+            // to do halfway through a pan.
+            //
+            // The test is geometric for the reason the wheel arm in `input`
+            // gives at length: `consumed` is true for a pointer anywhere over
+            // a panel, and the slide is one.
+            self.dragging = self.cursor_over_slide();
+            self.press = self
+                .open
+                .as_ref()
+                .filter(|_| self.dragging)
+                .map(|open| Press {
+                    at: self.cursor,
+                    slide: cursor_slide_position(open, self.cursor),
+                    moved: false,
+                });
+            return false;
+        }
+        self.dragging = false;
+        let Some(press) = self.press.take() else {
+            return false;
+        };
+        if press.moved || !self.show_overlay {
+            return false;
+        }
+        let changed = self.inspect.click(&self.detector, press.slide);
+        if self.inspect.selected(&self.detector).is_some() {
+            self.show_objects = true;
+        }
+        changed
     }
 
     /// Ends a right-drag: zooms to the box if there is one, and says whether a
@@ -1976,6 +2055,8 @@ impl App {
             Command::ToggleAnalysis => self.show_analysis = !self.show_analysis,
             Command::ToggleMetadata => self.show_metadata = !self.show_metadata,
             Command::ToggleHelp => self.show_help = !self.show_help,
+            Command::ToggleObjects => self.show_objects = !self.show_objects,
+            Command::ColourBy(column) => self.inspect.set_colour_by(column, &self.detector),
             Command::ToggleOverview => self.display_command(&command),
             Command::JumpTo(centre) => {
                 if let Some(open) = &mut self.open {
@@ -2043,6 +2124,10 @@ impl App {
         // next one — the same reason the interface is laid out before the frame
         // is drawn.
         self.detector.poll();
+        // After the poll and before the layout: a run that landed this frame
+        // drops a selection and a colour table made for the last one before
+        // the pane can show either.
+        self.inspect.refresh(&self.detector);
 
         // The interface is laid out *before* the frame is drawn, because the
         // commands it produces change what the frame shows — a fit pressed this
@@ -2215,12 +2300,16 @@ impl App {
         // both fields of `self`, and drawing straight out of one into the other
         // borrows all of it.
         let mut outlined = 0;
-        if let (true, Some(open), Some(overlay)) =
-            (self.show_overlay, &self.open, &self.detector.overlay)
-        {
-            outlined = overlay.segments_into(open.view, MIN_OVERLAY_PX, &mut self.segments);
+        if let (true, Some(open)) = (self.show_overlay, &self.open) {
+            outlined = self.inspect.project(
+                &self.detector,
+                open.view,
+                MIN_OVERLAY_PX,
+                &mut self.segments,
+            );
         } else {
             self.segments.clear();
+            self.inspect.forget_frame();
         }
 
         // Uploaded when the slide changes rather than every frame: the picture
@@ -2259,7 +2348,13 @@ impl App {
         // Over the tiles and under the chrome. A panel drawn first would have
         // outlines run across it, which is the one ordering mistake here that
         // looks like a rendering bug rather than a layering one.
-        state.frame.draw_segments(&self.segments, OVERLAY_COLOUR);
+        // Plain, or by the chosen column, with the selection over both.
+        self.inspect.paint(
+            &self.detector,
+            &mut state.frame,
+            &self.segments,
+            OVERLAY_COLOUR,
+        );
         // Over the outlines too. The band is what the hand is doing right now
         // and has to be readable against whatever it is drawn across.
         if let Some(from) = self.band {
@@ -3742,5 +3837,257 @@ mod tests {
         assert!(!app.detector.is_running() && app.band.is_none());
 
         assert_eq!(app.escape(), Escape::Nothing);
+    }
+
+    /// CMU-1 open, viewed at pyramid level 2 in a window at a scale factor of
+    /// two, with two objects found by a run that read level 2.
+    ///
+    /// Every factor that is 1 in the development setup is not 1 here: the
+    /// interface's scale factor (the slide rectangle is converted from points,
+    /// the cursor is in physical pixels), the level the viewer draws, and the
+    /// downsample the outlines were traced at (read off the level table, as
+    /// `detect` reads it). The two objects are 800 slide pixels apart in x and
+    /// 1,600 in y, so a click with its axes exchanged lands on neither.
+    fn selecting_at_level_two() -> Option<(App, [SlidePoint; 2])> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/CMU-1.svs");
+        if !path.is_file() {
+            return None;
+        }
+        let mut app = App::new(None);
+        app.open(path);
+        let open = app.open.as_mut().expect("CMU-1 opened");
+        // A physical 1280x860 window at 2.0, as the scale-factor test above.
+        open.view = Viewport {
+            centre: SlidePoint::new(20_400.0, 12_000.0),
+            scale: 1.0 / 20.0,
+            width: 1280,
+            height: 860,
+        };
+        assert_eq!(
+            open.view.level(open.slide()).index,
+            2,
+            "the premise: the viewer is drawing level 2"
+        );
+        app.slide_area = Some(scale_area((0.0, 30.0, 640.0, 400.0), 2.0));
+
+        let downsample = open.slide().levels()[2].downsample;
+        assert!(downsample > 4.0, "level 2 of CMU-1 is a downsample of 16");
+        let mut overlay = Overlay::new();
+        // Level-2 pixels: (1250, 700) and (1300, 800), each 6x6.
+        for (x, y) in [(1250, 700), (1300, 800)] {
+            overlay.push_level_ring(
+                &[[x, y], [x + 6, y], [x + 6, y + 6], [x, y + 6]],
+                downsample,
+            );
+        }
+        let centres = [0, 1].map(|row| {
+            let [x, y, w, h] = overlay.bounds()[row];
+            SlidePoint::new(f64::from(x + w / 2.0), f64::from(y + h / 2.0))
+        });
+        app.detector.show(
+            overlay,
+            vec![
+                (qupath_pipeline::AREA, vec![36.0 * 256.0, 30.0 * 256.0]),
+                (qupath_pipeline::MEAN, vec![0.25, 0.75]),
+            ],
+        );
+        Some((app, centres))
+    }
+
+    /// Presses and releases the left button at `at`, in window pixels.
+    fn click(app: &mut App, at: ScreenPoint) {
+        app.cursor_moved(at);
+        app.left_button(true);
+        app.left_button(false);
+    }
+
+    /// A click selects the outline under it, a second click on another
+    /// selects that one, and a click on empty tissue clears.
+    ///
+    /// At level 2 and a scale factor of two; see [`selecting_at_level_two`].
+    #[test]
+    fn a_click_selects_the_outline_under_it_at_level_two_and_a_scale_factor_of_two() {
+        let Some((mut app, centres)) = selecting_at_level_two() else {
+            qupath_testing::skipped("data/CMU-1.svs not present");
+            return;
+        };
+        let view = app.open.as_ref().expect("open").view;
+        let on = centres.map(|centre| view.to_screen(centre));
+
+        // The witnesses. The two clicks are over the slide and not over the
+        // interface, they are where the status bar says the objects are, and
+        // they are far apart on both axes — so a click that selects nothing
+        // below is a miss and not a coordinate that fell on a panel.
+        for (point, centre) in on.iter().zip(&centres) {
+            app.cursor = *point;
+            assert!(app.cursor_over_slide(), "{point:?} is not over the slide");
+            let under = cursor_slide_position(app.open.as_ref().expect("open"), *point);
+            assert!((under.x - centre.x).abs() < 1.0 && (under.y - centre.y).abs() < 1.0);
+        }
+        assert!((on[0].x - on[1].x).abs() > 30.0 && (on[0].y - on[1].y).abs() > 60.0);
+        // And halving a click — reading physical pixels as points — misses the
+        // object, so this test can see that mistake.
+        let halved = ScreenPoint::new(on[0].x / 2.0, on[0].y / 2.0);
+        assert_eq!(
+            qupath_viewer::pick::object_at(app.found().expect("found"), view.to_slide(halved)),
+            None
+        );
+
+        assert!(!app.show_objects);
+        click(&mut app, on[0]);
+        assert_eq!(app.inspect.selected(&app.detector), Some(0));
+        assert!(
+            app.show_objects,
+            "selecting opens the pane the values are in"
+        );
+        click(&mut app, on[1]);
+        assert_eq!(app.inspect.selected(&app.detector), Some(1));
+
+        // Empty tissue between them clears it.
+        let between = ScreenPoint::new(on[0].x.midpoint(on[1].x), on[0].y - 40.0);
+        click(&mut app, between);
+        assert_eq!(app.inspect.selected(&app.detector), None);
+    }
+
+    /// A drag is not a click: it pans, and leaves the selection alone —
+    /// including a drag that comes back to where it started.
+    #[test]
+    fn a_drag_pans_and_neither_selects_nor_clears() {
+        let Some((mut app, centres)) = selecting_at_level_two() else {
+            qupath_testing::skipped("data/CMU-1.svs not present");
+            return;
+        };
+        let view = app.open.as_ref().expect("open").view;
+        let on = centres.map(|centre| view.to_screen(centre));
+        click(&mut app, on[0]);
+        assert_eq!(app.inspect.selected(&app.detector), Some(0));
+
+        // Press on the other object and drag 30 pixels: a pan.
+        app.cursor_moved(on[1]);
+        app.left_button(true);
+        app.cursor_moved(ScreenPoint::new(on[1].x + 30.0, on[1].y));
+        app.left_button(false);
+        let panned = app.open.as_ref().expect("open").view;
+        assert!(
+            (panned.centre.x - view.centre.x).abs() > 100.0,
+            "the drag did not pan: {:?} to {:?}",
+            view.centre,
+            panned.centre
+        );
+        assert_eq!(
+            app.inspect.selected(&app.detector),
+            Some(0),
+            "a drag that began on another object selected it"
+        );
+
+        // Out and back to the press point: still a drag.
+        let at = panned.to_screen(centres[1]);
+        app.cursor_moved(at);
+        app.left_button(true);
+        app.cursor_moved(ScreenPoint::new(at.x, at.y + 25.0));
+        app.cursor_moved(at);
+        app.left_button(false);
+        assert_eq!(app.inspect.selected(&app.detector), Some(0));
+
+        // A pixel of shake is still a click, and it is what the slop is for.
+        let at = app.open.as_ref().expect("open").view.to_screen(centres[1]);
+        app.cursor_moved(at);
+        app.left_button(true);
+        app.cursor_moved(ScreenPoint::new(at.x + 1.0, at.y + 1.0));
+        app.left_button(false);
+        assert_eq!(app.inspect.selected(&app.detector), Some(1));
+    }
+
+    /// Hidden outlines are not clicked.
+    #[test]
+    fn a_click_with_the_outlines_hidden_selects_nothing() {
+        let Some((mut app, centres)) = selecting_at_level_two() else {
+            qupath_testing::skipped("data/CMU-1.svs not present");
+            return;
+        };
+        let on = app.open.as_ref().expect("open").view.to_screen(centres[0]);
+        app.show_overlay = false;
+        click(&mut app, on);
+        assert_eq!(app.inspect.selected(&app.detector), None);
+        // The same click with them shown does select, so the one above was
+        // refused and not missed.
+        app.show_overlay = true;
+        click(&mut app, on);
+        assert_eq!(app.inspect.selected(&app.detector), Some(0));
+    }
+
+    /// A selection and a colour table never outlive the run they index.
+    ///
+    /// Repeated: select, a new run lands, select again, the slide is closed.
+    /// After each, what the pane would read is checked, not just the flag —
+    /// the failure is values from one run shown against another run's outline.
+    #[test]
+    fn a_selection_does_not_survive_the_objects_it_named() {
+        let Some((mut app, centres)) = selecting_at_level_two() else {
+            qupath_testing::skipped("data/CMU-1.svs not present");
+            return;
+        };
+        let on = app.open.as_ref().expect("open").view.to_screen(centres[1]);
+        app.inspect
+            .set_colour_by(Some(qupath_pipeline::MEAN.to_owned()), &app.detector);
+        let first_range = app.inspect.map(&app.detector).expect("a map").range;
+
+        for round in 0..3 {
+            click(&mut app, on);
+            assert_eq!(
+                app.inspect.selected(&app.detector),
+                Some(1),
+                "round {round}"
+            );
+
+            // A new run whose row 1 is somewhere else entirely, with the same
+            // columns and other values.
+            let mut overlay = Overlay::new();
+            overlay.push_level_ring(&[[0, 0], [5, 0], [5, 5], [0, 5]], 16.0);
+            overlay.push_level_ring(&[[40, 40], [45, 40], [45, 45], [40, 45]], 16.0);
+            app.detector
+                .show(overlay, vec![(qupath_pipeline::MEAN, vec![5.0, 9.0])]);
+            app.inspect.refresh(&app.detector);
+            assert_eq!(app.inspect.selected(&app.detector), None, "round {round}");
+            // The colour choice survives, and its table is the new run's.
+            let map = app
+                .inspect
+                .map(&app.detector)
+                .expect("rebuilt for the new run");
+            assert_ne!(
+                map.range, first_range,
+                "round {round}: the old table was kept"
+            );
+            assert!(map.range.low >= 5.0);
+
+            // Back to objects at the click point for the next round.
+            let (restored, _) = selecting_at_level_two().expect("the slide is still there");
+            let overlay = restored.detector.overlay.clone().expect("overlay");
+            app.detector
+                .show(overlay, restored.detector.measurements.clone());
+            app.inspect.refresh(&app.detector);
+        }
+
+        // Assigned around `show`, which a caller can do: the revision does not
+        // move, and the bounds check is what catches it.
+        click(&mut app, on);
+        assert_eq!(app.inspect.selected(&app.detector), Some(1));
+        let mut other = Overlay::new();
+        other.push_level_ring(&[[0, 0], [5, 0], [5, 5], [0, 5]], 16.0);
+        other.push_level_ring(&[[40, 40], [45, 40], [45, 45], [40, 45]], 16.0);
+        app.detector.overlay = Some(other);
+        assert_eq!(app.inspect.selected(&app.detector), None);
+
+        // And closing the slide drops everything.
+        let (restored, _) = selecting_at_level_two().expect("the slide is still there");
+        let overlay = restored.detector.overlay.clone().expect("overlay");
+        app.detector
+            .show(overlay, restored.detector.measurements.clone());
+        click(&mut app, on);
+        assert_eq!(app.inspect.selected(&app.detector), Some(1));
+        app.detector.clear();
+        app.inspect.refresh(&app.detector);
+        assert_eq!(app.inspect.selected(&app.detector), None);
+        assert!(app.inspect.map(&app.detector).is_none());
     }
 }
