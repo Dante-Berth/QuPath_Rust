@@ -336,7 +336,7 @@ date:
 cargo doc --workspace --no-deps --open
 ```
 
-That is 9,382 lines of doc comment across the eight crates, and it is where the
+That is 9,459 lines of doc comment across the eight crates' `src/`, and it is where the
 *why* lives — each crate's page opens with what QuPath does, what this does
 instead, and what the difference is worth. `qupath-filters` on the rectangle
 decomposition and `qupath-objects` on why the columns are `f32` are the two

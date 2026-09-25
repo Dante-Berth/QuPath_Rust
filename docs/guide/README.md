@@ -8,6 +8,7 @@ which answers a different question — why the code is the way it is:
 
 | File | Answers |
 | --- | --- |
+| [`docs/STATUS.md`](../STATUS.md) | Parity crate by crate, the bugs the fixtures caught, the speed breakdown |
 | [`docs/dev/MEMO.md`](../dev/MEMO.md) | What the project is, what is finished, what to distrust |
 | [`docs/dev/ROADMAP.md`](../dev/ROADMAP.md) | The plan, stage by stage |
 | [`DIVERGENCES.md`](../../DIVERGENCES.md) | Every place this deliberately differs from QuPath |

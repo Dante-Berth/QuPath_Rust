@@ -121,8 +121,8 @@ cargo run --release -p qupath-viewer --example window -- data/CMU-1.svs --cpu
 cargo test --workspace --no-fail-fast
 ```
 
-Tests needing the 177 MB slide **skip** when it is absent, and a skipped test
-in Rust reports `ok`. To make the skips visible:
+Tests needing a slide **skip** when it is absent — 14 want the 1.9 MB one and
+4 the 177 MB one — and a skipped test in Rust reports `ok`. To make the skips visible:
 
 ```bash
 QUPATH_RUST_REQUIRE_DATA=1 cargo test --workspace --no-fail-fast
