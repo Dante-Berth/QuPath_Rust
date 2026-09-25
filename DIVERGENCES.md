@@ -651,3 +651,35 @@ projects, and that failure would be silent until someone had such a file.
 **Status:** matches Gson's observable limit. If QuPath ever raises Gson's, this
 should follow it rather than be raised independently; the ceiling that matters
 is what QuPath can write, not what a stack can take.
+
+## D-011 — Reduced levels are read at integer positions, where QuPath's OpenSlide server shifts them
+
+**QuPath:** with both extensions installed, SVS goes to OpenSlide, not
+Bio-Formats — `OpenslideServerBuilder` bids 3.5 for an RGB file whose largest
+image occurs once, `BioFormatsServerBuilder` 3 for a TIFF that is not OME or
+ImageJ (read from both builders, not run with both on one classpath).
+`OpenslideImageServer.readTile` passes level-0 coordinates and a level index
+to `paintRegionARGB`, and OpenSlide maps them back with *its* level
+downsample, which averages the width and height ratios. That is not the
+integer QuPath built the request with — 4.000122 at level 1 of `CMU-1.svs`,
+4.000061 at level 1 and 16.003163 at level 2 of `CMU-1-JP2K-33005.svs` — so
+the level is resampled bilinearly at a sub-pixel offset that grows with x.
+
+**Here:** `qupath_slide` reads level pixels at their integer positions, the
+same as Bio-Formats — which is what D-004 and `SlideRegion.json` pin.
+
+**Measured** 2026-09-25, `CMU-1.svs` on tissue, against QuPath's
+`OpenslideImageServer.readRegion` (OpenSlide 4.0.1, a scratch recorder built
+like `OpenSlideLevels.java`, not committed): level 0 worst 1, mean 0.009;
+level 1 (shift 0.21 px) worst **41**, mean **4.51**; level 2 (shift 0.05 px)
+worst 6, mean 0.95. Modelling the shift — a bilinear sample of this reader's
+output at `x0 / ds_openslide` — brings level 1 to worst 2, mean 0.22, and
+level 2 to worst 2, mean 0.24. The JPEG 2000 file shows the same pattern;
+`docs/dev/FORMATS.md` has both tables.
+
+**Status:** not changed. Reading at integer positions is what the level
+table says and what Bio-Formats does; reproducing a fraction-of-a-pixel blur
+that depends on which reader QuPath happened to pick is not an improvement.
+It does mean a pixel fixture recorded through OpenSlide at a reduced level
+cannot be compared byte-for-byte, and any new format pinned against OpenSlide
+has to model this shift or compare at level 0.
