@@ -219,6 +219,40 @@ impl Overlay {
         min_screen_px: f32,
         out: &mut Vec<ScreenPoint>,
     ) -> usize {
+        self.project_into(view, min_screen_px, out, None)
+    }
+
+    /// [`Overlay::segments_into`], and which object each segment belongs to.
+    ///
+    /// `owners` is cleared and refilled with one row index per *segment* — so
+    /// `owners[k]` owns `out[2k]` to `out[2k + 1]` — which is what a caller
+    /// colouring each object differently looks its colour up by. It is the
+    /// per-object style input `docs/dev/VIEWER.md` §3.5b describes: the cull,
+    /// the projection and the order are this function's and are not repeated
+    /// by anyone who wants a colour per object, so the plain path and the
+    /// coloured one cannot disagree about which objects are on screen or where.
+    ///
+    /// A row index rather than a colour, so that the overlay stays ignorant of
+    /// measurements: what an index *means* is the caller's business.
+    pub fn owned_segments_into(
+        &self,
+        view: Viewport,
+        min_screen_px: f32,
+        out: &mut Vec<ScreenPoint>,
+        owners: &mut Vec<u32>,
+    ) -> usize {
+        owners.clear();
+        self.project_into(view, min_screen_px, out, Some(owners))
+    }
+
+    /// The one cull-and-project pass both public entry points share.
+    fn project_into(
+        &self,
+        view: Viewport,
+        min_screen_px: f32,
+        out: &mut Vec<ScreenPoint>,
+        mut owners: Option<&mut Vec<u32>>,
+    ) -> usize {
         out.clear();
         let (left, top, right, bottom) = view.bounds();
         // Hoisted out of the loop: `Viewport::to_screen` recomputes `bounds`
@@ -266,6 +300,13 @@ impl Overlay {
             {
                 out.push(project(from));
                 out.push(project(to));
+            }
+            if let Some(owners) = owners.as_deref_mut() {
+                // Cannot fail: an object reaching here has at least two
+                // vertices, and the arena holding them is bounded by `u32`
+                // in `push_level_ring`.
+                let row = u32::try_from(object).expect("row count exceeds u32");
+                owners.extend(std::iter::repeat_n(row, ring.len()));
             }
             drawn += 1;
         }
@@ -449,6 +490,35 @@ mod tests {
         // frame's segments to be drawn again.
         overlay.segments_into(view((9000.0, 9000.0), 1.0), 0.0, &mut out);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn each_segment_names_the_object_it_came_from() {
+        // The per-object style input. Three objects of different vertex counts,
+        // the middle one off screen, so an owner list that counted objects
+        // instead of rows — or one entry per object instead of per segment —
+        // gives the wrong colour to everything after the gap.
+        let mut overlay = Overlay::new();
+        overlay.push_level_ring(&square(0, 0), 1.0); // 4 segments
+        overlay.push_level_ring(&square(500, 500), 1.0); // culled
+        overlay.push_level_ring(&[[5, 5], [9, 5], [5, 9]], 1.0); // 3 segments
+
+        let (mut out, mut owners) = (Vec::new(), Vec::new());
+        let drawn = overlay.owned_segments_into(view((5.0, 5.0), 1.0), 0.0, &mut out, &mut owners);
+        assert_eq!(drawn, 2);
+        assert_eq!(owners, [0, 0, 0, 0, 2, 2, 2]);
+        assert_eq!(owners.len() * 2, out.len());
+
+        // The same segments as the plain path, in the same order: colouring
+        // must not change what is drawn, only in what.
+        let mut plain = Vec::new();
+        overlay.segments_into(view((5.0, 5.0), 1.0), 0.0, &mut plain);
+        assert_eq!(plain, out);
+
+        // And refilled rather than appended, for `out_is_reused_rather_than_grown`'s
+        // reason.
+        overlay.owned_segments_into(view((9000.0, 9000.0), 1.0), 0.0, &mut out, &mut owners);
+        assert!(owners.is_empty() && out.is_empty());
     }
 
     #[test]

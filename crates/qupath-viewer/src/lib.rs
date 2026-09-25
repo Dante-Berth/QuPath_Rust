@@ -38,6 +38,7 @@ pub(crate) mod json;
 pub mod loader;
 pub mod overlay;
 pub mod overview;
+pub mod pick;
 pub mod project;
 pub mod scalebar;
 pub mod viewport;
