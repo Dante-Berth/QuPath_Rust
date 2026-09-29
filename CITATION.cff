@@ -10,6 +10,7 @@ abstract: >-
 authors:
   - name: "Dante-Berth"
     alias: Dante-Berth
+    orcid: "https://orcid.org/0009-0000-7566-1979"
 repository-code: "https://github.com/Dante-Berth/QuPath_Rust"
 license: GPL-3.0-or-later
 type: software

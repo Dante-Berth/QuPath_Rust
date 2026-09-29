@@ -16,10 +16,10 @@ tags:
   - cell detection
   - software verification
 authors:
-  # TODO: real name, affiliation index and ORCID. The repository currently
+  # TODO: real name and affiliation (ORCID set). The repository currently
   # carries only the handle "Dante-Berth", which JOSS will not accept.
   - name: "TODO"
-    orcid: "0000-0000-0000-0000"
+    orcid: "0009-0000-7566-1979"
     affiliation: 1
 affiliations:
   - name: "TODO"
