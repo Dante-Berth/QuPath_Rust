@@ -7,3 +7,6 @@ preprint/*.blg
 preprint/*.log
 preprint/*.out
 preprint/figures/
+preprint/*.fdb_latexmk
+preprint/*.fls
+preprint/*.synctex.gz
